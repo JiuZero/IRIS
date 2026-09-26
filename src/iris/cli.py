@@ -181,6 +181,7 @@ def extract_rootfs(
 
     typer.echo(f"squashfs file   : {result.squashfs_path}")
     typer.echo(f"rootfs dir      : {result.rootfs_dir}")
+    typer.echo(f"extraction method: {result.extraction_method or 'unknown'}")
     typer.echo(f"ELF count       : {result.elf_count}")
     typer.echo(f"ELF arch census : {dict(result.elf_archs) or '<none>'}")
     typer.echo(f"arch (verified) : {result.arch_verified or '?'}")

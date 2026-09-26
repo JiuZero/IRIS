@@ -10,8 +10,8 @@
 |---|------|------|-----------|------|----------|-----|------|-------------|-------------|
 | 1 | DIR-868L fw revB 2.05b02 | D-Link | armel | zip | 1 | 37c8589b90d04c551170e6aaf175f231 | 13,581,763 (13.0M) | 是 (squashfs in zip) | 1,835,160 |
 | 2 | OpenWrt 24.10.0 Archer C7 v2 | TP-Link | mipseb | tplink | 2 | 8cc4338551646c861eccf4cd824b220e | 16,252,928 (15.5M) | 是 (squashfs) | 2,614,256 |
-| 3 | OpenWrt 24.10.0 WRT1200AC | Linksys | armel | uImage | 3 | ee094210b9b37c076cf5f576fa4bf17b | 11,010,048 (10.5M) | 是 (squashfs) | 6,557,696 |
-| 4 | OpenWrt 24.10.0 R7800 | Netgear | armel | netgear | 4 | 08cb2a3c35f341bde94c50cb9fff9087 | 9,699,457 (9.3M) | 是 (squashfs) | 4,460,672 |
+| 3 | OpenWrt 24.10.0 WRT1200AC | Linksys | armel | uImage | 3 | ee094210b9b37c076cf5f576fa4bf17b | 11,010,048 (10.5M) | 是 (UBI→squashfs) | 6,291,456 (UBI) |
+| 4 | OpenWrt 24.10.0 R7800 | Netgear | armel | netgear | 4 | 08cb2a3c35f341bde94c50cb9fff9087 | 9,699,457 (9.3M) | 是 (UBI→squashfs) | 4,194,432 (UBI) |
 | 5 | OpenWrt 24.10.0 x86/64 generic | OpenWrt | x64 | gzip→ext4 | 5 | 4915b25aae5a9857639592d447fe9f10 | 13,809,666 (13.2M) | 否 (ext4 非 squashfs) | — |
 | 6 | OpenWrt 24.10.0 Newifi D2 | D-Team | mipsel | uImage | 6 | a101c31cfe710bcbc4d2bb9eb489cb85 | 7,340,623 (7.0M) | 是 (squashfs) | 3,181,000 |
 
@@ -23,12 +23,12 @@
 |---|------|-------------|----------|--------|----------|-----------|
 | 1 | DIR-868L revB | squashfs (in zip) | 成功 | 265 | armel:265 | armel ✓ |
 | 2 | Archer C7 v2 | squashfs | 成功 | 287 | mipseb:287 | mipseb ✓ |
-| 3 | WRT1200AC | UBI | 跳过 (需 ubireader) | — | — | armel (arch_hint) |
-| 4 | R7800 | UBI | 跳过 (需 ubireader) | — | — | armel (arch_hint) |
+| 3 | WRT1200AC | UBI → squashfs | 成功 | 278 | armel:278 | armel ✓ |
+| 4 | R7800 | UBI → squashfs | 成功 | 300 | armel:300 | armel ✓ |
 | 5 | x86/64 generic | ext4 | 跳过 (非 squashfs) | — | — | x64 (arch_hint) |
 | 6 | Newifi D2 | squashfs | 成功 | 297 | mipsel:297 | mipsel ✓ |
 
-**说明**：3/6 固件 squashfs 提取 + ELF arch 验证成功（DIR-868L/Archer C7/Newifi D2）。2/6 为 UBI 格式（WRT1200AC/R7800），需集成 ubireader 提取 UBI volume 内的 squashfs（后续 commit）。1/6 为 ext4 格式（x86-64），非 squashfs 提取范围。提取流程：`firmware.py` 识别偏移 → 切片 squashfs → Docker alpine + unsquashfs 解压 → 遍历 ELF 验证架构。
+**说明**：5/6 固件 rootfs 提取 + ELF arch 验证成功。3 款直接 squashfs 提取（DIR-868L/Archer C7/Newifi D2），2 次 UBI volume 解析 + 内嵌 squashfs 提取（WRT1200AC/R7800）。1/6 为 ext4 格式（x86-64），非 squashfs 提取范围。UBI 提取流程：`firmware.py` 检测 UBI EC header（"UBI#"）→ `ubi.py` 解析 PEB/VID header → 按 vol_id+lnum 拼接 LEB → 切片 squashfs → Docker alpine + unsquashfs 解压 → 遍历 ELF 验证架构。
 
 ## FirmAE baseline 仿真结果
 
@@ -57,8 +57,8 @@
 
 - [x] 6 款 confirmed 固件下载落盘，MD5/大小已记录
 - [x] 每款在 IRIS db 中有 image 记录，arch 识别 6/6 正确（armel/mipseb/mipsel/x64）
-- [x] rootfs 提取 3/6 成功（squashfs 格式），ELF arch 验证全部一致
-- [x] UBI 格式检测 2/6（WRT1200AC/R7800），提取待 ubireader 集成
+- [x] rootfs 提取 5/6 成功（3 squashfs + 2 UBI），ELF arch 验证全部一致
+- [x] UBI volume 解析 + 内嵌 squashfs 提取 2/2 成功（WRT1200AC/R7800）
 - [ ] ≥ 5 次完成 FirmAE `-c` 仿真并记录 result
 - [ ] eval-log.md 失败模式 ≥ 3 类有真实日志指纹
 - [ ] （加分）1 款固件仿真成功且 curl Web 可达

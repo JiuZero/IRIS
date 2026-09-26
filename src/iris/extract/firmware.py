@@ -70,7 +70,7 @@ def identify_format(data: bytes) -> str:
         return "squashfs"
     if data[:4] == b"HDR0":
         return "trx"
-    if data[:4] == b"UBI!":
+    if data[:4] == b"UBI#":
         return "ubi"
     if data[:4] == b"\x01\x00\x00\x00" and b"OpenWrt" in data[:64]:
         return "tplink"
@@ -173,7 +173,7 @@ def analyze_firmware(data: bytes, arch_hint: str = "", depth: int = 0) -> Firmwa
     if info.squashfs:
         info.rootfs_offset = info.squashfs[0].offset
 
-    ubi_pos = data.find(b"UBI!")
+    ubi_pos = data.find(b"UBI#")
     if ubi_pos != -1:
         info.ubi_offset = ubi_pos
         if info.rootfs_offset is None:

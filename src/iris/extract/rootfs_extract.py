@@ -1,8 +1,9 @@
 """L1 rootfs extraction: squashfs slice + Docker unsquashfs + ELF arch verification.
 
 Workflow:
-  1. analyze_firmware() to find squashfs offset
-  2. slice squashfs from firmware binary
+  1. analyze_firmware() to find squashfs offset or UBI container
+  2a. squashfs path: slice squashfs from firmware binary
+  2b. UBI path: parse UBI volumes, extract embedded squashfs
   3. docker run alpine + unsquashfs to decompress
   4. walk extracted tree for ELF files, census archs
 """
@@ -17,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from iris.extract.firmware import FirmwareInfo, analyze_firmware
+from iris.extract.ubi import extract_squashfs_from_ubi
 
 
 @dataclass
@@ -27,6 +29,7 @@ class RootfsExtraction:
     elf_count: int = 0
     elf_archs: Counter = None  # type: ignore[assignment]
     arch_verified: str = ""
+    extraction_method: str = ""
 
     def __post_init__(self) -> None:
         if self.elf_archs is None:
@@ -119,7 +122,17 @@ def extract_rootfs(
     sqfs_path = scratch_dir / f"{stem}.squashfs"
     rootfs_dir = scratch_dir / f"{stem}-rootfs"
 
-    _slice_squashfs(data, fw_info.rootfs_offset, sqfs_path)
+    if fw_info.ubi_offset is not None:
+        sqfs_data = extract_squashfs_from_ubi(data, fw_info.ubi_offset)
+        if sqfs_data is None:
+            return result
+        sqfs_path.parent.mkdir(parents=True, exist_ok=True)
+        sqfs_path.write_bytes(sqfs_data)
+        result.extraction_method = "ubi"
+    else:
+        _slice_squashfs(data, fw_info.rootfs_offset, sqfs_path)
+        result.extraction_method = "squashfs"
+
     result.squashfs_path = sqfs_path
 
     _docker_unsquashfs(sqfs_path, rootfs_dir, image=docker_image)
