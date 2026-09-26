@@ -8,9 +8,9 @@ reported for scoring, and an O(n) prefix-depth scan (depth 0..2).
 
 import tarfile
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional
 
 UNIX_DIRS = frozenset(
     {"bin", "etc", "dev", "home", "lib", "mnt", "opt", "proc", "root", "sbin", "sys", "tmp", "usr", "var"}
@@ -41,7 +41,7 @@ def _normalize(name: str) -> str:
     return name.rstrip("/")
 
 
-def find_rootfs(paths: Iterable[str]) -> Optional[RootfsCandidate]:
+def find_rootfs(paths: Iterable[str]) -> RootfsCandidate | None:
     """Given relative entry names (tar members or directory walk), find the rootfs prefix."""
     hits_by_depth: list[Counter] = [Counter() for _ in range(MAX_PREFIX_DEPTH + 1)]
     total = 0
@@ -56,11 +56,11 @@ def find_rootfs(paths: Iterable[str]) -> Optional[RootfsCandidate]:
                 prefix = "/".join(parts[:depth])
                 hits_by_depth[depth][prefix] += 1
 
-    best_prefix, best_hits, best_depth = "", 0, 0
+    best_prefix, best_hits = "", 0
     for depth in range(MAX_PREFIX_DEPTH + 1):
         for prefix, hits in hits_by_depth[depth].items():
             if hits > best_hits:
-                best_prefix, best_hits, best_depth = prefix, hits, depth
+                best_prefix, best_hits = prefix, hits
 
     if best_hits == 0:
         return None
@@ -80,6 +80,6 @@ def find_rootfs(paths: Iterable[str]) -> Optional[RootfsCandidate]:
     )
 
 
-def find_rootfs_in_archive(archive: Path) -> Optional[RootfsCandidate]:
+def find_rootfs_in_archive(archive: Path) -> RootfsCandidate | None:
     with tarfile.open(archive, "r:*") as tf:
         return find_rootfs(tf.getnames())

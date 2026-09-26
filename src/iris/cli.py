@@ -42,12 +42,11 @@ def db_check() -> None:
 @extract_app.command("inspect")
 def extract_inspect(archive: Path) -> None:
     """Analyze a tar/tar.gz rootfs archive: rootfs candidate + arch census."""
+    import tarfile
     from collections import Counter
 
     from iris.extract.arch import identify_tar_members
     from iris.extract.rootfs import find_rootfs_in_archive
-
-    import tarfile
 
     if not archive.exists():
         typer.secho(f"archive not found: {archive}", fg=typer.colors.RED, err=True)
@@ -101,7 +100,6 @@ def extract_add(
             typer.echo(f"already registered: image id={existing.id}")
             raise typer.Exit()
         arch = ""
-        from collections import Counter
 
         from iris.extract.arch import identify_tar_members
         from iris.extract.rootfs import find_rootfs_in_archive

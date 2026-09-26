@@ -6,10 +6,8 @@ repair-action ledger.
 """
 
 from datetime import datetime
-from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint
-from sqlalchemy import JSON
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -29,16 +27,16 @@ class Image(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     filename: Mapped[str] = mapped_column(String, nullable=False)
-    description: Mapped[Optional[str]] = mapped_column(String)
+    description: Mapped[str | None] = mapped_column(String)
     brand_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("brand.id", ondelete="CASCADE"), default=1, nullable=False
     )
-    hash: Mapped[Optional[str]] = mapped_column(String, unique=True)
+    hash: Mapped[str | None] = mapped_column(String, unique=True)
     rootfs_extracted: Mapped[bool] = mapped_column(Boolean, default=False)
     kernel_extracted: Mapped[bool] = mapped_column(Boolean, default=False)
-    arch: Mapped[Optional[str]] = mapped_column(String)
-    kernel_version: Mapped[Optional[str]] = mapped_column(String)
-    target_type: Mapped[Optional[str]] = mapped_column(String)  # router / camera / ...
+    arch: Mapped[str | None] = mapped_column(String)
+    kernel_version: Mapped[str | None] = mapped_column(String)
+    target_type: Mapped[str | None] = mapped_column(String)  # router / camera / ...
 
 
 
@@ -62,9 +60,9 @@ class ObjectToImage(Base):
     )
     filename: Mapped[str] = mapped_column(String, nullable=False)
     regular_file: Mapped[bool] = mapped_column(Boolean, default=True)
-    permissions: Mapped[Optional[int]] = mapped_column(Integer)
-    uid: Mapped[Optional[int]] = mapped_column(Integer)
-    gid: Mapped[Optional[int]] = mapped_column(Integer)
+    permissions: Mapped[int | None] = mapped_column(Integer)
+    uid: Mapped[int | None] = mapped_column(Integer)
+    gid: Mapped[int | None] = mapped_column(Integer)
 
 
 class Product(Base):
@@ -78,16 +76,16 @@ class Product(Base):
         Integer, ForeignKey("image.id", ondelete="CASCADE"), nullable=False
     )
     url: Mapped[str] = mapped_column(String, nullable=False)
-    mib_hash: Mapped[Optional[str]] = mapped_column(String)
-    mib_url: Mapped[Optional[str]] = mapped_column(String)
-    sdk_hash: Mapped[Optional[str]] = mapped_column(String)
-    sdk_url: Mapped[Optional[str]] = mapped_column(String)
-    product: Mapped[Optional[str]] = mapped_column(String)
-    version: Mapped[Optional[str]] = mapped_column(String)
-    build: Mapped[Optional[str]] = mapped_column(String)
-    date: Mapped[Optional[datetime]] = mapped_column(DateTime)
-    mib_filename: Mapped[Optional[str]] = mapped_column(String)
-    sdk_filename: Mapped[Optional[str]] = mapped_column(String)
+    mib_hash: Mapped[str | None] = mapped_column(String)
+    mib_url: Mapped[str | None] = mapped_column(String)
+    sdk_hash: Mapped[str | None] = mapped_column(String)
+    sdk_url: Mapped[str | None] = mapped_column(String)
+    product: Mapped[str | None] = mapped_column(String)
+    version: Mapped[str | None] = mapped_column(String)
+    build: Mapped[str | None] = mapped_column(String)
+    date: Mapped[datetime | None] = mapped_column(DateTime)
+    mib_filename: Mapped[str | None] = mapped_column(String)
+    sdk_filename: Mapped[str | None] = mapped_column(String)
 
 
 class EmulationRun(Base):
@@ -98,16 +96,16 @@ class EmulationRun(Base):
         Integer, ForeignKey("image.id", ondelete="CASCADE"), nullable=False, index=True
     )
     mode: Mapped[str] = mapped_column(String, default="check")  # check / run / analyze
-    network_type: Mapped[Optional[str]] = mapped_column(String)  # normal / reload / bridge / ...
-    web_reachable: Mapped[Optional[bool]] = mapped_column(Boolean)
-    ping_reachable: Mapped[Optional[bool]] = mapped_column(Boolean)
-    ip: Mapped[Optional[str]] = mapped_column(String)
-    time_web: Mapped[Optional[int]] = mapped_column(Integer)
-    time_ping: Mapped[Optional[int]] = mapped_column(Integer)
-    result: Mapped[Optional[bool]] = mapped_column(Boolean)
-    result_kind: Mapped[Optional[str]] = mapped_column(String)  # structured failure category
-    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=datetime.utcnow)
-    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    network_type: Mapped[str | None] = mapped_column(String)  # normal / reload / bridge / ...
+    web_reachable: Mapped[bool | None] = mapped_column(Boolean)
+    ping_reachable: Mapped[bool | None] = mapped_column(Boolean)
+    ip: Mapped[str | None] = mapped_column(String)
+    time_web: Mapped[int | None] = mapped_column(Integer)
+    time_ping: Mapped[int | None] = mapped_column(Integer)
+    result: Mapped[bool | None] = mapped_column(Boolean)
+    result_kind: Mapped[str | None] = mapped_column(String)  # structured failure category
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, default=datetime.utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
 class FailureProfile(Base):
@@ -118,9 +116,9 @@ class FailureProfile(Base):
         Integer, ForeignKey("emulation_run.id", ondelete="CASCADE"), nullable=False, index=True
     )
     stage: Mapped[str] = mapped_column(String, nullable=False)  # extraction / arch / boot / nvram / network / service
-    signal: Mapped[Optional[str]] = mapped_column(String)
-    log_fingerprint: Mapped[Optional[str]] = mapped_column(String)
-    detail: Mapped[Optional[dict]] = mapped_column(JSON)
+    signal: Mapped[str | None] = mapped_column(String)
+    log_fingerprint: Mapped[str | None] = mapped_column(String)
+    detail: Mapped[dict | None] = mapped_column(JSON)
 
 
 class RepairAction(Base):
@@ -131,7 +129,7 @@ class RepairAction(Base):
         Integer, ForeignKey("emulation_run.id", ondelete="CASCADE"), nullable=False, index=True
     )
     source: Mapped[str] = mapped_column(String, nullable=False)  # rule / llm / manual
-    rule_id: Mapped[Optional[str]] = mapped_column(String)
-    evidence: Mapped[Optional[str]] = mapped_column(String)
+    rule_id: Mapped[str | None] = mapped_column(String)
+    evidence: Mapped[str | None] = mapped_column(String)
     applied: Mapped[bool] = mapped_column(Boolean, default=False)
     promoted: Mapped[bool] = mapped_column(Boolean, default=False)  # promoted to deterministic rule

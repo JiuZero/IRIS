@@ -29,5 +29,9 @@ where = ["src"]
 line-length = 100
 src = ["src", "tests"]
 
+[tool.ruff.lint]
+# B008: function calls in argument defaults are typer's standard pattern
+ignore = ["B008"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

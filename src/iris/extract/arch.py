@@ -9,7 +9,6 @@ import struct
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 ELF_MAGIC = b"\x7fELF"
 
@@ -31,7 +30,7 @@ class ArchInfo:
     firmae_supported: bool
 
 
-def _map_arch(e_machine: int, bits: int, endianness: str) -> Optional[str]:
+def _map_arch(e_machine: int, bits: int, endianness: str) -> str | None:
     if e_machine == EM_MIPS and bits == 32:
         return "mipseb" if endianness == "eb" else "mipsel"
     if e_machine == EM_MIPS and bits == 64:
@@ -49,7 +48,7 @@ def _map_arch(e_machine: int, bits: int, endianness: str) -> Optional[str]:
     return None
 
 
-def identify_elf(data: bytes) -> Optional[ArchInfo]:
+def identify_elf(data: bytes) -> ArchInfo | None:
     if len(data) < 20 or data[:4] != ELF_MAGIC:
         return None
     ei_class = data[4]
@@ -78,7 +77,7 @@ def identify_elf(data: bytes) -> Optional[ArchInfo]:
     )
 
 
-def identify_file(path: Path) -> Optional[ArchInfo]:
+def identify_file(path: Path) -> ArchInfo | None:
     with open(path, "rb") as fh:
         return identify_elf(fh.read(20))
 

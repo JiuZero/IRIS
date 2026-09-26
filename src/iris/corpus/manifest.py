@@ -3,7 +3,7 @@
 import hashlib
 import urllib.request
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 import typer
 from pydantic import BaseModel, Field
@@ -18,8 +18,8 @@ class FirmwareEntry(BaseModel):
     version: str = ""
     url: str
     target_type: Literal["router", "camera", "other"] = "router"
-    arch_hint: Optional[str] = None  # expected arch; verified by L1 after download
-    sha256: Optional[str] = None
+    arch_hint: str | None = None  # expected arch; verified by L1 after download
+    sha256: str | None = None
     status: Literal["confirmed", "pending"] = "pending"
     source: str = ""
     notes: str = ""
