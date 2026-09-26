@@ -112,6 +112,7 @@ def extract_add(
     version: str = typer.Option("", help="firmware version"),
     target_type: str = typer.Option("router", help="router / camera / ..."),
     arch_hint: str = typer.Option("", help="arch hint for ambiguous cases (mipseb/mipsel/armel/x64)"),
+    verify: bool = typer.Option(True, help="extract rootfs and persist the ELF-verified arch"),
 ) -> None:
     """Register a firmware image into the metadata database."""
     from iris.db.models import Brand, Image
@@ -148,11 +149,24 @@ def extract_add(
             data = archive.read_bytes()
             fw_info = analyze_firmware(data, arch_hint=arch_hint)
             arch = fw_info.arch
-            rootfs_ok = fw_info.rootfs_offset is not None
+            rootfs_ok = fw_info.rootfs_offset is not None or fw_info.tendaw is not None
             typer.secho(
                 f"  (raw firmware {fw_info.format}; arch={arch or '?'} rootfs={rootfs_ok})",
                 fg=typer.colors.YELLOW,
             )
+            if verify and rootfs_ok:
+                from iris.extract.rootfs_extract import extract_rootfs as do_extract
+
+                try:
+                    ext = do_extract(archive, settings.scratch_dir, arch_hint=arch_hint)
+                    if ext.arch_verified:
+                        arch = ext.arch_verified
+                        typer.secho(
+                            f"  (ELF census: {ext.elf_count} binaries -> {arch})",
+                            fg=typer.colors.GREEN,
+                        )
+                except Exception as exc:
+                    typer.secho(f"  (arch verify skipped: {exc})", fg=typer.colors.YELLOW)
         image = Image(
             filename=archive.name,
             description=f"{product} {version}".strip() or None,
