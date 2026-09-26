@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from iris.config import get_settings
@@ -152,3 +152,103 @@ async def stop_emulation_api(iid: int) -> dict:
     ok = stop_emulation(iid)
     _active_emulations.pop(iid, None)
     return {"stopped": ok, "iid": iid}
+
+class PipelineResponse(BaseModel):
+    iid: int
+    firmware_name: str
+    arch: str
+    rootfs_path: str
+    success: bool
+    web_ok: bool
+    web_url: str
+    duration_sec: float
+    error: str
+
+
+@app.post("/api/v1/pipeline", response_model=PipelineResponse)
+async def pipeline(
+    firmware: UploadFile = File(..., description="Firmware binary file"),
+    arch: str = "",
+    port: int = 8080,
+    timeout: int = 120,
+) -> PipelineResponse:
+    """End-to-end pipeline: upload firmware → extract rootfs → emulate → web access."""
+    import hashlib
+
+    from iris.extract.firmware import analyze_firmware
+    from iris.extract.rootfs_extract import extract_rootfs
+
+    settings = get_settings()
+    scratch = settings.scratch_dir
+
+    content = await firmware.read()
+    fw_hash = hashlib.md5(content).hexdigest()[:8]
+    iid = int(fw_hash, 16) % 10000
+
+    fw_path = scratch / f"upload-{iid}-{firmware.filename}"
+    fw_path.parent.mkdir(parents=True, exist_ok=True)
+    fw_path.write_bytes(content)
+
+    info = analyze_firmware(content)
+    detected_arch = arch or info.arch or ""
+
+    if not detected_arch or detected_arch not in ("mipsel", "mipseb", "armel"):
+        return PipelineResponse(
+            iid=iid,
+            firmware_name=firmware.filename or "unknown",
+            arch=detected_arch or "unknown",
+            rootfs_path="",
+            success=False,
+            web_ok=False,
+            web_url="-",
+            duration_sec=0.0,
+            error=f"unsupported or undetected architecture: {detected_arch or 'unknown'}",
+        )
+
+    extract_rootfs(fw_path, scratch, arch_hint=detected_arch)
+    rootfs_dir = scratch / f"{fw_path.stem}-rootfs"
+
+    if not rootfs_dir.exists():
+        return PipelineResponse(
+            iid=iid,
+            firmware_name=firmware.filename or "unknown",
+            arch=detected_arch,
+            rootfs_path="",
+            success=False,
+            web_ok=False,
+            web_url="-",
+            duration_sec=0.0,
+            error="rootfs extraction failed: no rootfs directory created",
+        )
+
+    result = await asyncio.to_thread(
+        emulate_firmware,
+        rootfs_dir=rootfs_dir,
+        arch=detected_arch,
+        iid=iid,
+        scratch_dir=scratch,
+        host_port=port,
+        timeout_sec=timeout,
+    )
+
+    _active_emulations[iid] = {
+        "iid": iid,
+        "arch": detected_arch,
+        "success": result.success,
+        "web_ok": result.web_ok,
+        "web_url": result.web_url,
+        "container_id": result.container_id,
+        "started_at": time.time(),
+    }
+
+    return PipelineResponse(
+        iid=iid,
+        firmware_name=firmware.filename or "unknown",
+        arch=detected_arch,
+        rootfs_path=str(rootfs_dir),
+        success=result.success,
+        web_ok=result.web_ok,
+        web_url=result.web_url or "-",
+        duration_sec=result.duration_sec,
+        error=result.error or "",
+    )
