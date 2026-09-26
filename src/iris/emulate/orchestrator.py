@@ -125,7 +125,7 @@ def emulate_firmware(
     print(f"Starting emulation container {container_name}...")
     create_cmd = [
         "docker", "create", "--privileged",
-        "-p", f"{host_port}:8080",
+        "-p", f"{host_port}:{host_port}",
         "--name", container_name,
         docker_image, "sleep", "3600",
     ]
@@ -166,7 +166,7 @@ def emulate_firmware(
 
     print(f"Starting QEMU (port {host_port} -> guest:80)...")
     qemu_result = _run(
-        ["docker", "exec", "-d", container_name, "bash", "/work/scripts/run_qemu.sh", str(iid), arch, "8080"],
+        ["docker", "exec", "-d", container_name, "bash", "/work/scripts/run_qemu.sh", str(iid), arch, str(host_port)],
         timeout=15,
     )
     if qemu_result.returncode != 0:
@@ -177,9 +177,35 @@ def emulate_firmware(
 
     print(f"Waiting for firmware to boot (timeout {timeout_sec}s)...")
     boot_deadline = time.time() + timeout_sec
+    guest_ip = "192.168.1.1"
+    socat_updated = False
     while time.time() < boot_deadline:
         time.sleep(5)
         elapsed = int(time.time() - start_time)
+
+        if not socat_updated:
+            log_cmd = ["docker", "exec", container_name, "grep", "-a", "inet_insert_ifa",
+                       f"/work/scratch/{iid}/qemu.serial.log"]
+            log_res = subprocess.run(log_cmd, capture_output=True, text=True, env=_env(), timeout=10, check=False)
+            for line in log_res.stdout.splitlines():
+                if "device:lo" not in line and "ifa:0x" in line:
+                    import re
+                    m = re.search(r"ifa:0x([0-9a-f]+)", line)
+                    if m:
+                        raw = int(m.group(1), 16)
+                        if arch in ("mipsel", "armel"):
+                            ip = f"{raw & 0xFF}.{(raw >> 8) & 0xFF}.{(raw >> 16) & 0xFF}.{(raw >> 24) & 0xFF}"
+                        else:
+                            ip = f"{(raw >> 24) & 0xFF}.{(raw >> 16) & 0xFF}.{(raw >> 8) & 0xFF}.{raw & 0xFF}"
+                        if ip != guest_ip and not ip.startswith("127."):
+                            guest_ip = ip
+                            print(f"  Detected guest IP: {guest_ip}")
+                            _run(["docker", "exec", container_name, "pkill", "-f", "socat.*TCP"], timeout=5)
+                            _run(["docker", "exec", "-d", container_name, "socat",
+                                  f"TCP-LISTEN:{host_port},reuseaddr,fork", f"TCP:{guest_ip}:80"], timeout=5)
+                            socat_updated = True
+                            break
+
         check_result = subprocess.run(
             ["docker", "exec", container_name, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
              "--max-time", "3", f"http://127.0.0.1:{host_port}"],

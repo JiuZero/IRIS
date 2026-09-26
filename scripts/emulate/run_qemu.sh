@@ -4,6 +4,7 @@ set -e
 IID=$1
 ARCH=$2
 HOST_PORT=${3:-8080}
+GUEST_IP=${4:-192.168.1.1}
 WORK_DIR=/work/scratch/${IID}
 IMAGE=${WORK_DIR}/image.raw
 BINARIES=/work/binaries
@@ -23,8 +24,14 @@ QEMU_NET=""
 # Setup TAP networking for guest-to-host connectivity
 TAP_IFACE="tap${IID}"
 BR_IFACE="br${IID}"
-GUEST_IP="192.168.1.1"
-HOST_IP="192.168.1.254"
+GUEST_IP="${GUEST_IP}"
+HOST_IP=$(echo "${GUEST_IP}" | awk -F. '{print $1"."$2"."$3"."$4-1}')
+# If last octet is 0 or 1, use .254 as host IP
+LAST_OCTET=$(echo "${GUEST_IP}" | awk -F. '{print $4}')
+if [ "${LAST_OCTET}" -le 1 ]; then
+    HOST_IP=$(echo "${GUEST_IP}" | awk -F. '{print $1"."$2"."$3".254"}')
+fi
+NET_PREFIX=$(echo "${GUEST_IP}" | awk -F. '{print $1"."$2"."$3}')
 
 # Clean up any existing interfaces
 ip link set "${TAP_IFACE}" down 2>/dev/null || true
@@ -37,9 +44,15 @@ ip link delete "${BR_IFACE}" type bridge 2>/dev/null || true
 tunctl -t "${TAP_IFACE}" -u root
 brctl addbr "${BR_IFACE}"
 brctl addif "${BR_IFACE}" "${TAP_IFACE}"
-ip addr add "${HOST_IP}/24" dev "${BR_IFACE}"
+ip addr add "${HOST_IP}/16" dev "${BR_IFACE}"
 ip link set "${BR_IFACE}" up
 ip link set "${TAP_IFACE}" up
+
+# Create VLAN 1 interface on TAP for firmware that uses eth0.1
+VLAN_IFACE="${TAP_IFACE}.1"
+ip link add link "${TAP_IFACE}" name "${VLAN_IFACE}" type vlan id 1 2>/dev/null || true
+ip link set "${VLAN_IFACE}" up 2>/dev/null || true
+brctl addif "${BR_IFACE}" "${VLAN_IFACE}" 2>/dev/null || true
 
 echo "Network: bridge=${BR_IFACE} tap=${TAP_IFACE} host=${HOST_IP} guest=${GUEST_IP}"
 
