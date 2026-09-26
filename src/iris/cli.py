@@ -153,6 +153,42 @@ def extract_add(
         typer.echo(f"registered image id={image.id} brand={brand} arch={arch or '?'} md5={md5[:12]}")
 
 
+@extract_app.command("rootfs")
+def extract_rootfs(
+    firmware: Path,
+    arch_hint: str = typer.Option("", help="arch hint (mipseb/mipsel/armel/x64)"),
+) -> None:
+    """Extract squashfs rootfs from a firmware image and verify arch via ELF census."""
+    from iris.extract.rootfs_extract import extract_rootfs as do_extract
+
+    if not firmware.exists():
+        typer.secho(f"firmware not found: {firmware}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    settings = get_settings()
+    scratch = settings.scratch_dir
+    typer.echo(f"extracting rootfs from {firmware.name} ...")
+    result = do_extract(firmware, scratch, arch_hint=arch_hint)
+
+    fi = result.firmware_info
+    typer.echo(f"format          : {fi.format}")
+    typer.echo(f"arch (inferred) : {fi.arch or '?'}")
+    typer.echo(f"rootfs offset   : {fi.rootfs_offset if fi.rootfs_offset is not None else '<not found>'}")
+
+    if result.rootfs_dir is None:
+        typer.secho("no squashfs rootfs found; nothing to extract", fg=typer.colors.YELLOW)
+        raise typer.Exit(code=2)
+
+    typer.echo(f"squashfs file   : {result.squashfs_path}")
+    typer.echo(f"rootfs dir      : {result.rootfs_dir}")
+    typer.echo(f"ELF count       : {result.elf_count}")
+    typer.echo(f"ELF arch census : {dict(result.elf_archs) or '<none>'}")
+    typer.echo(f"arch (verified) : {result.arch_verified or '?'}")
+    if fi.arch and result.arch_verified:
+        match = "OK" if fi.arch == result.arch_verified else "MISMATCH"
+        typer.echo(f"arch check      : {fi.arch} vs {result.arch_verified} -> {match}")
+
+
 @corpus_app.command("list")
 def corpus_list(
     manifest: Path = typer.Argument(Path("iris-home/corpus/m0-baseline.toml")),

@@ -43,7 +43,10 @@ def _make_elf(machine: int, ei_data: int = 1) -> bytes:
 
 def _make_squashfs(endian: str = "le") -> bytes:
     magic = b"hsqs" if endian == "le" else b"sqsh"
-    return magic + b"\x00" * 128
+    header = bytearray(magic + b"\x00" * 128)
+    e = "<" if endian == "le" else ">"
+    struct.pack_into(f"{e}Q", header, 40, 64)
+    return bytes(header)
 
 
 class TestIdentifyFormat:

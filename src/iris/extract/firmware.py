@@ -54,6 +54,7 @@ class FirmwareInfo:
     elf_archs: Counter = field(default_factory=Counter)
     arch: str = ""
     rootfs_offset: int | None = None
+    ubi_offset: int | None = None
 
 
 def identify_format(data: bytes) -> str:
@@ -69,6 +70,8 @@ def identify_format(data: bytes) -> str:
         return "squashfs"
     if data[:4] == b"HDR0":
         return "trx"
+    if data[:4] == b"UBI!":
+        return "ubi"
     if data[:4] == b"\x01\x00\x00\x00" and b"OpenWrt" in data[:64]:
         return "tplink"
     if data[:7] == b"device:":
@@ -118,7 +121,12 @@ def find_squashfs(data: bytes, max_results: int = 5) -> list[SquashfsInfo]:
             pos = data.find(magic, pos)
             if pos == -1:
                 break
-            results.append(SquashfsInfo(offset=pos, endian=endian, comp=comp))
+            if pos + 48 < len(data):
+                e = "<" if endian == "le" else ">"
+                bytes_used = struct.unpack(f"{e}Q", data[pos + 40 : pos + 48])[0]
+                remaining = len(data) - pos
+                if 0 < bytes_used <= remaining:
+                    results.append(SquashfsInfo(offset=pos, endian=endian, comp=comp))
             pos += 1
     results.sort(key=lambda x: x.offset)
     return results[:max_results]
@@ -164,6 +172,12 @@ def analyze_firmware(data: bytes, arch_hint: str = "", depth: int = 0) -> Firmwa
     info.squashfs = find_squashfs(data)
     if info.squashfs:
         info.rootfs_offset = info.squashfs[0].offset
+
+    ubi_pos = data.find(b"UBI!")
+    if ubi_pos != -1:
+        info.ubi_offset = ubi_pos
+        if info.rootfs_offset is None:
+            info.rootfs_offset = ubi_pos
 
     info.elf_archs = find_elf_archs(data)
 
