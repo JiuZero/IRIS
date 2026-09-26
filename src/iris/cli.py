@@ -127,6 +127,7 @@ def extract_add(
         )
         session.add(image)
         session.flush()
+        session.commit()
         typer.echo(f"registered image id={image.id} brand={brand} arch={arch or '?'} md5={md5[:12]}")
 
 
