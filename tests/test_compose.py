@@ -65,7 +65,17 @@ class TestComposeScript:
             assert f"jefferson -d /work/{stem} -f /in/{stem}.jffs2" in s
             target = "$BASE" if mount == "/" else f"$BASE{mount}"
             assert f"cp -a /work/{stem}/. {target}/" in s
-        assert s.endswith("tar -czf /work/rootfs.tar.gz -C $BASE .")
+        assert "tar -czf /work/rootfs.tar.gz -C $BASE ." in s
+
+    def test_script_cleans_intermediate_trees(self, parts_dir, captured, tmp_path):
+        mounts = build_parts_mounts(parts_dir)
+        _compose_rootfs_from_slices(parts_dir, mounts, tmp_path / "c.tar.gz")
+        s = captured["script"]
+        cleanup = [line for line in s.split("; ") if line.startswith("for d in rootfs")]
+        assert len(cleanup) == 1
+        for stem, _m in mounts:
+            assert stem in cleanup[0]
+        assert "do rm -rf /work/$d; done" in s
 
     def test_shadow_mount_fix_targets_only_non_root_mounts(self, parts_dir, captured, tmp_path):
         mounts = build_parts_mounts(parts_dir)

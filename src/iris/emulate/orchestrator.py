@@ -157,11 +157,17 @@ def _compose_rootfs_from_slices(
         env_lines.append(f"echo {b64} | base64 -d > $BASE/firmadyne/iris_rules.sh")
         env_lines.append("chmod +x $BASE/firmadyne/iris_rules.sh")
     env_lines.append("tar -czf /work/rootfs.tar.gz -C $BASE .")
+    # the /work bind mount is the host scratch dir; drop our intermediate trees
+    stems = " ".join(stem for stem, _m in partition_mounts)
+    env_lines.append("for d in rootfs " + stems + "; do rm -rf /work/$d; done")
     script = "; ".join(env_lines)
 
     tarball_path.parent.mkdir(parents=True, exist_ok=True)
     volumes = [(str(slices_dir.resolve()), "/in:ro"), (str(tarball_path.parent.resolve()), "/work")]
-    return _docker_produce(volumes, image, script, "/work/rootfs.tar.gz", tarball_path)
+    produced = _docker_produce(volumes, image, script, "/work/rootfs.tar.gz", tarball_path)
+    if tarball_path.name != "rootfs.tar.gz":
+        (tarball_path.parent / "rootfs.tar.gz").unlink(missing_ok=True)
+    return produced
 
 
 def build_parts_mounts(parts_dir: Path) -> list[tuple[str, str]]:
