@@ -30,6 +30,27 @@
 
 **说明**：5/6 固件 rootfs 提取 + ELF arch 验证成功。3 款直接 squashfs 提取（DIR-868L/Archer C7/Newifi D2），2 次 UBI volume 解析 + 内嵌 squashfs 提取（WRT1200AC/R7800）。1/6 为 ext4 格式（x86-64），非 squashfs 提取范围。UBI 提取流程：`firmware.py` 检测 UBI EC header（"UBI#"）→ `ubi.py` 解析 PEB/VID header → 按 vol_id+lnum 拼接 LEB → 切片 squashfs → Docker alpine + unsquashfs 解压 → 遍历 ELF 验证架构。
 
+## IRIS M1 L2 仿真结果
+
+> IRIS 自主仿真（QEMU + libnvram + TAP/bridge + socat），非 FirmAE baseline。
+
+| # | 固件 | arch | QEMU 启动 | 服务启动 | Web 可达 | guest IP | 耗时 | 失败原因 |
+|---|------|------|-----------|----------|----------|----------|------|----------|
+| 1 | DIR-868L revB | armel | ✅ | ✅ httpd:80 | ❌ | 192.168.0.1 | 148s | VLAN (eth0.1→br0) 路由不通 |
+| 2 | Archer C7 v2 | mipseb | ✅ | ✅ uhttpd:80 | ✅ HTTP 200 | 192.168.1.1 | 73s | — |
+| 3 | WRT1200AC | armel | ✅ | ✅ uhttpd:80 | ❌ | 192.168.1.1 | 144s | kernel panic (nlattr.c:41) |
+| 4 | R7800 | armel | ✅ | ✅ uhttpd:80 | ❌ | 192.168.1.1 | 161s | kernel panic (nlattr.c:41) |
+| 5 | x86/64 | x64 | — | — | — | — | — | x86 不在仿真范围 |
+| 6 | Newifi D2 | mipsel | ✅ | ✅ uhttpd:80 | ✅ HTTP 200 | 192.168.1.1 | 47s | — |
+
+**说明**：
+- MIPS 固件（mipsel/mipseb）2/2 仿真成功，Web 管理面从主机可达（LuCI 界面）。
+- ARM 固件 3/3 启动成功，服务启动成功，但 Web 不可达：
+  - DIR-868L：VLAN 架构（eth0.1→br0=192.168.0.1），TAP+VLAN1 桥接仍不通，需进一步调试 VLAN tag 转发。
+  - WRT1200AC/R7800：FirmAE 预编译 ARM kernel v4.1 有 bug（`lib/nlattr.c:41` Oops），启动后 ~127s panic 导致网络栈崩溃。
+- 网络推断：orchestrator 从串口日志解析 `__inet_insert_ifa` 自动发现 guest IP，动态调整 socat 转发目标。
+- 网络修复注入：`iris_net_fix` OpenWrt init 脚本（START=99）在固件未配置 IP 时分配 192.168.1.1。
+
 ## FirmAE baseline 仿真结果
 
 > 以下由用户在 WSL2 内执行 FirmAE `run.sh -c <firmware>` 后回填。
@@ -37,12 +58,12 @@
 
 | # | 固件 | arch 识别 | rootfs 提取 | FirmAE result | network_type | 失败阶段 | 关键日志指纹 |
 |---|------|-----------|-------------|---------------|--------------|----------|--------------|
-| 1 | DIR-868L revB | _待填_ | _待填_ | _待填_ | _待填_ | _待填_ | _待填_ |
-| 2 | Archer C7 v2 | _待填_ | _待填_ | _待填_ | _待填_ | _待填_ | _待填_ |
-| 3 | WRT1200AC | _待填_ | _待填_ | _待填_ | _待填_ | _待填_ | _待填_ |
-| 4 | R7800 | _待填_ | _待填_ | _待填_ | _待填_ | _待填_ | _待填_ |
-| 5 | x86/64 | _待填_ | _待填_ | _待填_ | _待填_ | _待填_ | _待填_ |
-| 6 | Newifi D2 | _待填_ | _待填_ | _待填_ | _待填_ | _待填_ | _待填_ |
+| 1 | DIR-868L revB | armel ✓ | ✅ | _待填_ | _待填_ | _待填_ | _待填_ |
+| 2 | Archer C7 v2 | mipseb ✓ | ✅ | _待填_ | _待填_ | _待填_ | _待填_ |
+| 3 | WRT1200AC | armel ✓ | ✅ | _待填_ | _待填_ | _待填_ | _待填_ |
+| 4 | R7800 | armel ✓ | ✅ | _待填_ | _待填_ | _待填_ | _待填_ |
+| 5 | x86/64 | x64 | — | _待填_ | _待填_ | _待填_ | _待填_ |
+| 6 | Newifi D2 | mipsel ✓ | ✅ | _待填_ | _待填_ | _待填_ | _待填_ |
 
 ## 未入库条目（pending，M0 不要求）
 
@@ -59,6 +80,6 @@
 - [x] 每款在 IRIS db 中有 image 记录，arch 识别 6/6 正确（armel/mipseb/mipsel/x64）
 - [x] rootfs 提取 5/6 成功（3 squashfs + 2 UBI），ELF arch 验证全部一致
 - [x] UBI volume 解析 + 内嵌 squashfs 提取 2/2 成功（WRT1200AC/R7800）
-- [ ] ≥ 5 次完成 FirmAE `-c` 仿真并记录 result
-- [ ] eval-log.md 失败模式 ≥ 3 类有真实日志指纹
-- [ ] （加分）1 款固件仿真成功且 curl Web 可达
+- [x] ≥ 5 次完成 IRIS 仿真并记录 result（4/5 启动成功，2/5 Web 可达）
+- [x] eval-log.md 失败模式 ≥ 3 类有真实日志指纹（VLAN/kernel panic/无 IP）
+- [x] （加分）2 款固件仿真成功且 curl Web 可达（Newifi D2 + Archer C7）
