@@ -7,6 +7,8 @@ import io
 import struct
 import zipfile
 
+import pytest
+
 from iris.extract.firmware import (
     UIMAGE_MAGIC,
     analyze_firmware,
@@ -175,14 +177,13 @@ class TestAnalyzeFirmware:
         assert info.arch == "mipsel"
         assert info.uimage is not None
 
-    def test_zip_wrapped_squashfs(self):
+    def test_zip_input_rejected(self):
         sq = _make_squashfs("le")
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w") as zf:
             zf.writestr("rootfs", sq)
-        info = analyze_firmware(buf.getvalue(), arch_hint="mipsel")
-        assert info.format == "zip"
-        assert len(info.squashfs) >= 1
+        with pytest.raises(ValueError, match="zip containers are not accepted"):
+            analyze_firmware(buf.getvalue(), arch_hint="mipsel")
 
     def test_raw_with_hint(self):
         info = analyze_firmware(b"\x00" * 128, arch_hint="armel")

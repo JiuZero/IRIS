@@ -1,19 +1,20 @@
 """L1 firmware format identification and architecture inference.
 
 Pure-Python analysis of raw firmware images: uImage header parsing,
-squashfs detection, ELF census, and gzip/zip recursive decompression.
+squashfs detection, ELF census, and gzip recursive decompression.
 No external binwalk/unblob dependency required for the common cases
-covered in M1 (OpenWrt uImage/squashfs, vendor zip/gzip wrappers).
+covered in M1 (OpenWrt uImage/squashfs, gzip-wrapped firmware, Tenda
+bin wrappers). Outer zip containers are NOT parsed — their internal
+directory layout is unpredictable, so the upgrade package must be
+unpacked by the caller and the firmware .bin fed in directly.
 """
 
 from __future__ import annotations
 
 import bz2
 import gzip
-import io
 import lzma
 import struct
-import zipfile
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -199,6 +200,12 @@ def analyze_firmware(data: bytes, arch_hint: str = "", depth: int = 0) -> Firmwa
         return FirmwareInfo(format="raw", arch=arch_hint)
 
     fmt = identify_format(data)
+    if fmt == "zip":
+        raise ValueError(
+            "zip containers are not accepted as input (their internal layout is "
+            "unpredictable); unpack the upgrade package locally and feed the "
+            "firmware .bin file to IRIS"
+        )
     info = FirmwareInfo(format=fmt)
 
     if fmt == "uimage":
@@ -265,22 +272,6 @@ def analyze_firmware(data: bytes, arch_hint: str = "", depth: int = 0) -> Firmwa
             if sub.uimage:
                 info.uimage = sub.uimage
         except OSError:
-            pass
-    elif fmt == "zip" and depth < 3:
-        try:
-            zf = zipfile.ZipFile(io.BytesIO(data))
-            for name in zf.namelist():
-                if name.endswith("/"):
-                    continue
-                file_data = zf.read(name)
-                sub = analyze_firmware(file_data, arch_hint, depth + 1)
-                if sub.squashfs:
-                    info.squashfs = sub.squashfs
-                    info.rootfs_offset = sub.rootfs_offset
-                if sub.uimage:
-                    info.uimage = sub.uimage
-                info.elf_archs.update(sub.elf_archs)
-        except (zipfile.BadZipFile, OSError):
             pass
 
     info.arch = _infer_arch(info, arch_hint)

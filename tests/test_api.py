@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import io
+import zipfile
+
 from fastapi.testclient import TestClient
 
 from iris.api.server import app
@@ -62,3 +65,15 @@ def test_emulate_rootfs_not_found() -> None:
 def test_openapi_docs() -> None:
     resp = client.get("/docs")
     assert resp.status_code == 200
+
+
+def test_pipeline_rejects_zip() -> None:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("rootfs.bin", b"\x00" * 64)
+    resp = client.post(
+        "/api/v1/pipeline",
+        files={"firmware": ("fw.zip", buf.getvalue(), "application/zip")},
+    )
+    assert resp.status_code == 415
+    assert ".bin" in resp.json()["detail"]

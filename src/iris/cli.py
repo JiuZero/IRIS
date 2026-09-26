@@ -24,6 +24,22 @@ app.add_typer(serve_app, name="serve")
 log = get_logger(__name__)
 
 
+def _reject_zip(path: Path) -> None:
+    """Outer zip packages have unpredictable layout; require the inner .bin."""
+    is_zip = path.suffix.lower() == ".zip"
+    if not is_zip:
+        with path.open("rb") as f:
+            is_zip = f.read(4) == b"PK\x03\x04"
+    if is_zip:
+        typer.secho(
+            f"refusing zip container: {path.name} — unpack the upgrade package locally "
+            "and pass the firmware .bin file",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+
 @db_app.command("init")
 def db_init() -> None:
     """Create all IRIS metadata tables."""
@@ -59,6 +75,7 @@ def extract_inspect(
     if not archive.exists():
         typer.secho(f"archive not found: {archive}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+    _reject_zip(archive)
 
     if tarfile.is_tarfile(archive):
         cand = find_rootfs_in_archive(archive)
@@ -119,6 +136,7 @@ def extract_add(
     """Register a firmware image into the metadata database."""
     from iris.db.models import Brand, Image
 
+    _reject_zip(archive)
     settings = get_settings()
     engine = get_engine(settings.database_url)
     md5 = hashlib.md5(archive.read_bytes()).hexdigest()
@@ -195,6 +213,7 @@ def extract_rootfs(
     if not firmware.exists():
         typer.secho(f"firmware not found: {firmware}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+    _reject_zip(firmware)
 
     settings = get_settings()
     scratch = settings.scratch_dir

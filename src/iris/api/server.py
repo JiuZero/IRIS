@@ -182,6 +182,13 @@ async def pipeline(
     scratch = settings.scratch_dir
 
     content = await firmware.read()
+    name = (firmware.filename or "").lower()
+    if name.endswith(".zip") or content[:4] == b"PK\x03\x04":
+        raise HTTPException(
+            status_code=415,
+            detail="zip containers are not accepted (unpredictable internal layout); "
+            "unpack the upgrade package and upload the firmware .bin",
+        )
     fw_hash = hashlib.md5(content).hexdigest()[:8]
     iid = int(fw_hash, 16) % 10000
 
