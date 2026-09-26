@@ -83,3 +83,60 @@ class TestApplyRules:
         reports = apply_rules(tmp_path, load_rules(PROJECT_RULES), dry_run=True)
         matched = {r.rule_id for r in reports if r.matched}
         assert matched == {"dev-extended-nodes"}
+
+
+class TestEngineHardening:
+    def test_crlf_and_lf_endings_preserved(self, tmp_path):
+        from iris.rules.engine import Rule, apply_rules
+
+        root = tmp_path / "rf"
+        root.mkdir()
+        (root / "etc").mkdir()
+        (root / "etc" / "crlf.sh").write_bytes(b"#!/bin/sh\r\necho AA\r\n")
+        (root / "etc" / "lf.sh").write_bytes(b"#!/bin/sh\necho AA\n")
+        rule = Rule(
+            id="t", description="d", stage="boot",
+            detect=[{"file_glob": "etc/*"}],
+            actions=[{"edit": {"regex": "AA", "replacement": "BB", "within": "etc/*"}}],
+        )
+        apply_rules(root, [rule], dry_run=False)
+        assert (root / "etc" / "crlf.sh").read_bytes() == b"#!/bin/sh\r\necho BB\r\n"
+        assert (root / "etc" / "lf.sh").read_bytes() == b"#!/bin/sh\necho BB\n"
+
+    def test_dir_nonempty_scopes_files_to_dir(self, tmp_path):
+        from iris.rules.engine import Rule, apply_rules
+
+        root = tmp_path / "rf"
+        (root / "opt" / "app").mkdir(parents=True)
+        (root / "etc").mkdir()
+        (root / "opt" / "app" / "in.sh").write_text("PAT run\n")
+        (root / "etc" / "out.sh").write_text("PAT run\n")
+        rule = Rule(
+            id="t", description="d", stage="boot",
+            detect=[{"dir_nonempty": "opt/app"}],
+            actions=[{"edit": {"regex": "PAT", "replacement": "X", "within": "*"}}],
+        )
+        reports = apply_rules(root, [rule], dry_run=False)
+        assert (root / "opt" / "app" / "in.sh").read_text() == "X run\n"
+        assert (root / "etc" / "out.sh").read_text() == "PAT run\n"
+        assert reports[0].matched
+
+    def test_write_action_rejects_parent_escape(self, tmp_path):
+        from iris.rules.engine import Rule, apply_rules
+
+        root = tmp_path / "rf"
+        (root / "etc").mkdir(parents=True)
+        rule = Rule(
+            id="t", description="d", stage="boot",
+            detect=[{"always": True}],
+            actions=[{"write": {"path": "../evil", "content": "x"}}],
+        )
+        reports = apply_rules(root, [rule], dry_run=False)
+        assert "refused" in reports[0].detail
+        assert not (tmp_path / "evil").exists()
+
+    def test_guest_script_written_with_lf(self, tmp_path):
+        rootfs = _make_rootfs(tmp_path)
+        apply_rules(rootfs, load_rules(PROJECT_RULES), dry_run=False)
+        data = (rootfs / GUEST_SCRIPT_PATH).read_bytes()
+        assert b"\r\n" not in data
