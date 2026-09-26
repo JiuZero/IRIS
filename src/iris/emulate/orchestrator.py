@@ -85,6 +85,99 @@ def _create_tarball(rootfs_dir: Path, tarball_path: Path) -> Path:
     return tarball_path
 
 
+def _docker_produce(volumes: list[tuple[str, str]], image: str, script: str,
+                    container_out: str, host_out: Path, timeout: int = 240) -> Path:
+    """Run a throwaway container with bind mounts, copy one artifact back to host."""
+    env = _env()
+    create_cmd = ["docker", "create"]
+    for host, cont in volumes:
+        create_cmd += ["-v", f"{host}:{cont}"]
+    create_cmd += [image, "sh", "-c", script]
+    create_result = subprocess.run(create_cmd, capture_output=True, text=True, env=env, timeout=30, check=False)
+    if create_result.returncode != 0:
+        raise RuntimeError(f"docker create failed: {create_result.stderr}")
+    container_id = create_result.stdout.strip()
+    if not container_id or " " in container_id:
+        raise RuntimeError(f"docker create returned unexpected output: {container_id[:200]!r}")
+    start_result = subprocess.run(
+        ["docker", "start", "-a", container_id],
+        capture_output=True, text=True, env=env, timeout=timeout, check=False,
+    )
+    if start_result.returncode != 0:
+        subprocess.run(["docker", "rm", "-f", container_id], env=env, capture_output=True, check=False)
+        raise RuntimeError(f"container script failed: {start_result.stderr[-500:]}")
+    cp_result = subprocess.run(
+        ["docker", "cp", f"{container_id}:{container_out}", str(host_out)],
+        capture_output=True, text=True, env=env, timeout=120, check=False,
+    )
+    subprocess.run(["docker", "rm", "-f", container_id], env=env, capture_output=True, check=False)
+    if cp_result.returncode != 0:
+        raise RuntimeError(f"docker cp failed: {cp_result.stderr}")
+    return host_out
+
+
+def _compose_rootfs_from_slices(
+    slices_dir: Path,
+    partition_mounts: list[tuple[str, str]],
+    tarball_path: Path,
+    guest_script: str = "",
+    image: str = "python:3.11-alpine",
+) -> Path:
+    """Rebuild a multi-partition rootfs entirely inside a Linux container.
+
+    ``partition_mounts`` is ordered base-first: ``(slice_stem, mount_point)`` pairs
+    whose ``<stem>.jffs2`` files live in ``slices_dir``. jefferson extraction and
+    merge run on ext4 in the container so JFFS2 soft links survive; the result is
+    tarred and copied back. This avoids the NTFS path where a host-side ``cp`` or
+    ``copytree`` silently drops the ~230 busybox symlinks (WinError 123).
+    """
+    env_lines = ["set -e", "pip install -q jefferson 2>/dev/null || pip install -q jefferson"]
+    env_lines.append("BASE=/work/rootfs; rm -rf /work/rootfs; mkdir -p $BASE")
+    for stem, mount in partition_mounts:
+        tree = f"/work/{stem}"
+        target = "$BASE" if mount in ("/", "") else f"$BASE/{mount.lstrip('/')}"
+        env_lines.append(f"rm -rf {tree}; jefferson -d {tree} -f /in/{stem}.jffs2 >/dev/null")
+        env_lines.append(f"mkdir -p {target}; cp -a {tree}/. {target}/")
+    # after merge, the mount targets hold real content; re-mounting the empty
+    # vendor JFFS2 partition over them would shadow the binaries (RP3 "Kylin:
+    # not found"). Comment out any such mount line in the boot scripts.
+    for _stem, mount in partition_mounts:
+        if mount in ("/", ""):
+            continue
+        mp = mount.rstrip("/")
+        env_lines.append(
+            "for s in $(ls $BASE/etc/init.d/* $BASE/etc/*rc* $BASE/etc_ro/init.d/* 2>/dev/null); do "
+            f"sed -i -E 's|^([[:space:]]*mount.*{mp}[[:space:]].*)$|#IRIS-shadow-fix: \\1|' \"$s\" 2>/dev/null || true; done"
+        )
+    if guest_script:
+        import base64
+
+        b64 = base64.b64encode(guest_script.encode()).decode()
+        env_lines.append("mkdir -p $BASE/firmadyne")
+        env_lines.append(f"echo {b64} | base64 -d > $BASE/firmadyne/iris_rules.sh")
+        env_lines.append("chmod +x $BASE/firmadyne/iris_rules.sh")
+    env_lines.append("tar -czf /work/rootfs.tar.gz -C $BASE .")
+    script = "; ".join(env_lines)
+
+    tarball_path.parent.mkdir(parents=True, exist_ok=True)
+    volumes = [(str(slices_dir.resolve()), "/in:ro"), (str(tarball_path.parent.resolve()), "/work")]
+    return _docker_produce(volumes, image, script, "/work/rootfs.tar.gz", tarball_path)
+
+
+def build_parts_mounts(parts_dir: Path) -> list[tuple[str, str]]:
+    """Order a TendaW ``-parts`` dir's ``<stem>.jffs2`` slices base-first.
+
+    The slice named ``romfs`` (mount ``/``) must merge before overlays.
+    Unknown stems fall back to mounting at ``/opt/<stem>``.
+    """
+    from iris.extract.tenda import PARTITION_MOUNTS
+
+    stems = sorted(p.stem for p in parts_dir.glob("*.jffs2"))
+    pairs = [(s, PARTITION_MOUNTS.get(s, f"/opt/{s}")) for s in stems]
+    pairs.sort(key=lambda p: (p[1] != "/", p[1]))
+    return pairs
+
+
 def emulate_firmware(
     rootfs_dir: Path,
     arch: str,
@@ -93,6 +186,8 @@ def emulate_firmware(
     host_port: int = 8080,
     timeout_sec: int = 120,
     docker_image: str = "",
+    parts_slices_dir: Path | None = None,
+    partition_mounts: list[tuple[str, str]] | None = None,
 ) -> EmulationResult:
     start_time = time.time()
     result = EmulationResult(firmware_path=rootfs_dir, arch=arch)
@@ -106,10 +201,22 @@ def emulate_firmware(
     work_dir.mkdir(parents=True, exist_ok=True)
     tarball_path = work_dir / f"{iid}.tar.gz"
 
+    container_compose = parts_slices_dir is not None and partition_mounts is not None
     try:
         if not tarball_path.exists():
-            print("Creating rootfs tarball...")
-            _create_tarball(rootfs_dir, tarball_path)
+            if container_compose:
+                guest_script = ""
+                host_rules_script = rootfs_dir / "firmadyne" / "iris_rules.sh"
+                if host_rules_script.is_file():
+                    guest_script = host_rules_script.read_text(encoding="utf-8", errors="replace")
+                print(
+                    f"Composing rootfs from {len(partition_mounts)} JFFS2 slices in-container "
+                    f"(symlink-safe, guest_script={bool(guest_script)})..."
+                )
+                _compose_rootfs_from_slices(parts_slices_dir, partition_mounts, tarball_path, guest_script)
+            else:
+                print("Creating rootfs tarball...")
+                _create_tarball(rootfs_dir, tarball_path)
         print(f"Tarball: {tarball_path.stat().st_size} bytes")
     except RuntimeError as e:
         result.error = str(e)

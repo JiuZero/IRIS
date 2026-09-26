@@ -298,9 +298,12 @@ def emulate_run(
     iid: int = typer.Option(0, help="image ID for scratch directory naming"),
     port: int = typer.Option(8080, help="host port for web access"),
     timeout: int = typer.Option(120, help="boot timeout in seconds"),
+    parts_dir: Path = typer.Option(
+        None, "--parts-dir", help="TendaW -parts dir of raw .jffs2 slices; merges them container-side (symlink-safe)"
+    ),
 ) -> None:
     """Run QEMU emulation of a firmware rootfs and check web reachability."""
-    from iris.emulate.orchestrator import emulate_firmware
+    from iris.emulate.orchestrator import build_parts_mounts, emulate_firmware
 
     if not rootfs.exists():
         typer.secho(f"rootfs not found: {rootfs}", fg=typer.colors.RED, err=True)
@@ -308,6 +311,16 @@ def emulate_run(
 
     settings = get_settings()
     scratch = settings.scratch_dir
+
+    partition_mounts = None
+    if parts_dir is not None:
+        if not parts_dir.is_dir():
+            typer.secho(f"parts dir not found: {parts_dir}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        partition_mounts = build_parts_mounts(parts_dir)
+        if not partition_mounts:
+            typer.secho(f"no .jffs2 slices under {parts_dir}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
 
     typer.echo(f"emulating {rootfs.name} arch={arch} port={port}")
     result = emulate_firmware(
@@ -317,6 +330,8 @@ def emulate_run(
         scratch_dir=scratch,
         host_port=port,
         timeout_sec=timeout,
+        parts_slices_dir=parts_dir,
+        partition_mounts=partition_mounts,
     )
 
     typer.echo(f"success     : {result.success}")
