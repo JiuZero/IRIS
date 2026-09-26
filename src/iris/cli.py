@@ -100,14 +100,22 @@ def extract_add(
             typer.echo(f"already registered: image id={existing.id}")
             raise typer.Exit()
         arch = ""
+        rootfs_ok = False
+        import tarfile
 
         from iris.extract.arch import identify_tar_members
         from iris.extract.rootfs import find_rootfs_in_archive
 
-        counter = identify_tar_members(archive)
-        if counter:
-            arch = counter.most_common(1)[0][0]
-        rootfs_ok = find_rootfs_in_archive(archive) is not None
+        if tarfile.is_tarfile(archive):
+            counter = identify_tar_members(archive)
+            if counter:
+                arch = counter.most_common(1)[0][0]
+            rootfs_ok = find_rootfs_in_archive(archive) is not None
+        else:
+            typer.secho(
+                "  (raw firmware, not a tar; rootfs/arch deferred to M1 binwalk/unblob)",
+                fg=typer.colors.YELLOW,
+            )
         image = Image(
             filename=archive.name,
             description=f"{product} {version}".strip() or None,
