@@ -89,6 +89,17 @@ def extract_inspect(
     if info.squashfs:
         for sq in info.squashfs:
             typer.echo(f"squashfs        : offset=0x{sq.offset:x} endian={sq.endian} comp={sq.comp}")
+    if info.tendaw:
+        tw = info.tendaw
+        typer.echo(f"tendaw          : model={tw.model} version={tw.version} zip@0x{tw.zip_offset:x}")
+        for p in tw.partitions:
+            typer.echo(f"  part            : {p.name:<8} {p.payload_type:<8} size={p.size} mount={p.mount_point or '-'}")
+        if tw.scripts:
+            typer.echo(f"  scripts         : {tw.scripts}")
+        if tw.unreadable:
+            typer.echo(f"  unreadable      : {tw.unreadable}")
+    if info.segmented_offsets:
+        typer.echo(f"encrypted segs  : {len(info.segmented_offsets)} (first 0x{info.segmented_offsets[0]:x})")
     if info.elf_archs:
         typer.echo(f"ELF census      : {dict(info.elf_archs)}")
 

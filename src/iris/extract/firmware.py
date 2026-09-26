@@ -15,6 +15,15 @@ import zipfile
 from collections import Counter
 from dataclasses import dataclass, field
 
+from iris.extract.tenda import (
+    TendaContainer,
+    detect_segmented_regions,
+    extract_tenda_wrapper,
+    is_tenda_wrapper,
+    is_tendaw,
+    parse_tendaw,
+)
+
 UIMAGE_MAGIC = 0x27051956
 
 SQUASHFS_MAGICS: dict[bytes, tuple[str, str]] = {
@@ -55,12 +64,19 @@ class FirmwareInfo:
     arch: str = ""
     rootfs_offset: int | None = None
     ubi_offset: int | None = None
+    tendaw: TendaContainer | None = None
+    segmented_offsets: list[int] = field(default_factory=list)
+    fit: bool = False
 
 
 def identify_format(data: bytes) -> str:
     if len(data) < 4:
         return "raw"
+    if is_tendaw(data):
+        return "tendaw"
     if data[:4] == struct.pack(">I", UIMAGE_MAGIC):
+        if is_tenda_wrapper(data):
+            return "tenda_wrapper"
         return "uimage"
     if data[:2] == b"\x1f\x8b":
         return "gzip"
@@ -168,6 +184,28 @@ def analyze_firmware(data: bytes, arch_hint: str = "", depth: int = 0) -> Firmwa
 
     if fmt == "uimage":
         info.uimage = parse_uimage(data)
+
+    if fmt == "tendaw":
+        info.tendaw = parse_tendaw(data)
+        info.segmented_offsets = detect_segmented_regions(data)
+        info.arch = arch_hint
+        return info
+
+    if fmt == "tenda_wrapper":
+        inner = extract_tenda_wrapper(data)
+        sub = analyze_firmware(inner, arch_hint, depth + 1)
+        info.format = "tenda_wrapper"
+        info.uimage = sub.uimage
+        info.squashfs = [
+            SquashfsInfo(offset=s.offset + 64, endian=s.endian, comp=s.comp) for s in sub.squashfs
+        ]
+        info.elf_archs = sub.elf_archs
+        info.ubi_offset = sub.ubi_offset + 64 if sub.ubi_offset is not None else None
+        info.rootfs_offset = sub.rootfs_offset + 64 if sub.rootfs_offset is not None else None
+        info.fit = sub.fit
+        info.segmented_offsets = detect_segmented_regions(data)
+        info.arch = _infer_arch(info, arch_hint)
+        return info
 
     info.squashfs = find_squashfs(data)
     if info.squashfs:
