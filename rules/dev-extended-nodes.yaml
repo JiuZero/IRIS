@@ -1,0 +1,19 @@
+id: dev-extended-nodes
+description: >
+  nandsim/FirmAE guests expose few device nodes; vendors (Tenda G1/RP3) call
+  mknod or open /dev/mtdblockN, /dev/mem, /dev/watchdog directly. Created at
+  boot inside the guest because host filesystems cannot hold device nodes.
+  Evidence: emulate-G1.log (mount /dev/mtdblock10 fail), RP3 rcS mknod patch.
+stage: boot
+detect:
+  - always: true
+actions:
+  - guest_shell:
+      - "BUSYBOX=${BUSYBOX:-/firmadyne/busybox}"
+      - "for i in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do"
+      - "  [ -e /dev/mtdblock$i ] || $BUSYBOX mknod -m 644 /dev/mtdblock$i b 31 $i 2>/dev/null"
+      - "  [ -e /dev/mtd$i ] || $BUSYBOX mknod -m 644 /dev/mtd$i c 90 $((i*2)) 2>/dev/null"
+      - "done"
+      - "[ -e /dev/mem ] || $BUSYBOX mknod -m 666 /dev/mem c 1 1 2>/dev/null"
+      - "[ -e /dev/watchdog ] || $BUSYBOX mknod -m 600 /dev/watchdog c 10 130 2>/dev/null"
+      - "for i in 0 1; do [ -e /dev/ttyS$i ] || $BUSYBOX mknod -m 660 /dev/ttyS$i c 4 $((64+i)) 2>/dev/null; done"

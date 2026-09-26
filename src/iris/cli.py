@@ -12,11 +12,13 @@ db_app = typer.Typer(help="metadata database operations")
 extract_app = typer.Typer(help="L1 extraction utilities")
 corpus_app = typer.Typer(help="firmware corpus manifest operations")
 emulate_app = typer.Typer(help="L2 emulation utilities")
+rules_app = typer.Typer(help="L3 boot-fix rule engine")
 serve_app = typer.Typer(help="L5 API server")
 app.add_typer(db_app, name="db")
 app.add_typer(extract_app, name="extract")
 app.add_typer(corpus_app, name="corpus")
 app.add_typer(emulate_app, name="emulate")
+app.add_typer(rules_app, name="rules")
 app.add_typer(serve_app, name="serve")
 
 log = get_logger(__name__)
@@ -260,6 +262,27 @@ def corpus_download(
             failures += 1
             typer.secho(f"  FAILED: {e.name}: {exc}", fg=typer.colors.RED)
     typer.echo(f"done, {failures} failure(s)")
+
+
+@rules_app.command("list")
+def rules_list() -> None:
+    """Show all L3 boot-fix rules."""
+    from iris.rules.engine import load_rules
+
+    for r in load_rules(get_settings().rules_dir):
+        typer.echo(f"{r.id:<26} stage={r.stage:<10} {r.description.splitlines()[0][:64]}")
+
+
+@rules_app.command("apply")
+def rules_apply(
+    rootfs: Path = typer.Argument(..., help="path to extracted rootfs directory"),
+    apply: bool = typer.Option(False, "--apply", help="write changes (default: dry-run report)"),
+) -> None:
+    """Detect boot-failure patterns in a rootfs and apply rule fixes."""
+    from iris.rules.engine import apply_rules, load_rules, report_json
+
+    reports = apply_rules(rootfs, load_rules(get_settings().rules_dir), dry_run=not apply)
+    typer.echo(report_json(reports))
 
 
 def main() -> None:

@@ -21,6 +21,13 @@ class Settings(BaseSettings):
         return self.iris_home
 
     @property
+    def rules_dir(self) -> Path:
+        for base in [Path.cwd().resolve(), *Path.cwd().resolve().parents]:
+            if (base / "rules").is_dir() and (base / "src").is_dir():
+                return base / "rules"
+        return Path("rules")
+
+    @property
     def corpus_dir(self) -> Path:
         return self.iris_home / "corpus"
 

@@ -1,0 +1,17 @@
+id: mtd-name-lookup-guard
+description: >
+  Vendor init scripts resolve flash partitions by name, e.g.
+  `partition_no=$(grep -i picture /proc/mtd | ...)`. Under FirmAE nandsim the
+  /proc/mtd labels are generic, so the lookup returns empty and services
+  (G1 apmib/cfmd) abort or respawn-loop. Evidence: emulate-G1.log.
+  Detection-only fingerprint: feeds the failure-stage report (stage=nvram);
+  a safe automatic rewrite needs per-firmware partition numbers.
+stage: nvram
+detect:
+  - file_regex: 'grep\s+-i\s+\S+\s+/proc/mtd'
+    within: 'etc_ro/*'
+  - file_regex: 'grep\s+-i\s+\S+\s+/proc/mtd'
+    within: 'etc/*'
+  - file_regex: 'grep\s+"?\$1"?\s+/proc/mtd'
+    within: 'lib/*'
+actions: []

@@ -1,0 +1,17 @@
+id: shadow-jffs2-opt
+description: >
+  Tenda RP3/TC3T14C rcS mounts empty JFFS2 partitions (mtdblock4/5/6) over
+  /opt/app, /opt/custom, /opt/sav, shadowing the binaries baked into the
+  merged rootfs; the kernel then finds "Kylin: not found". Evidence:
+  emulate-RP3-try5.log. When the mount target already has content in the
+  image, comment out the shadowing mount line. Tenda keeps its factory init
+  in etc_ro/ (copied to /tmp/etc at boot), so both etc and etc_ro are scoped.
+stage: service
+detect:
+  - file_regex: '\bmount\s+-t\s+jffs2\s+/dev/mtdblock\d+\s+/opt/(app|custom|sav)'
+    within: 'etc*/*'
+actions:
+  - comment_lines:
+      within: 'etc*/*'
+      regex: '\bmount\s+-t\s+jffs2\s+/dev/mtdblock\d+\s+/opt/(app|custom|sav)'
+      prefix: "#IRIS-shadow-fix: "
