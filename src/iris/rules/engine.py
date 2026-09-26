@@ -130,6 +130,7 @@ def _apply_action(rootfs: Path, action: dict, files: list[Path], guest_lines: li
         spec = action["edit"]
         pattern = re.compile(spec["regex"])
         changed: list[str] = []
+        rels: list[str] = []
         for f in files:
             rel = f.relative_to(rootfs).as_posix()
             if not _match_glob(rel, spec.get("within", "*")):
@@ -143,7 +144,8 @@ def _apply_action(rootfs: Path, action: dict, files: list[Path], guest_lines: li
                 f.write_text(new_text, encoding="utf-8")
             if n:
                 changed.append(f"{rel} x{n}")
-        touched.extend(changed)
+                rels.append(rel)
+        touched.extend(rels)
         return "edit: " + (", ".join(changed) if changed else "no change")
 
     if "comment_lines" in action:
@@ -151,6 +153,7 @@ def _apply_action(rootfs: Path, action: dict, files: list[Path], guest_lines: li
         pattern = re.compile(spec["regex"])
         prefix = spec.get("prefix", "#IRIS: ")
         changed = []
+        rels = []
         for f in files:
             rel = f.relative_to(rootfs).as_posix()
             if not _match_glob(rel, spec.get("within", "*")):
@@ -172,7 +175,8 @@ def _apply_action(rootfs: Path, action: dict, files: list[Path], guest_lines: li
                 if not dry_run:
                     f.write_text("".join(out), encoding="utf-8")
                 changed.append(f"{rel} x{n}")
-        touched.extend(changed)
+                rels.append(rel)
+        touched.extend(rels)
         return "comment_lines: " + (", ".join(changed) if changed else "no change")
 
     return f"unknown action {list(action)}"
