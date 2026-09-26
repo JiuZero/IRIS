@@ -192,3 +192,59 @@ class TestAnalyzeFirmware:
         data = _make_squashfs("le")
         info = analyze_firmware(data, arch_hint="mipseb")
         assert info.arch == "mipseb"
+
+class TestUimageCompressionRecursion:
+    def _wrap(self, comp: int, payload: bytes, name="MIPS Tenda Linux") -> bytes:
+        hdr = _make_uimage(arch_field=5, name=name)
+        hdr = bytearray(hdr)
+        hdr[31] = comp
+        struct.pack_into(">I", hdr, 12, len(payload))
+        return bytes(hdr[:64]) + payload
+
+    def test_lzma_payload_squashfs(self):
+        import lzma
+        sq = _make_squashfs("le")
+        data = self._wrap(3, lzma.compress(sq))
+        info = analyze_firmware(data)
+        assert info.uimage is not None
+        assert info.uimage.comp == "lzma"
+        assert len(info.squashfs) >= 1
+        assert info.arch == "mipsel"
+
+    def test_gzip_payload(self):
+        sq = _make_squashfs("le")
+        data = self._wrap(1, gzip.compress(sq))
+        info = analyze_firmware(data)
+        assert info.uimage.comp == "gzip"
+        assert len(info.squashfs) >= 1
+
+    def test_bzip2_payload(self):
+        import bz2
+        sq = _make_squashfs("be")
+        data = self._wrap(2, bz2.compress(sq))
+        info = analyze_firmware(data)
+        assert info.uimage.comp == "bzip2"
+        assert len(info.squashfs) >= 1
+
+    def test_lzma_corrupt_payload_no_crash(self):
+        data = self._wrap(3, b"\x00\xffnot-lzma" * 10)
+        info = analyze_firmware(data)
+        assert info.uimage.comp == "lzma"
+        assert info.squashfs == []
+
+    def test_plain_uncompressed_uimage_not_decompressed(self):
+        data = _make_uimage(name="MIPS OpenWrt")
+        info = analyze_firmware(data)
+        assert info.uimage.comp == "none"
+
+
+class TestFitFormat:
+    def test_identify_fit(self):
+        fit = b"\xd0\x0d\xfe\xed" + b"\x00" * 64
+        assert identify_format(fit) == "fit"
+
+    def test_analyze_fit_flag(self):
+        fit = b"\xd0\x0d\xfe\xed" + b"\x00" * 64
+        info = analyze_firmware(fit, arch_hint="armel")
+        assert info.format == "fit"
+        assert info.fit is True

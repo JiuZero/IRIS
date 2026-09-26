@@ -8,8 +8,10 @@ covered in M1 (OpenWrt uImage/squashfs, vendor zip/gzip wrappers).
 
 from __future__ import annotations
 
+import bz2
 import gzip
 import io
+import lzma
 import struct
 import zipfile
 from collections import Counter
@@ -88,6 +90,8 @@ def identify_format(data: bytes) -> str:
         return "trx"
     if data[:4] == b"UBI#":
         return "ubi"
+    if data[:4] == b"\xd0\x0d\xfe\xed":
+        return "fit"
     if data[:4] == b"\x01\x00\x00\x00" and b"OpenWrt" in data[:64]:
         return "tplink"
     if data[:7] == b"device:":
@@ -175,6 +179,21 @@ def find_elf_archs(data: bytes) -> Counter:
     return counter
 
 
+def _decompress_uimage_payload(data: bytes, ui: UImageInfo | None) -> bytes | None:
+    if ui is None or ui.comp not in ("gzip", "bzip2", "lzma"):
+        return None
+    end = 64 + ui.size if 0 < ui.size <= len(data) - 64 else len(data)
+    payload = data[64:end]
+    try:
+        if ui.comp == "gzip":
+            return gzip.decompress(payload)
+        if ui.comp == "bzip2":
+            return bz2.decompress(payload)
+        return lzma.decompress(payload)
+    except (OSError, ValueError, lzma.LZMAError):
+        return None
+
+
 def analyze_firmware(data: bytes, arch_hint: str = "", depth: int = 0) -> FirmwareInfo:
     if depth > 3:
         return FirmwareInfo(format="raw", arch=arch_hint)
@@ -219,6 +238,23 @@ def analyze_firmware(data: bytes, arch_hint: str = "", depth: int = 0) -> Firmwa
 
     info.elf_archs = find_elf_archs(data)
 
+    if fmt == "fit":
+        info.fit = True
+
+    if fmt == "uimage" and depth < 3:
+        payload = _decompress_uimage_payload(data, info.uimage)
+        if payload is not None:
+            sub = analyze_firmware(payload, arch_hint, depth + 1)
+            info.squashfs = sub.squashfs or info.squashfs
+            if sub.rootfs_offset is not None or sub.ubi_offset is not None:
+                # payload is a filesystem image, not a bare kernel: trust its ELF census
+                info.elf_archs = sub.elf_archs or info.elf_archs
+            if sub.rootfs_offset is not None:
+                info.rootfs_offset = sub.rootfs_offset
+            if sub.ubi_offset is not None and info.ubi_offset is None:
+                info.ubi_offset = sub.ubi_offset
+            info.fit = sub.fit or info.fit
+
     if fmt == "gzip" and depth < 3:
         try:
             decompressed = gzip.decompress(data)
@@ -252,8 +288,9 @@ def analyze_firmware(data: bytes, arch_hint: str = "", depth: int = 0) -> Firmwa
 
 
 def _infer_arch(info: FirmwareInfo, arch_hint: str = "") -> str:
-    if info.elf_archs:
-        return info.elf_archs.most_common(1)[0][0]
+    known = Counter({a: n for a, n in info.elf_archs.items() if not a.startswith("unk(")})
+    if known:
+        return known.most_common(1)[0][0]
 
     if info.uimage and info.uimage.arch_name:
         arch = info.uimage.arch_name
