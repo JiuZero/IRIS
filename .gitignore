@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+dist/
+build/
+
+# 仿真产物（体积大，禁止入库）
+images/
+scratch/
+firmwares/
+*.tar.gz
+*.qcow2
+*.raw
+*.img
+qemu.*.serial.log
+qemu.initial.serial.log
+qemu.final.serial.log
+
+# 运行时数据
+*.db
+*.sqlite3
+logs/
+runtime/
+
+# IDE / OS
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
+
+# 密钥与配置
+.env
+*.local.yaml
