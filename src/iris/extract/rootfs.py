@@ -43,6 +43,7 @@ def _normalize(name: str) -> str:
 
 def find_rootfs(paths: Iterable[str]) -> RootfsCandidate | None:
     """Given relative entry names (tar members or directory walk), find the rootfs prefix."""
+    paths = list(paths)  # may be a generator; we scan twice
     hits_by_depth: list[Counter] = [Counter() for _ in range(MAX_PREFIX_DEPTH + 1)]
     total = 0
     for raw in paths:
@@ -65,7 +66,10 @@ def find_rootfs(paths: Iterable[str]) -> RootfsCandidate | None:
     if best_hits == 0:
         return None
 
-    members = [p for p in paths if _normalize(p).startswith(best_prefix)]
+    def in_prefix(p: str) -> bool:
+        return not best_prefix or p == best_prefix or p.startswith(best_prefix + "/")
+
+    members = [p for p in paths if in_prefix(_normalize(p))]
     marker_len = len(best_prefix) + 1 if best_prefix else 0
     has_busybox = any(
         _normalize(m)[marker_len:] in ("bin/busybox", "sbin/busybox") for m in members

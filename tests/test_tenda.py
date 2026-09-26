@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import struct
 import zipfile
+from pathlib import Path
 
 from iris.extract.firmware import analyze_firmware, identify_format, parse_uimage
 from iris.extract.tenda import (
@@ -148,3 +149,38 @@ class TestSegmentedRegions:
     def test_below_threshold_empty(self):
         data = b"abc" + SEGMENT_MARKER + b"def" + SEGMENT_MARKER
         assert detect_segmented_regions(data) == []
+
+
+class TestTendaWHardening:
+    def test_nested_member_entry_and_slice(self, tmp_path):
+        from iris.extract.tenda import slice_partition
+
+        payload = _jffs2_payload() + b"LEAFDATA"
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("sub/romfs-x.squash.img", _part_img("romfs", payload))
+        data = bytes(bytearray(b"TD0101AC_39".ljust(2985, b"\x00"))) + buf.getvalue()
+        # pad the header region so PK scan still hits
+        container = parse_tendaw(data)
+        assert container is not None
+        part = container.partitions[0]
+        assert part.entry == "sub/romfs-x.squash.img"
+        assert part.filename == "romfs-x.squash.img"
+        out = slice_partition(data, container.zip_offset, part, tmp_path / "romfs.jffs2")
+        assert out.read_bytes() == payload
+
+    def test_partition_name_is_path_safe(self):
+        evil = bytearray(32)
+        evil[0:7] = b"ro/../x"
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            hdr = bytearray(64)
+            hdr[0:4] = b"\x27\x05\x19\x56"
+            hdr[32:64] = bytes(evil)
+            zf.writestr("romfs-x.squash.img", bytes(hdr) + _jffs2_payload())
+        data = bytes(bytearray(b"TD0101AC_39".ljust(2985, b"\x00"))) + buf.getvalue()
+        container = parse_tendaw(data)
+        assert container is not None
+        name = container.partitions[0].name
+        assert "/" not in name and "\\" not in name
+        assert Path(name).name == name  # stays a single, traversal-free path component

@@ -53,3 +53,40 @@ def test_deep_nested_ignored_beyond_depth2():
     paths = ["a/b/c/d/bin/busybox", "a/b/c/d/etc/passwd"]
     cand = find_rootfs(paths)
     assert cand is None or not cand.is_rootfs
+
+def test_generator_input_scanned_fully():
+    def gen():
+        yield from [
+            "tc-rootfs/bin/busybox",
+            "tc-rootfs/etc/init.d/rcS",
+            "tc-rootfs/etc/passwd",
+            "tc-rootfs/lib/ld.so",
+            "tc-rootfs/sbin/init",
+            "tc-rootfs/usr/bin/httpd",
+            "tc-rootfs/var/log/messages",
+            "tc-rootfs/bin/sh",
+        ]
+
+    cand = find_rootfs(gen())
+    assert cand is not None
+    assert cand.prefix == "tc-rootfs"
+    assert cand.has_busybox
+    assert cand.has_initd
+
+
+def test_prefix_membership_is_boundary_safe():
+    paths = [
+        "fw/bin/busybox",
+        "fw/bin/sh",
+        "fw/etc/passwd",
+        "fw/lib/ld.so",
+        "fw/sbin/init",
+        "fw/usr/x",
+        "fw/var/y",
+        "fw2/etc/init.d/rcS",
+    ]
+    cand = find_rootfs(paths)
+    assert cand is not None
+    assert cand.prefix == "fw"
+    assert cand.has_busybox
+    assert not cand.has_initd  # fw2/etc must not count as a member of prefix "fw"

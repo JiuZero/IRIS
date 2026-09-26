@@ -16,6 +16,7 @@ Two families validated on the working corpus:
 from __future__ import annotations
 
 import io
+import re
 import shutil
 import struct
 import subprocess
@@ -47,6 +48,7 @@ class TendaPartition:
     size: int
     payload_type: str  # jffs2 | squashfs | uimage | fit | raw
     mount_point: str = ""
+    entry: str = ""  # full ZIP member path; filename is only the basename
 
 
 @dataclass
@@ -149,11 +151,13 @@ def parse_tendaw(data: bytes) -> TendaContainer | None:
         if len(member) < 72:
             continue
         ptype = classify_payload(member[64:])
+        raw_name = _ascii_tag(member, 32, 32) or Path(base_name).stem
         part = TendaPartition(
-            name=_ascii_tag(member, 32, 32) or Path(base_name).stem,
+            name=re.sub(r"[^A-Za-z0-9._+-]", "_", raw_name),
             filename=base_name,
             size=len(member) - 64,
             payload_type=ptype,
+            entry=entry,
         )
         part.mount_point = PARTITION_MOUNTS.get(part.name, "")
         container.partitions.append(part)
@@ -185,7 +189,7 @@ def extract_tenda_wrapper(data: bytes) -> bytes:
 def slice_partition(data: bytes, zip_offset: int, part: TendaPartition, dest: Path) -> Path:
     """Extract one ZIP member's payload (64-byte wrapper stripped) to *dest*."""
     zf, _base, _buf = _load_zip(data, zip_offset)
-    member = zf.read(part.filename)
+    member = zf.read(part.entry or part.filename)
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(member[64:])
     return dest

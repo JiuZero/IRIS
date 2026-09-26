@@ -24,6 +24,9 @@ UBI_INT_VOL_ID = 0x7FFFEFFF
 EC_HDR_LEN = 64
 VID_HDR_LEN = 64
 
+# hard cap for hostile inputs: firmware claiming more volume data than this is bogus
+MAX_VOLUME_BYTES = 512 << 20
+
 
 @dataclass
 class UbiEcHeader:
@@ -129,17 +132,26 @@ def extract_volumes(data: bytes, ubi_offset: int = 0) -> dict[int, UbiVolume]:
         return {}
 
     volumes: dict[int, UbiVolume] = {}
+    volume_bytes: dict[int, int] = {}
     for ec_off in ec_offsets:
         ec = parse_ec_header(data, ec_off)
         if ec is None:
+            continue
+        if not EC_HDR_LEN <= ec.vid_hdr_offset <= peb_size - VID_HDR_LEN:
+            continue
+        if not EC_HDR_LEN <= ec.data_offset <= peb_size:
             continue
         peb = data[ec_off : ec_off + peb_size]
         vid = parse_vid_header(peb, ec.vid_hdr_offset)
         if vid is None:
             continue
-        if vid.vol_id == UBI_INT_VOL_ID:
+        if vid.vol_id == UBI_INT_VOL_ID or vid.vol_id < 0 or vid.vol_id > 0x7FFFFFFF:
             continue
         leb_data = peb[ec.data_offset :]
+        total = volume_bytes.get(vid.vol_id, 0)
+        if total + len(leb_data) > MAX_VOLUME_BYTES:
+            break
+        volume_bytes[vid.vol_id] = total + len(leb_data)
         if vid.vol_id not in volumes:
             volumes[vid.vol_id] = UbiVolume(vol_id=vid.vol_id)
         volumes[vid.vol_id].lebs[vid.lnum] = leb_data
