@@ -109,13 +109,14 @@ socat TCP-LISTEN:${HOST_PORT},reuseaddr,fork TCP:${GUEST_IP}:80 &
 SOCAT_PID=$!
 echo "socat PID: ${SOCAT_PID} (forwarding :${HOST_PORT} -> ${GUEST_IP}:80)"
 
-# Wait for QEMU to exit
-wait ${QEMU_PID}
-QEMU_EXIT=$?
+# Wait for QEMU to exit (never let set -e skip the cleanup below)
+QEMU_EXIT=0
+wait ${QEMU_PID} || QEMU_EXIT=$?
 echo "QEMU exited with code ${QEMU_EXIT}"
 
 # Cleanup
 kill ${SOCAT_PID} 2>/dev/null || true
+rm -f "${TMP_IMAGE}"
 ip link set "${TAP_IFACE}" down 2>/dev/null || true
 ip link set "${BR_IFACE}" down 2>/dev/null || true
 brctl delif "${BR_IFACE}" "${TAP_IFACE}" 2>/dev/null || true

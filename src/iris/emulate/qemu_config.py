@@ -89,6 +89,6 @@ def build_qemu_args(
         *disk.split(),
         "-append", append,
         "-display", "none",
-        "-device", config.net_device, ",netdev=net0",
+        "-device", f"{config.net_device},netdev=net0",
         "-netdev", f"user,id=net0,hostfwd=tcp::{host_port}-:80",
     ]

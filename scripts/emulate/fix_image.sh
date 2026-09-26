@@ -13,7 +13,7 @@ for d in /proc /dev/pts /etc_ro /tmp /var /run /sys /root /tmp/var /tmp/media /t
 done
 
 # make all bin/sbin dirs executable
-${BUSYBOX} chmod a+x -R `${BUSYBOX} find / -type d \( -name bin -o -name sbin \)` 2>/dev/null || true
+${BUSYBOX} find / -type d \( -name bin -o -name sbin \) -exec ${BUSYBOX} chmod a+x {} + 2>/dev/null || true
 
 # essential files
 mkdir -p /etc
@@ -22,7 +22,7 @@ mkdir -p /etc
 [ ! -s /etc/passwd ] && echo "root::0:0:root:/root:/bin/sh" > /etc/passwd
 
 # device nodes
-FILECOUNT="$(${BUSYBOX} find /dev -maxdepth 1 -type b -o -type c -print 2>/dev/null | ${BUSYBOX} wc -l)"
+FILECOUNT="$(${BUSYBOX} find /dev -maxdepth 1 \( -type b -o -type c \) -print 2>/dev/null | ${BUSYBOX} wc -l)"
 if [ "${FILECOUNT:-0}" -lt "5" ]; then
     ${BUSYBOX} mknod -m 666 /dev/null c 1 3 2>/dev/null || true
     ${BUSYBOX} mknod -m 666 /dev/zero c 1 5 2>/dev/null || true
