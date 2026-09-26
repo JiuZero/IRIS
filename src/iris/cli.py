@@ -117,6 +117,8 @@ def extract_inspect(
             typer.echo(f"  scripts         : {tw.scripts}")
         if tw.unreadable:
             typer.echo(f"  unreadable      : {tw.unreadable}")
+    if info.fit:
+        typer.echo("fit             : True (Flattened Image Tree inner image)")
     if info.segmented_offsets:
         typer.echo(f"encrypted segs  : {len(info.segmented_offsets)} (first 0x{info.segmented_offsets[0]:x})")
     if info.elf_archs:
@@ -229,7 +231,8 @@ def extract_rootfs(
     typer.echo(f"rootfs offset   : {fi.rootfs_offset if fi.rootfs_offset is not None else '<not found>'}")
 
     if result.rootfs_dir is None:
-        typer.secho("no squashfs rootfs found; nothing to extract", fg=typer.colors.YELLOW)
+        reason = result.failure or "no rootfs structure found"
+        typer.secho(f"extraction failed: {reason}", fg=typer.colors.YELLOW)
         raise typer.Exit(code=2)
 
     typer.echo(f"squashfs file   : {result.squashfs_path}")

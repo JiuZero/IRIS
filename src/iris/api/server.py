@@ -211,7 +211,7 @@ async def pipeline(
             error=f"unsupported or undetected architecture: {detected_arch or 'unknown'}",
         )
 
-    await asyncio.to_thread(lambda: extract_rootfs(fw_path, scratch, arch_hint=detected_arch))
+    ext = await asyncio.to_thread(lambda: extract_rootfs(fw_path, scratch, arch_hint=detected_arch))
     rootfs_dir = scratch / f"{fw_path.stem}-rootfs"
 
     if not rootfs_dir.exists():
@@ -224,7 +224,7 @@ async def pipeline(
             web_ok=False,
             web_url="-",
             duration_sec=0.0,
-            error="rootfs extraction failed: no rootfs directory created",
+            error=f"rootfs extraction failed: {ext.failure or 'no rootfs directory created'}",
         )
 
     result = await asyncio.to_thread(

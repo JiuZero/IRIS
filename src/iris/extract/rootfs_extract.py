@@ -31,10 +31,26 @@ class RootfsExtraction:
     elf_archs: Counter = None  # type: ignore[assignment]
     arch_verified: str = ""
     extraction_method: str = ""
+    failure: str = ""  # structured failure profile when rootfs_dir is None
 
     def __post_init__(self) -> None:
         if self.elf_archs is None:
             self.elf_archs = Counter()
+
+
+def classify_failure(fw_info: FirmwareInfo) -> str:
+    """Attribute an extraction failure to a concrete format-level cause."""
+    if fw_info.fit and fw_info.segmented_offsets:
+        return (
+            f"encrypted-fit: image wraps a FIT containing {len(fw_info.segmented_offsets)} "
+            "YZTenda-encrypted segments; rootfs is not extractable without the vendor "
+            "decryption key"
+        )
+    if fw_info.fit:
+        return "fit-unsupported: FIT image recognized, rootfs blob unpacking not implemented"
+    if fw_info.tendaw is not None:
+        return "tendaw-nojffs2: TendaW container parsed but no mountable JFFS2 partition"
+    return "no-rootfs: no squashfs/UBI/TendaW structure found in image"
 
 
 def _slice_squashfs(data: bytes, offset: int, dest: Path) -> Path:
@@ -169,6 +185,7 @@ def _extract_tendaw(
         base = next(iter(extracted.values()))
     if base is None:
         result.extraction_method = "tendaw-nojffs2"
+        result.failure = classify_failure(fw_info)
         return result
 
     _copy_tree_tolerant(base, rootfs_dir)
@@ -210,6 +227,7 @@ def extract_rootfs(
         return _extract_tendaw(data, fw_info, firmware_path, scratch_dir, result)
 
     if fw_info.rootfs_offset is None:
+        result.failure = classify_failure(fw_info)
         return result
 
     stem = firmware_path.stem
@@ -219,6 +237,7 @@ def extract_rootfs(
     if fw_info.ubi_offset is not None:
         sqfs_data = extract_squashfs_from_ubi(data, fw_info.ubi_offset)
         if sqfs_data is None:
+            result.failure = "ubi-no-squashfs: UBI container present but no squashfs volume extracted"
             return result
         sqfs_path.parent.mkdir(parents=True, exist_ok=True)
         sqfs_path.write_bytes(sqfs_data)

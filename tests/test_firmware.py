@@ -11,6 +11,7 @@ import pytest
 
 from iris.extract.firmware import (
     UIMAGE_MAGIC,
+    FirmwareInfo,
     analyze_firmware,
     find_elf_archs,
     find_squashfs,
@@ -249,3 +250,42 @@ class TestFitFormat:
         info = analyze_firmware(fit, arch_hint="armel")
         assert info.format == "fit"
         assert info.fit is True
+
+
+class TestEncryptedFitFailureProfile:
+    """i27/i29 style: Tenda_upgrade wrapper + inner FIT + YZTenda encrypted chunks."""
+
+    def _wrapper(self, n_segments: int) -> bytes:
+        inner = b"\xd0\x0d\xfe\xed" + b"\x00" * 128
+        payload = inner + b"".join(b"YZTenda" + b"\x00" * 32 for _ in range(n_segments))
+        hdr = bytearray(_make_uimage(arch_field=8, name="x"))
+        hdr[48:61] = b"Tenda_upgrade"
+        struct.pack_into(">I", hdr, 12, len(payload))
+        return bytes(hdr[:64]) + payload
+
+    def test_analyze_detects_encrypted_fit(self):
+        info = analyze_firmware(self._wrapper(4))
+        assert info.format == "tenda_wrapper"
+        assert info.fit is True
+        assert len(info.segmented_offsets) >= 4
+
+    def test_classify_encrypted_fit_profile(self):
+        from iris.extract.rootfs_extract import classify_failure
+
+        info = analyze_firmware(self._wrapper(4))
+        assert classify_failure(info).startswith("encrypted-fit")
+
+    def test_classify_plain_fit_profile(self):
+        from iris.extract.rootfs_extract import classify_failure
+        from iris.extract.tenda import TendaContainer
+
+        assert classify_failure(
+            FirmwareInfo(format="fit", fit=True)
+        ).startswith("fit-unsupported")
+        assert classify_failure(
+            FirmwareInfo(
+                format="tendaw",
+                tendaw=TendaContainer(model="TDxxxx", version="1.0", zip_offset=128),
+            )
+        ).startswith("tendaw-nojffs2")
+        assert classify_failure(FirmwareInfo(format="raw")).startswith("no-rootfs")
