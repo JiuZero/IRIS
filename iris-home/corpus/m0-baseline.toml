@@ -29,15 +29,15 @@ source = "downloads.openwrt.org"
 notes = "ath79/generic MIPS74Kc big-endian"
 
 [[entries]]
-name = "openwrt-mi-router-4a-giga"
-brand = "Xiaomi"
-product = "Mi Router 4A Gigabit (OpenWrt 24.10.0)"
+name = "openwrt-newifi-d2"
+brand = "D-Team"
+product = "Newifi D2 (OpenWrt 24.10.0)"
 version = "24.10.0"
-url = "https://downloads.openwrt.org/releases/24.10.0/targets/ramips/mt7621/openwrt-24.10.0-ramips-mt7621-xiaomi_mi-router-4a-gigabit-squashfs-factory.bin"
+url = "https://downloads.openwrt.org/releases/24.10.0/targets/ramips/mt7621/openwrt-24.10.0-ramips-mt7621-d-team_newifi-d2-squashfs-sysupgrade.bin"
 arch_hint = "mipsel"
 status = "confirmed"
 source = "downloads.openwrt.org"
-notes = "ramips/mt7621 MIPS little-endian"
+notes = "ramips/mt7621 MIPS little-endian; replaces xiaomi_mi-router-4a-gigabit (404 in 24.10.0); sysupgrade.bin contains full squashfs rootfs"
 
 [[entries]]
 name = "openwrt-wrt1200ac"
