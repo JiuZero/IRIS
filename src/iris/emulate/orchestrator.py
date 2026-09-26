@@ -181,9 +181,9 @@ def emulate_firmware(
         time.sleep(5)
         elapsed = int(time.time() - start_time)
         check_result = subprocess.run(
-            ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-             "--max-time", "3", f"http://localhost:{host_port}"],
-            capture_output=True, text=True, timeout=10, check=False,
+            ["docker", "exec", container_name, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+             "--max-time", "3", f"http://127.0.0.1:{host_port}"],
+            capture_output=True, text=True, env=_env(), timeout=10, check=False,
         )
         http_code = check_result.stdout.strip()
         if http_code and http_code != "000":

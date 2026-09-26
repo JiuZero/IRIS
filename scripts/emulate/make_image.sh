@@ -63,6 +63,14 @@ chmod +x "${TMP_IMAGE_DIR}/firmadyne/network.sh"
 touch "${TMP_IMAGE_DIR}/firmadyne/debug.sh"
 chmod +x "${TMP_IMAGE_DIR}/firmadyne/debug.sh"
 
+echo "----Injecting IRIS Network Fix----"
+if [ -d "${TMP_IMAGE_DIR}/etc/init.d" ]; then
+    cp /work/scripts/iris_net_fix.sh "${TMP_IMAGE_DIR}/etc/init.d/iris_net_fix"
+    chmod +x "${TMP_IMAGE_DIR}/etc/init.d/iris_net_fix"
+    mkdir -p "${TMP_IMAGE_DIR}/etc/rc.d"
+    ln -sf "../init.d/iris_net_fix" "${TMP_IMAGE_DIR}/etc/rc.d/S99iris_net_fix"
+fi
+
 echo "----Finding Init----"
 cp /work/scripts/infer_init.sh "${TMP_IMAGE_DIR}/infer_init.sh"
 chmod +x "${TMP_IMAGE_DIR}/infer_init.sh"
@@ -74,22 +82,6 @@ if [ -e "${TMP_IMAGE_DIR}/firmadyne/init" ]; then
     echo "Init: $(cat ${WORK_DIR}/init)"
 fi
 
-echo "----Patching Network Config (DHCP on LAN)----"
-if [ -e "${TMP_IMAGE_DIR}/etc/config/network" ]; then
-    # Replace static LAN config with DHCP
-    cat > "${TMP_IMAGE_DIR}/etc/config/network" << 'NETCFG'
-config interface 'loopback'
-    option ifname 'lo'
-    option proto 'static'
-    option ipaddr '127.0.0.1'
-    option netmask '255.0.0.0'
-
-config interface 'lan'
-    option ifname 'eth0'
-    option proto 'dhcp'
-NETCFG
-    echo "Network config patched to DHCP on eth0"
-fi
 
 echo "----Unmounting and copying to output----"
 sync

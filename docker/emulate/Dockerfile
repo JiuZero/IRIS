@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     seabios vgabios ipxe-qemu \
     e2fsprogs multipath-tools util-linux \
     busybox-static \
-    curl wget iputils-ping iproute2 net-tools \
+    curl wget iputils-ping iproute2 net-tools bridge-utils uml-utilities socat \
     tar gzip cpio fdisk \
     && rm -rf /var/lib/apt/lists/*
 
