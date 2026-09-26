@@ -1,0 +1,104 @@
+#!/bin/bash
+set -e
+
+IID=$1
+ARCH=$2
+WORK_DIR=/work/scratch/${IID}
+IMAGE=${WORK_DIR}/image.raw
+IMAGE_DIR=${WORK_DIR}/image
+TARBALL=/work/scratch/${IID}/${IID}.tar.gz
+BINARIES=/work/binaries
+
+# Use /tmp for loop mount operations (overlay2 doesn't support loop devices)
+TMP_BUILD=/tmp/build-${IID}
+rm -rf "${TMP_BUILD}"
+mkdir -p "${TMP_BUILD}"
+TMP_IMAGE=${TMP_BUILD}/image.raw
+TMP_IMAGE_DIR=${TMP_BUILD}/image
+
+echo "----Creating QEMU Image (1G raw ext2)----"
+qemu-img create -f raw "${TMP_IMAGE}" 1G
+chmod a+rw "${TMP_IMAGE}"
+
+echo "----Creating ext2 filesystem directly----"
+mkfs.ext2 -F "${TMP_IMAGE}"
+
+echo "----Mounting image----"
+mkdir -p "${TMP_IMAGE_DIR}"
+mount -o loop "${TMP_IMAGE}" "${TMP_IMAGE_DIR}"
+
+echo "----Extracting Filesystem Tarball----"
+tar -xf "${TARBALL}" -C "${TMP_IMAGE_DIR}"
+echo "Extracted $(find ${TMP_IMAGE_DIR} -type f | wc -l) files"
+
+echo "----Creating firmadyne Directories----"
+mkdir -p "${TMP_IMAGE_DIR}/firmadyne/libnvram"
+mkdir -p "${TMP_IMAGE_DIR}/firmadyne/libnvram.override"
+
+cp /bin/busybox "${TMP_IMAGE_DIR}/firmadyne/busybox" 2>/dev/null || cp /usr/bin/busybox "${TMP_IMAGE_DIR}/firmadyne/busybox"
+
+echo "----Patching Filesystem----"
+cp /work/scripts/fix_image.sh "${TMP_IMAGE_DIR}/fix_image.sh"
+chmod +x "${TMP_IMAGE_DIR}/fix_image.sh"
+chroot "${TMP_IMAGE_DIR}" /firmadyne/busybox ash /fix_image.sh || true
+rm "${TMP_IMAGE_DIR}/fix_image.sh"
+
+echo "----Injecting Binaries----"
+for f in busybox console libnvram.so libnvram_ioctl.so; do
+    SRC="${BINARIES}/${f}.${ARCH}"
+    if [ -e "${SRC}" ]; then
+        cp "${SRC}" "${TMP_IMAGE_DIR}/firmadyne/${f}"
+        chmod a+x "${TMP_IMAGE_DIR}/firmadyne/${f}"
+    fi
+done
+
+mknod -m 666 "${TMP_IMAGE_DIR}/firmadyne/ttyS1" c 4 65 2>/dev/null || true
+
+cp /work/scripts/pre_init.sh "${TMP_IMAGE_DIR}/firmadyne/preInit.sh"
+chmod +x "${TMP_IMAGE_DIR}/firmadyne/preInit.sh"
+
+cp /work/scripts/network.sh "${TMP_IMAGE_DIR}/firmadyne/network.sh"
+chmod +x "${TMP_IMAGE_DIR}/firmadyne/network.sh"
+
+touch "${TMP_IMAGE_DIR}/firmadyne/debug.sh"
+chmod +x "${TMP_IMAGE_DIR}/firmadyne/debug.sh"
+
+echo "----Finding Init----"
+cp /work/scripts/infer_init.sh "${TMP_IMAGE_DIR}/infer_init.sh"
+chmod +x "${TMP_IMAGE_DIR}/infer_init.sh"
+chroot "${TMP_IMAGE_DIR}" /firmadyne/busybox ash /infer_init.sh || true
+rm "${TMP_IMAGE_DIR}/infer_init.sh"
+
+if [ -e "${TMP_IMAGE_DIR}/firmadyne/init" ]; then
+    cp "${TMP_IMAGE_DIR}/firmadyne/init" "${WORK_DIR}/init"
+    echo "Init: $(cat ${WORK_DIR}/init)"
+fi
+
+echo "----Patching Network Config (DHCP on LAN)----"
+if [ -e "${TMP_IMAGE_DIR}/etc/config/network" ]; then
+    # Replace static LAN config with DHCP
+    cat > "${TMP_IMAGE_DIR}/etc/config/network" << 'NETCFG'
+config interface 'loopback'
+    option ifname 'lo'
+    option proto 'static'
+    option ipaddr '127.0.0.1'
+    option netmask '255.0.0.0'
+
+config interface 'lan'
+    option ifname 'eth0'
+    option proto 'dhcp'
+NETCFG
+    echo "Network config patched to DHCP on eth0"
+fi
+
+echo "----Unmounting and copying to output----"
+sync
+umount "${TMP_IMAGE_DIR}"
+e2fsck -y "${TMP_IMAGE}" || true
+sync
+
+# Copy the final image to the output directory
+cp "${TMP_IMAGE}" "${IMAGE}"
+rm -rf "${TMP_BUILD}"
+
+echo "==== Image built: ${IMAGE} ===="

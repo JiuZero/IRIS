@@ -11,9 +11,11 @@ app = typer.Typer(help="IRIS - IoT Rehosting & Interconnection Simulator", no_ar
 db_app = typer.Typer(help="metadata database operations")
 extract_app = typer.Typer(help="L1 extraction utilities")
 corpus_app = typer.Typer(help="firmware corpus manifest operations")
+emulate_app = typer.Typer(help="L2 emulation utilities")
 app.add_typer(db_app, name="db")
 app.add_typer(extract_app, name="extract")
 app.add_typer(corpus_app, name="corpus")
+app.add_typer(emulate_app, name="emulate")
 
 log = get_logger(__name__)
 
@@ -237,6 +239,57 @@ def main() -> None:
     settings = get_settings()
     setup_logging(settings.log_level)
     app()
+
+
+@emulate_app.command("run")
+def emulate_run(
+    rootfs: Path = typer.Argument(..., help="path to extracted rootfs directory"),
+    arch: str = typer.Option(..., help="target architecture (mipsel/mipseb/armel)"),
+    iid: int = typer.Option(0, help="image ID for scratch directory naming"),
+    port: int = typer.Option(8080, help="host port for web access"),
+    timeout: int = typer.Option(120, help="boot timeout in seconds"),
+) -> None:
+    """Run QEMU emulation of a firmware rootfs and check web reachability."""
+    from iris.emulate.orchestrator import emulate_firmware
+
+    if not rootfs.exists():
+        typer.secho(f"rootfs not found: {rootfs}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    settings = get_settings()
+    scratch = settings.scratch_dir
+
+    typer.echo(f"emulating {rootfs.name} arch={arch} port={port}")
+    result = emulate_firmware(
+        rootfs_dir=rootfs,
+        arch=arch,
+        iid=iid if iid > 0 else abs(hash(str(rootfs))) % 10000,
+        scratch_dir=scratch,
+        host_port=port,
+        timeout_sec=timeout,
+    )
+
+    typer.echo(f"success     : {result.success}")
+    typer.echo(f"web ok      : {result.web_ok}")
+    typer.echo(f"web url     : {result.web_url or '-'}")
+    typer.echo(f"duration    : {result.duration_sec:.1f}s")
+    if result.error:
+        typer.secho(f"error       : {result.error}", fg=typer.colors.RED)
+    if result.serial_log:
+        typer.echo("serial log (tail):")
+        for line in result.serial_log.splitlines()[-20:]:
+            typer.echo(f"  {line}")
+
+
+@emulate_app.command("stop")
+def emulate_stop(
+    iid: int = typer.Argument(..., help="image ID to stop"),
+) -> None:
+    """Stop a running QEMU emulation container."""
+    from iris.emulate.orchestrator import stop_emulation
+
+    ok = stop_emulation(iid)
+    typer.echo(f"stopped: {ok}")
 
 
 if __name__ == "__main__":

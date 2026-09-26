@@ -1,0 +1,9 @@
+FROM iris-emulate:latest
+
+COPY binaries/ /work/binaries/
+COPY scripts/emulate/ /work/scripts/
+
+RUN mkdir -p /work/scratch /work/images
+RUN chmod +x /work/scripts/*.sh
+
+WORKDIR /work
