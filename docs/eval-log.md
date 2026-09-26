@@ -74,6 +74,25 @@
 | DIR-615 E4 | D-Link | pending | FTP 可能不可达 |
 | camera-slot-1 | TBD | pending | 摄像头固件需手动获取 |
 
+## 新固件分析（用户提供）
+
+| 固件 | 品牌 | 格式 | 架构 | rootfs | 仿真 | 备注 |
+|------|------|------|------|--------|------|------|
+| TC3T14CV1.0.bin | Tenda | 自定义(ZIP) | ARM EABI5 | JFFS2 ×4 | 待研究 | Lua init, 多 JFFS2 合并 |
+| US_i29V2.0mt.bin | Tenda | uImage+FIT | ARM64 | FIT 内嵌 | 不支持 | 需 ARM64 内核 |
+
+**TC3T14C 分析**：
+- 头 "TD0201AX520CE" + ZIP 归档（PK magic @ offset 3007）
+- ZIP 内容：u-boot.bin.img, zImage-dtb.img (ARM), romfs/user/web/custom-x.squash.img (实为 JFFS2)
+- JFFS2 rootfs 用 jefferson 提取成功（296 nodes）
+- romfs: busybox only; user: Lua init + audio; web: web UI; custom: hostapd
+- 仿真挑战：Lua init 系统 + 多 JFFS2 overlay + ARM kernel panic 风险
+
+**US_i29 分析**：
+- uImage header (LZMA comp) → FIT image (FDT magic 0xd00dfeed)
+- ARM64 OpenWrt Linux-5.4.231, 3.3MB FIT
+- 不支持：需 qemu-system-aarch64 + ARM64 预编译内核
+
 ## M0 验收清单进度
 
 - [x] 6 款 confirmed 固件下载落盘，MD5/大小已记录
