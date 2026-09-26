@@ -324,16 +324,24 @@ def emulate_run(
     iid: int = typer.Option(0, help="image ID for scratch directory naming"),
     port: int = typer.Option(8080, help="host port for web access"),
     timeout: int = typer.Option(120, help="boot timeout in seconds"),
+    force: bool = typer.Option(False, "--force", help="skip the rootfs ELF arch preflight"),
     parts_dir: Path = typer.Option(
         None, "--parts-dir", help="TendaW -parts dir of raw .jffs2 slices; merges them container-side (symlink-safe)"
     ),
 ) -> None:
     """Run QEMU emulation of a firmware rootfs and check web reachability."""
-    from iris.emulate.orchestrator import build_parts_mounts, emulate_firmware
+    from iris.emulate.orchestrator import build_parts_mounts, emulate_firmware, preflight_arch
 
     if not rootfs.exists():
         typer.secho(f"rootfs not found: {rootfs}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+
+    if not force:
+        problem = preflight_arch(rootfs, arch)
+        if problem:
+            typer.secho(f"preflight: {problem}", fg=typer.colors.RED, err=True)
+            typer.secho("  (override with --force)", fg=typer.colors.YELLOW, err=True)
+            raise typer.Exit(code=3)
 
     settings = get_settings()
     scratch = settings.scratch_dir

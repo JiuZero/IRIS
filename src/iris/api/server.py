@@ -12,7 +12,10 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from iris.config import get_settings
-from iris.emulate.orchestrator import emulate_firmware, stop_emulation
+from iris.emulate.orchestrator import emulate_firmware, preflight_arch, stop_emulation
+from iris.emulate.qemu_config import supported_archs
+
+_SUPPORTED_ARCHS = tuple(supported_archs())
 
 app = FastAPI(
     title="IRIS — IoT Rehosting & Interconnection Simulator",
@@ -97,8 +100,12 @@ async def emulate(req: EmulateRequest) -> EmulateResponse:
     if not rootfs.exists():
         raise HTTPException(status_code=404, detail=f"rootfs not found: {req.rootfs_path}")
 
-    if req.arch not in ("mipsel", "mipseb", "armel"):
+    if req.arch not in _SUPPORTED_ARCHS:
         raise HTTPException(status_code=400, detail=f"unsupported arch: {req.arch}")
+
+    problem = await asyncio.to_thread(preflight_arch, rootfs, req.arch)
+    if problem:
+        raise HTTPException(status_code=400, detail=f"preflight: {problem}")
 
     iid = req.iid if req.iid > 0 else int(hashlib.md5(str(rootfs.resolve()).encode()).hexdigest(), 16) % 10000
 
@@ -198,7 +205,7 @@ async def pipeline(
     info = await asyncio.to_thread(analyze_firmware, content)
     detected_arch = arch or info.arch or ""
 
-    if not detected_arch or detected_arch not in ("mipsel", "mipseb", "armel"):
+    if not detected_arch or detected_arch not in _SUPPORTED_ARCHS:
         return PipelineResponse(
             iid=iid,
             firmware_name=safe_name,
@@ -208,7 +215,7 @@ async def pipeline(
             web_ok=False,
             web_url="-",
             duration_sec=0.0,
-            error=f"unsupported or undetected architecture: {detected_arch or 'unknown'}",
+            error=f"unsupported-arch: '{detected_arch or 'unknown'}' not in supported {list(_SUPPORTED_ARCHS)}",
         )
 
     ext = await asyncio.to_thread(lambda: extract_rootfs(fw_path, scratch, arch_hint=detected_arch))
@@ -225,6 +232,20 @@ async def pipeline(
             web_url="-",
             duration_sec=0.0,
             error=f"rootfs extraction failed: {ext.failure or 'no rootfs directory created'}",
+        )
+
+    problem = await asyncio.to_thread(preflight_arch, rootfs_dir, detected_arch)
+    if problem:
+        return PipelineResponse(
+            iid=iid,
+            firmware_name=safe_name,
+            arch=detected_arch,
+            rootfs_path=str(rootfs_dir),
+            success=False,
+            web_ok=False,
+            web_url="-",
+            duration_sec=0.0,
+            error=f"preflight: {problem}",
         )
 
     result = await asyncio.to_thread(

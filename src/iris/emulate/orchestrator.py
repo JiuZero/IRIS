@@ -18,7 +18,47 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from iris.emulate.qemu_config import get_config
+from iris.emulate.qemu_config import get_config, supported_archs
+
+
+# maps an ELF-census arch label (L1 vocabulary) to the emulation arch that can run it
+_CENSUS_TO_RUNNABLE = {
+    "mipsel": "mipsel",
+    "mipseb": "mipseb",
+    "armel": "armel",
+    "aarch64": "arm64",
+}
+
+
+def preflight_arch(rootfs_dir: Path, arch: str) -> str:
+    """Validate the requested arch before spinning up docker.
+
+    Returns '' when the emulation may proceed, else a structured failure line:
+      unsupported-arch: requested arch has no QEMU config
+      arch-mismatch:    rootfs ELF census disagrees with the requested arch
+    """
+    supported = supported_archs()
+    if arch not in supported:
+        return (
+            f"unsupported-arch: '{arch}' has no QEMU config "
+            f"(supported: {', '.join(supported)})"
+        )
+
+    from iris.extract.rootfs_extract import _census_elfs
+
+    _count, counter = _census_elfs(Path(rootfs_dir))
+    known = {a: n for a, n in counter.items() if not a.startswith("unk(")}
+    if not known:
+        return ""  # no ELF evidence (script-only rootfs etc.) — can't judge
+    dominant = max(known, key=known.get)
+    runnable = _CENSUS_TO_RUNNABLE.get(dominant)
+    if runnable and runnable != arch:
+        return (
+            f"arch-mismatch: rootfs is dominated by {dominant} ELFs "
+            f"({known[dominant]} samples), which cannot run under the '{arch}' kernel; "
+            f"use --arch {runnable}"
+        )
+    return ""
 
 
 @dataclass
