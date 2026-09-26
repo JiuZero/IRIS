@@ -40,10 +40,12 @@ def db_check() -> None:
 
 
 @extract_app.command("inspect")
-def extract_inspect(archive: Path) -> None:
-    """Analyze a tar/tar.gz rootfs archive: rootfs candidate + arch census."""
+def extract_inspect(
+    archive: Path,
+    arch_hint: str = typer.Option("", help="arch hint for ambiguous cases (mipseb/mipsel/armel/x64)"),
+) -> None:
+    """Analyze a firmware image: tar rootfs or raw firmware format/arch inference."""
     import tarfile
-    from collections import Counter
 
     from iris.extract.arch import identify_tar_members
     from iris.extract.rootfs import find_rootfs_in_archive
@@ -52,26 +54,39 @@ def extract_inspect(archive: Path) -> None:
         typer.secho(f"archive not found: {archive}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
-    cand = None
-    arch_counter: Counter = Counter()
     if tarfile.is_tarfile(archive):
         cand = find_rootfs_in_archive(archive)
         arch_counter = identify_tar_members(archive)
-    else:
-        typer.secho("not a tar archive; raw firmware analysis comes in M1 (binwalk/unblob)", fg=typer.colors.YELLOW)
-        raise typer.Exit(code=2)
+        if cand is None:
+            typer.secho("no rootfs candidate found", fg=typer.colors.RED)
+            raise typer.Exit(code=3)
+        typer.echo("format          : tar archive")
+        typer.echo(f"rootfs prefix   : {cand.prefix or '<root>'}")
+        typer.echo(f"unix dir hits   : {cand.unix_hits} (threshold {4})")
+        typer.echo(f"busybox         : {cand.has_busybox}")
+        typer.echo(f"/etc/init.d     : {cand.has_initd}")
+        typer.echo(f"score           : {cand.score}")
+        typer.echo(f"is_rootfs       : {cand.is_rootfs}")
+        typer.echo(f"arch census     : {dict(arch_counter) or '<no ELF found>'}")
+        return
 
-    if cand is None:
-        typer.secho("no rootfs candidate found", fg=typer.colors.RED)
-        raise typer.Exit(code=3)
+    from iris.extract.firmware import analyze_firmware
 
-    typer.echo(f"rootfs prefix   : {cand.prefix or '<root>'}")
-    typer.echo(f"unix dir hits   : {cand.unix_hits} (threshold {4})")
-    typer.echo(f"busybox         : {cand.has_busybox}")
-    typer.echo(f"/etc/init.d     : {cand.has_initd}")
-    typer.echo(f"score           : {cand.score}")
-    typer.echo(f"is_rootfs       : {cand.is_rootfs}")
-    typer.echo(f"arch census     : {dict(arch_counter) or '<no ELF found>'}")
+    data = archive.read_bytes()
+    info = analyze_firmware(data, arch_hint=arch_hint)
+    typer.echo(f"format          : {info.format}")
+    typer.echo(f"arch            : {info.arch or '<unknown>'}")
+    typer.echo(f"rootfs offset   : {info.rootfs_offset if info.rootfs_offset is not None else '<not found>'}")
+    if info.uimage:
+        typer.echo(f"uImage name     : {info.uimage.name}")
+        typer.echo(f"uImage arch     : field={info.uimage.arch_field} inferred={info.uimage.arch_name}")
+        typer.echo(f"uImage comp     : {info.uimage.comp}")
+        typer.echo(f"uImage load/ep  : 0x{info.uimage.load:08x} / 0x{info.uimage.ep:08x}")
+    if info.squashfs:
+        for sq in info.squashfs:
+            typer.echo(f"squashfs        : offset=0x{sq.offset:x} endian={sq.endian} comp={sq.comp}")
+    if info.elf_archs:
+        typer.echo(f"ELF census      : {dict(info.elf_archs)}")
 
 
 @extract_app.command("add")
@@ -81,8 +96,9 @@ def extract_add(
     product: str = typer.Option("", help="product name"),
     version: str = typer.Option("", help="firmware version"),
     target_type: str = typer.Option("router", help="router / camera / ..."),
+    arch_hint: str = typer.Option("", help="arch hint for ambiguous cases (mipseb/mipsel/armel/x64)"),
 ) -> None:
-    """Register an extracted rootfs archive into the metadata database."""
+    """Register a firmware image into the metadata database."""
     from iris.db.models import Brand, Image
 
     settings = get_settings()
@@ -112,8 +128,14 @@ def extract_add(
                 arch = counter.most_common(1)[0][0]
             rootfs_ok = find_rootfs_in_archive(archive) is not None
         else:
+            from iris.extract.firmware import analyze_firmware
+
+            data = archive.read_bytes()
+            fw_info = analyze_firmware(data, arch_hint=arch_hint)
+            arch = fw_info.arch
+            rootfs_ok = fw_info.rootfs_offset is not None
             typer.secho(
-                "  (raw firmware, not a tar; rootfs/arch deferred to M1 binwalk/unblob)",
+                f"  (raw firmware {fw_info.format}; arch={arch or '?'} rootfs={rootfs_ok})",
                 fg=typer.colors.YELLOW,
             )
         image = Image(
