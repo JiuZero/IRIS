@@ -12,10 +12,12 @@ db_app = typer.Typer(help="metadata database operations")
 extract_app = typer.Typer(help="L1 extraction utilities")
 corpus_app = typer.Typer(help="firmware corpus manifest operations")
 emulate_app = typer.Typer(help="L2 emulation utilities")
+serve_app = typer.Typer(help="L5 API server")
 app.add_typer(db_app, name="db")
 app.add_typer(extract_app, name="extract")
 app.add_typer(corpus_app, name="corpus")
 app.add_typer(emulate_app, name="emulate")
+app.add_typer(serve_app, name="serve")
 
 log = get_logger(__name__)
 
@@ -290,6 +292,20 @@ def emulate_stop(
 
     ok = stop_emulation(iid)
     typer.echo(f"stopped: {ok}")
+
+
+@serve_app.command("start")
+def serve_start(
+    host: str = typer.Option("0.0.0.0", help="bind address"),
+    port: int = typer.Option(9000, help="API server port"),
+    reload: bool = typer.Option(False, help="auto-reload on code changes"),
+) -> None:
+    """Start the IRIS FastAPI orchestration server."""
+    import uvicorn
+
+    typer.echo(f"IRIS API server starting on {host}:{port}")
+    typer.echo(f"  docs: http://{host}:{port}/docs")
+    uvicorn.run("iris.api.server:app", host=host, port=port, reload=reload)
 
 
 if __name__ == "__main__":

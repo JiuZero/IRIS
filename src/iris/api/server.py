@@ -1,0 +1,154 @@
+"""L5 orchestration API — FastAPI service for batch firmware emulation."""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+
+from iris.config import get_settings
+from iris.emulate.orchestrator import emulate_firmware, stop_emulation
+
+app = FastAPI(
+    title="IRIS — IoT Rehosting & Interconnection Simulator",
+    version="0.1.0",
+    description="Automated firmware rehosting platform for network devices",
+)
+
+_active_emulations: dict[int, dict[str, Any]] = {}
+
+
+class EmulateRequest(BaseModel):
+    rootfs_path: str = Field(..., description="path to extracted rootfs directory")
+    arch: str = Field(..., description="target architecture (mipsel/mipseb/armel)")
+    iid: int = Field(0, description="image ID (auto-assigned if 0)")
+    port: int = Field(8080, description="host port for web access")
+    timeout: int = Field(120, description="boot timeout in seconds")
+
+
+class EmulateResponse(BaseModel):
+    iid: int
+    success: bool
+    web_ok: bool
+    web_url: str
+    duration_sec: float
+    error: str
+    container_id: str
+
+
+class FirmwareInfo(BaseModel):
+    name: str
+    path: str
+    arch: str
+
+
+class HealthResponse(BaseModel):
+    status: str
+    version: str
+    active_emulations: int
+
+
+@app.get("/api/v1/health", response_model=HealthResponse)
+async def health() -> HealthResponse:
+    return HealthResponse(status="ok", version="0.1.0", active_emulations=len(_active_emulations))
+
+
+@app.get("/api/v1/firmware", response_model=list[FirmwareInfo])
+async def list_firmware() -> list[FirmwareInfo]:
+    settings = get_settings()
+    scratch = settings.scratch_dir
+    result = []
+    if scratch.exists():
+        for d in sorted(scratch.iterdir()):
+            if d.is_dir() and d.name.endswith("-rootfs"):
+                arch = "unknown"
+                bin_dir = d / "bin"
+                if bin_dir.exists():
+                    for f in bin_dir.iterdir():
+                        try:
+                            if not f.is_file() or f.is_symlink():
+                                continue
+                            data = f.read_bytes()[:20]
+                        except OSError:
+                            continue
+                        if len(data) >= 18 and data[:4] == b"\x7fELF":
+                            ei_data = data[5]
+                            ei_machine = int.from_bytes(data[18:20], "little")
+                            endian = "el" if ei_data == 1 else "eb"
+                            if ei_machine == 8:
+                                arch = f"mips{endian}"
+                            elif ei_machine == 40:
+                                arch = "armel"
+                            elif ei_machine == 183:
+                                arch = "aarch64"
+                            break
+                result.append(FirmwareInfo(name=d.name, path=str(d), arch=arch))
+    return result
+
+
+@app.post("/api/v1/emulate", response_model=EmulateResponse)
+async def emulate(req: EmulateRequest) -> EmulateResponse:
+    rootfs = Path(req.rootfs_path)
+    if not rootfs.exists():
+        raise HTTPException(status_code=404, detail=f"rootfs not found: {req.rootfs_path}")
+
+    if req.arch not in ("mipsel", "mipseb", "armel"):
+        raise HTTPException(status_code=400, detail=f"unsupported arch: {req.arch}")
+
+    iid = req.iid if req.iid > 0 else abs(hash(str(rootfs))) % 10000
+
+    settings = get_settings()
+    scratch = settings.scratch_dir
+
+    result = await asyncio.to_thread(
+        emulate_firmware,
+        rootfs_dir=rootfs,
+        arch=req.arch,
+        iid=iid,
+        scratch_dir=scratch,
+        host_port=req.port,
+        timeout_sec=req.timeout,
+    )
+
+    _active_emulations[iid] = {
+        "iid": iid,
+        "arch": req.arch,
+        "success": result.success,
+        "web_ok": result.web_ok,
+        "web_url": result.web_url,
+        "container_id": result.container_id,
+        "started_at": time.time(),
+    }
+
+    return EmulateResponse(
+        iid=iid,
+        success=result.success,
+        web_ok=result.web_ok,
+        web_url=result.web_url or "-",
+        duration_sec=result.duration_sec,
+        error=result.error or "",
+        container_id=result.container_id,
+    )
+
+
+@app.get("/api/v1/emulate", response_model=list[dict])
+async def list_emulations() -> list[dict]:
+    return list(_active_emulations.values())
+
+
+@app.get("/api/v1/emulate/{iid}", response_model=dict)
+async def get_emulation(iid: int) -> dict:
+    if iid not in _active_emulations:
+        raise HTTPException(status_code=404, detail=f"emulation {iid} not found")
+    return _active_emulations[iid]
+
+
+@app.delete("/api/v1/emulate/{iid}")
+async def stop_emulation_api(iid: int) -> dict:
+    ok = stop_emulation(iid)
+    _active_emulations.pop(iid, None)
+    return {"stopped": ok, "iid": iid}
