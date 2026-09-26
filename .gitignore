@@ -18,9 +18,14 @@ firmwares/
 *.qcow2
 *.raw
 *.img
+*.img.gz
 qemu.*.serial.log
 qemu.initial.serial.log
 qemu.final.serial.log
+
+# 语料下载物（清单 TOML 入库，固件本体不入库）
+iris-home/corpus/*
+!iris-home/corpus/*.toml
 
 # 运行时数据
 *.db

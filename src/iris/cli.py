@@ -10,8 +10,10 @@ from iris.log import get_logger, setup_logging
 app = typer.Typer(help="IRIS - IoT Rehosting & Interconnection Simulator", no_args_is_help=True)
 db_app = typer.Typer(help="metadata database operations")
 extract_app = typer.Typer(help="L1 extraction utilities")
+corpus_app = typer.Typer(help="firmware corpus manifest operations")
 app.add_typer(db_app, name="db")
 app.add_typer(extract_app, name="extract")
+app.add_typer(corpus_app, name="corpus")
 
 log = get_logger(__name__)
 
@@ -120,6 +122,49 @@ def extract_add(
         session.add(image)
         session.flush()
         typer.echo(f"registered image id={image.id} brand={brand} arch={arch or '?'} md5={md5[:12]}")
+
+
+@corpus_app.command("list")
+def corpus_list(
+    manifest: Path = typer.Argument(Path("iris-home/corpus/m0-baseline.toml")),
+) -> None:
+    """List entries of a corpus manifest."""
+    from iris.corpus.manifest import load_manifest
+
+    m = load_manifest(manifest)
+    typer.echo(f"manifest: {m.name} ({m.description})")
+    for e in m.entries:
+        typer.echo(
+            f"  [{e.status:^8}] {e.name:<24} brand={e.brand:<12} arch={e.arch_hint or '-':<7} {e.target_type}"
+        )
+
+
+@corpus_app.command("download")
+def corpus_download(
+    manifest: Path = typer.Argument(Path("iris-home/corpus/m0-baseline.toml")),
+    only: str = typer.Option("", help="download only entries whose name contains this string"),
+    include_pending: bool = typer.Option(False, help="also download pending entries"),
+) -> None:
+    """Download firmware files into iris-home/corpus/."""
+    from iris.corpus.manifest import download_entry, load_manifest
+
+    settings = get_settings()
+    m = load_manifest(manifest)
+    dest_dir = settings.corpus_dir
+    failures = 0
+    for e in m.entries:
+        if only and only not in e.name:
+            continue
+        if e.status == "pending" and not include_pending:
+            continue
+        if e.url.startswith("https://TBD"):
+            continue
+        try:
+            download_entry(e, dest_dir, mirror=settings.download_mirror)
+        except Exception as exc:  # noqa: BLE001 - report and continue with next entry
+            failures += 1
+            typer.secho(f"  FAILED: {e.name}: {exc}", fg=typer.colors.RED)
+    typer.echo(f"done, {failures} failure(s)")
 
 
 def main() -> None:

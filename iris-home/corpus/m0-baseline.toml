@@ -1,0 +1,114 @@
+# IRIS M0 baseline corpus: 10 firmware entries for pipeline validation.
+# status=confirmed  -> URL verified / high confidence; download directly.
+# status=pending    -> URL may rotate; browse the vendor portal to fix before download.
+# If a URL 404s, browse the parent directory (e.g. downloads.openwrt.org/releases/)
+# and adjust the filename; keep the entry so coverage accounting stays intact.
+
+name = "m0-baseline"
+description = "M0 tech validation: 10 entries covering mipseb/mipsel/armel/x64 + camera slot"
+
+[[entries]]
+name = "dlink-dir868l-revb"
+brand = "D-Link"
+product = "DIR-868L"
+version = "revB_2.05b02"
+url = "https://github.com/pr0v3rbs/FirmAE/releases/download/v1.0/DIR-868L_fw_revB_2-05b02_eu_multi_20161117.zip"
+status = "confirmed"
+source = "FirmAE release page"
+notes = "Official FirmAE README sample; auto-routed through IRIS_ mirror for github"
+
+[[entries]]
+name = "openwrt-archer-c7-v2"
+brand = "TP-Link"
+product = "Archer C7 v2 (OpenWrt 24.10.0)"
+version = "24.10.0"
+url = "https://downloads.openwrt.org/releases/24.10.0/targets/ath79/generic/openwrt-24.10.0-ath79-generic-tplink_archer-c7-v2-squashfs-factory.bin"
+arch_hint = "mipseb"
+status = "confirmed"
+source = "downloads.openwrt.org"
+notes = "ath79/generic MIPS74Kc big-endian"
+
+[[entries]]
+name = "openwrt-mi-router-4a-giga"
+brand = "Xiaomi"
+product = "Mi Router 4A Gigabit (OpenWrt 24.10.0)"
+version = "24.10.0"
+url = "https://downloads.openwrt.org/releases/24.10.0/targets/ramips/mt7621/openwrt-24.10.0-ramips-mt7621-xiaomi_mi-router-4a-gigabit-squashfs-factory.bin"
+arch_hint = "mipsel"
+status = "confirmed"
+source = "downloads.openwrt.org"
+notes = "ramips/mt7621 MIPS little-endian"
+
+[[entries]]
+name = "openwrt-wrt1200ac"
+brand = "Linksys"
+product = "WRT1200AC (OpenWrt 24.10.0)"
+version = "24.10.0"
+url = "https://downloads.openwrt.org/releases/24.10.0/targets/mvebu/cortexa9/openwrt-24.10.0-mvebu-cortexa9-linksys_wrt1200ac-squashfs-factory.img"
+arch_hint = "armel"
+status = "confirmed"
+source = "downloads.openwrt.org"
+notes = "mvebu/cortexa9 ARM32 little-endian"
+
+[[entries]]
+name = "openwrt-r7800"
+brand = "Netgear"
+product = "R7800 (OpenWrt 24.10.0)"
+version = "24.10.0"
+url = "https://downloads.openwrt.org/releases/24.10.0/targets/ipq806x/generic/openwrt-24.10.0-ipq806x-generic-netgear_r7800-squashfs-factory.img"
+arch_hint = "armel"
+status = "confirmed"
+source = "downloads.openwrt.org"
+notes = "ipq806x ARM32 little-endian"
+
+[[entries]]
+name = "openwrt-x86-64"
+brand = "OpenWrt"
+product = "x86/64 generic (OpenWrt 24.10.0)"
+version = "24.10.0"
+url = "https://downloads.openwrt.org/releases/24.10.0/targets/x86/64/openwrt-24.10.0-x86-64-generic-ext4-combined-efi.img.gz"
+arch_hint = "x64"
+status = "confirmed"
+source = "downloads.openwrt.org"
+notes = "x64 support verification sample (expected NOT firmae-supported)"
+
+[[entries]]
+name = "netgear-r6220"
+brand = "Netgear"
+product = "R6220"
+version = "1.1.0.60"
+url = "https://www.downloads.netgear.com/files/GDC/R6220/R6220-V1.1.0.60_1.0.1.zip"
+status = "pending"
+source = "netgear vendor portal"
+notes = "vendor URLs rotate; if 404 browse https://www.netgear.com/support/product/R6220"
+
+[[entries]]
+name = "tplink-wdr4300"
+brand = "TP-Link"
+product = "TL-WDR4300"
+version = "latest vendor"
+url = "https://static.tp-link.com/resources/software/TL-WDR4300_V1_141110.zip"
+status = "pending"
+source = "tp-link vendor portal"
+notes = "vendor URLs rotate; if 404 browse https://www.tp-link.com/en/support/download/tl-wdr4300/"
+
+[[entries]]
+name = "dlink-dir615-e4"
+brand = "D-Link"
+product = "DIR-615 E4"
+version = "latest vendor"
+url = "ftp://ftp2.dlink.com/PRODUCTS/DIR-615/REVC/DIR-615_REVC_FIRMWARE_4.13.ZIP"
+status = "pending"
+source = "ftp2.dlink.com"
+notes = "ftp may be blocked on modern networks; vendor portal as fallback"
+
+[[entries]]
+name = "camera-slot-1"
+brand = "TBD"
+product = "IP camera sample (Hikvision/Dahua/Foscam)"
+version = "TBD"
+url = "https://TBD.invalid/replace-me.bin"
+target_type = "camera"
+status = "pending"
+source = "vendor portal (login-gated) or hardware UART/SPI dump"
+notes = "Camera firmware is login-gated upstream; acquire via vendor portal or hardware side, then replace url and set status=confirmed"
