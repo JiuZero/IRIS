@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from pathlib import Path
 from typing import Any
@@ -99,7 +100,7 @@ async def emulate(req: EmulateRequest) -> EmulateResponse:
     if req.arch not in ("mipsel", "mipseb", "armel"):
         raise HTTPException(status_code=400, detail=f"unsupported arch: {req.arch}")
 
-    iid = req.iid if req.iid > 0 else abs(hash(str(rootfs))) % 10000
+    iid = req.iid if req.iid > 0 else int(hashlib.md5(str(rootfs.resolve()).encode()).hexdigest(), 16) % 10000
 
     settings = get_settings()
     scratch = settings.scratch_dir
@@ -173,8 +174,6 @@ async def pipeline(
     timeout: int = 120,
 ) -> PipelineResponse:
     """End-to-end pipeline: upload firmware → extract rootfs → emulate → web access."""
-    import hashlib
-
     from iris.extract.firmware import analyze_firmware
     from iris.extract.rootfs_extract import extract_rootfs
 
@@ -182,8 +181,8 @@ async def pipeline(
     scratch = settings.scratch_dir
 
     content = await firmware.read()
-    name = (firmware.filename or "").lower()
-    if name.endswith(".zip") or content[:4] == b"PK\x03\x04":
+    safe_name = Path(firmware.filename or "firmware.bin").name
+    if safe_name.lower().endswith(".zip") or content[:4] == b"PK\x03\x04":
         raise HTTPException(
             status_code=415,
             detail="zip containers are not accepted (unpredictable internal layout); "
@@ -192,17 +191,17 @@ async def pipeline(
     fw_hash = hashlib.md5(content).hexdigest()[:8]
     iid = int(fw_hash, 16) % 10000
 
-    fw_path = scratch / f"upload-{iid}-{firmware.filename}"
+    fw_path = scratch / f"upload-{iid}-{safe_name}"
     fw_path.parent.mkdir(parents=True, exist_ok=True)
     fw_path.write_bytes(content)
 
-    info = analyze_firmware(content)
+    info = await asyncio.to_thread(analyze_firmware, content)
     detected_arch = arch or info.arch or ""
 
     if not detected_arch or detected_arch not in ("mipsel", "mipseb", "armel"):
         return PipelineResponse(
             iid=iid,
-            firmware_name=firmware.filename or "unknown",
+            firmware_name=safe_name,
             arch=detected_arch or "unknown",
             rootfs_path="",
             success=False,
@@ -212,13 +211,13 @@ async def pipeline(
             error=f"unsupported or undetected architecture: {detected_arch or 'unknown'}",
         )
 
-    extract_rootfs(fw_path, scratch, arch_hint=detected_arch)
+    await asyncio.to_thread(lambda: extract_rootfs(fw_path, scratch, arch_hint=detected_arch))
     rootfs_dir = scratch / f"{fw_path.stem}-rootfs"
 
     if not rootfs_dir.exists():
         return PipelineResponse(
             iid=iid,
-            firmware_name=firmware.filename or "unknown",
+            firmware_name=safe_name,
             arch=detected_arch,
             rootfs_path="",
             success=False,
@@ -250,7 +249,7 @@ async def pipeline(
 
     return PipelineResponse(
         iid=iid,
-        firmware_name=firmware.filename or "unknown",
+        firmware_name=safe_name,
         arch=detected_arch,
         rootfs_path=str(rootfs_dir),
         success=result.success,

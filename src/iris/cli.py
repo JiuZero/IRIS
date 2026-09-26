@@ -136,6 +136,9 @@ def extract_add(
     """Register a firmware image into the metadata database."""
     from iris.db.models import Brand, Image
 
+    if not archive.exists():
+        typer.secho(f"firmware not found: {archive}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
     _reject_zip(archive)
     settings = get_settings()
     engine = get_engine(settings.database_url)
@@ -289,7 +292,8 @@ def rules_list() -> None:
     from iris.rules.engine import load_rules
 
     for r in load_rules(get_settings().rules_dir):
-        typer.echo(f"{r.id:<26} stage={r.stage:<10} {r.description.splitlines()[0][:64]}")
+        first_line = (r.description.splitlines() or [""])[0]
+        typer.echo(f"{r.id:<26} stage={r.stage:<10} {first_line[:64]}")
 
 
 @rules_app.command("apply")
@@ -345,7 +349,7 @@ def emulate_run(
     result = emulate_firmware(
         rootfs_dir=rootfs,
         arch=arch,
-        iid=iid if iid > 0 else abs(hash(str(rootfs))) % 10000,
+        iid=iid if iid > 0 else int(hashlib.md5(str(rootfs.resolve()).encode()).hexdigest(), 16) % 10000,
         scratch_dir=scratch,
         host_port=port,
         timeout_sec=timeout,
