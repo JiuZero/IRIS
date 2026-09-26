@@ -20,6 +20,10 @@ QEMU_MACHINE=""
 QEMU_ROOTFS=""
 QEMU_DISK=""
 QEMU_NET=""
+QEMU_CPU=""
+QEMU_INITRD=""
+CONSOLE="ttyS0"
+MEMORY=256
 
 # Setup TAP networking for guest-to-host connectivity
 TAP_IFACE="tap${IID}"
@@ -65,6 +69,20 @@ case "${ARCH}" in
         QEMU_DISK="-drive if=none,file=${IMAGE},format=raw,id=rootfs -device virtio-blk-device,drive=rootfs"
         QEMU_NET="-device virtio-net-device,netdev=net0 -netdev tap,id=net0,ifname=${TAP_IFACE},script=no,downscript=no"
         ;;
+    arm64)
+        KERNEL="${BINARIES}/Image.arm64"
+        QEMU="qemu-system-aarch64"
+        QEMU_MACHINE="virt"
+        # "max" (not cortex-a72): vendor aarch64 binaries use ARMv8.3 pointer-auth,
+        # which cortex-a72 TCG cannot execute (SIGILL).
+        QEMU_CPU="-cpu max"
+        QEMU_ROOTFS="/dev/vda"
+        QEMU_DISK="-drive if=none,file=${IMAGE},format=raw,id=rootfs -device virtio-blk-device,drive=rootfs"
+        QEMU_NET="-device virtio-net-device,netdev=net0 -netdev tap,id=net0,ifname=${TAP_IFACE},script=no,downscript=no"
+        CONSOLE="ttyAMA0"
+        MEMORY=512
+        QEMU_INITRD="-initrd ${BINARIES}/initramfs.arm64"
+        ;;
     mipseb)
         KERNEL="${BINARIES}/vmlinux.mipseb.4"
         QEMU="qemu-system-mips"
@@ -87,13 +105,13 @@ case "${ARCH}" in
         ;;
 esac
 
-APPEND="firmadyne.syscall=1 root=${QEMU_ROOTFS} console=ttyS0 nandsim.parts=64,64,64,64,64,64,64,64,64,64 rw debug ignore_loglevel print-fatal-signals=1 FIRMAE_NET=true FIRMAE_NVRAM=true FIRMAE_KERNEL=true FIRMAE_ETC=true user_debug=31"
+APPEND="firmadyne.syscall=1 root=${QEMU_ROOTFS} console=${CONSOLE} nandsim.parts=64,64,64,64,64,64,64,64,64,64 rw debug ignore_loglevel print-fatal-signals=1 FIRMAE_NET=true FIRMAE_NVRAM=true FIRMAE_KERNEL=true FIRMAE_ETC=true user_debug=31"
 
 echo "Starting QEMU: ${QEMU} ${QEMU_MACHINE} kernel=${KERNEL}"
 echo "Disk: ${IMAGE}"
 echo "Network: TAP ${TAP_IFACE} -> bridge ${BR_IFACE} (${HOST_IP}/24)"
 
-${QEMU} -m 256 -M ${QEMU_MACHINE} -kernel ${KERNEL} \
+${QEMU} -m ${MEMORY} -M ${QEMU_MACHINE} ${QEMU_CPU} -kernel ${KERNEL} ${QEMU_INITRD} \
     ${QEMU_DISK} \
     -append "${APPEND}" \
     -serial file:${WORK_DIR}/qemu.serial.log \

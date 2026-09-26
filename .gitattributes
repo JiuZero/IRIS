@@ -1,0 +1,5 @@
+# shell 脚本与 guest 侧文件必须保持 LF：Windows 默认 autocrlf 会
+# 把它们转成 CRLF，直接砖掉容器/QEMU guest 内的执行。
+*.sh text eol=lf
+Dockerfile* text eol=lf
+rules/*.yaml text eol=lf

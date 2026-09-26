@@ -16,12 +16,14 @@ mkdir -p "${TMP_BUILD}"
 TMP_IMAGE=${TMP_BUILD}/image.raw
 TMP_IMAGE_DIR=${TMP_BUILD}/image
 
-echo "----Creating QEMU Image (1G raw ext2)----"
+echo "----Creating QEMU Image (1G raw)----"
+FS=ext2
+[ "${ARCH}" = "arm64" ] && FS=ext4   # Alpine arm64 generic kernel ships no ext2 driver
 qemu-img create -f raw "${TMP_IMAGE}" 1G
 chmod a+rw "${TMP_IMAGE}"
 
-echo "----Creating ext2 filesystem directly----"
-mkfs.ext2 -F "${TMP_IMAGE}"
+echo "----Creating ${FS} filesystem directly----"
+mkfs.${FS} -F "${TMP_IMAGE}"
 
 echo "----Mounting image----"
 mkdir -p "${TMP_IMAGE_DIR}"
@@ -69,6 +71,36 @@ if [ -d "${TMP_IMAGE_DIR}/etc/init.d" ]; then
     chmod +x "${TMP_IMAGE_DIR}/etc/init.d/iris_net_fix"
     mkdir -p "${TMP_IMAGE_DIR}/etc/rc.d"
     ln -sf "../init.d/iris_net_fix" "${TMP_IMAGE_DIR}/etc/rc.d/S99iris_net_fix"
+fi
+
+echo "----Arm64 Generic-Kernel Channel----"
+if [ "${ARCH}" = "arm64" ]; then
+    # Alpine busybox: the x86_64 one copied above cannot run inside an aarch64 guest
+    [ -e "${BINARIES}/busybox.arm64" ] && cp "${BINARIES}/busybox.arm64" "${TMP_IMAGE_DIR}/firmadyne/busybox.arm64"
+
+    # OpenWrt-style rc.d is never executed by vendor busybox init; hook rcS directly
+    if [ -f "${TMP_IMAGE_DIR}/etc/init.d/rcS" ] && ! grep -q iris_net_fix "${TMP_IMAGE_DIR}/etc/init.d/rcS"; then
+        printf '\n/bin/sh /etc/init.d/iris_net_fix &\n' >> "${TMP_IMAGE_DIR}/etc/init.d/rcS"
+    fi
+
+    # NTFS/dev-mode-less hosts silently drop symlinks when the rootfs is staged
+    # on the Windows side; vendor /sbin -> /bin is what makes /sbin/init exist.
+    # The target must be RELATIVE: an absolute /bin resolves against the
+    # initramfs, so switch_root would not find /root/sbin/init.
+    if [ ! -e "${TMP_IMAGE_DIR}/sbin" ] && [ -d "${TMP_IMAGE_DIR}/bin" ]; then
+        ln -sfn bin "${TMP_IMAGE_DIR}/sbin"
+    fi
+
+    # Interactive shell needs a ttyAMA0 node: switch_root discards the initramfs
+    # devtmpfs and the vendor squashfs ships a static /dev without pl011 entries.
+    if [ -d "${TMP_IMAGE_DIR}/dev" ] && [ ! -e "${TMP_IMAGE_DIR}/dev/ttyAMA0" ]; then
+        mknod -m 620 "${TMP_IMAGE_DIR}/dev/ttyAMA0" c 204 0 || true
+    fi
+
+    # interactive shell on the pl011 console (console=ttyAMA0)
+    if [ -f "${TMP_IMAGE_DIR}/etc/inittab" ] && ! grep -q ttyAMA0 "${TMP_IMAGE_DIR}/etc/inittab"; then
+        printf '\nttyAMA0::respawn:-/bin/sh\n' >> "${TMP_IMAGE_DIR}/etc/inittab"
+    fi
 fi
 
 echo "----Finding Init----"

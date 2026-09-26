@@ -33,6 +33,17 @@ _CONFIGS: dict[str, QemuConfig] = {
         net_device="virtio-net-device",
         net_backend="virtio-net-device",
     ),
+    "arm64": QemuConfig(
+        arch="arm64",
+        qemu_binary="qemu-system-aarch64",
+        machine="virt",
+        kernel_file="Image.arm64",  # Alpine 6.6-virt aarch64, 来源见 docs/04-快速部署.md
+        rootfs_device="/dev/vda",
+        disk_args="-drive if=none,file={image},format=raw,id=rootfs -device virtio-blk-device,drive=rootfs",
+        net_device="virtio-net-device",
+        net_backend="virtio-net-device",
+        memory_mb=512,
+    ),
     "mipseb": QemuConfig(
         arch="mipseb",
         qemu_binary="qemu-system-mips",

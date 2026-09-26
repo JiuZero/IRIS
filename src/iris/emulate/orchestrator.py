@@ -346,7 +346,7 @@ def emulate_firmware(
                     m = re.search(r"ifa:0x([0-9a-f]+)", line)
                     if m:
                         raw = int(m.group(1), 16)
-                        if arch in ("mipsel", "armel"):
+                        if arch in ("mipsel", "armel", "arm64"):
                             ip = f"{raw & 0xFF}.{(raw >> 8) & 0xFF}.{(raw >> 16) & 0xFF}.{(raw >> 24) & 0xFF}"
                         else:
                             ip = f"{(raw >> 24) & 0xFF}.{(raw >> 16) & 0xFF}.{(raw >> 8) & 0xFF}.{raw & 0xFF}"

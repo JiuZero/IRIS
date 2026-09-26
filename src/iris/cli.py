@@ -320,7 +320,7 @@ def main() -> None:
 @emulate_app.command("run")
 def emulate_run(
     rootfs: Path = typer.Argument(..., help="path to extracted rootfs directory"),
-    arch: str = typer.Option(..., help="target architecture (mipsel/mipseb/armel)"),
+    arch: str = typer.Option(..., help="target architecture (mipsel/mipseb/armel/arm64)"),
     iid: int = typer.Option(0, help="image ID for scratch directory naming"),
     port: int = typer.Option(8080, help="host port for web access"),
     timeout: int = typer.Option(120, help="boot timeout in seconds"),
