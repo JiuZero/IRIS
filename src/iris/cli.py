@@ -319,33 +319,114 @@ def main() -> None:
 
 @emulate_app.command("run")
 def emulate_run(
-    rootfs: Path = typer.Argument(..., help="path to extracted rootfs directory"),
-    arch: str = typer.Option(..., help="target architecture (mipsel/mipseb/armel/arm64)"),
+    target: Path = typer.Argument(..., help="firmware .bin or extracted rootfs directory"),
+    arch: str = typer.Option(
+        "auto",
+        help="target architecture (mipsel/mipseb/armel/arm64) or 'auto' for ELF census inference",
+    ),
     iid: int = typer.Option(0, help="image ID for scratch directory naming"),
-    port: int = typer.Option(8080, help="host port for web access"),
+    port: int = typer.Option(8080, help="host port for web access (use 0 to pick a free one)"),
     timeout: int = typer.Option(120, help="boot timeout in seconds"),
     force: bool = typer.Option(False, "--force", help="skip the rootfs ELF arch preflight"),
+    apply_rules: bool = typer.Option(True, "--apply-rules/--no-apply-rules", help="apply L3 boot-fix rules during emulation build"),
     parts_dir: Path = typer.Option(
         None, "--parts-dir", help="TendaW -parts dir of raw .jffs2 slices; merges them container-side (symlink-safe)"
     ),
 ) -> None:
-    """Run QEMU emulation of a firmware rootfs and check web reachability."""
+    """Run QEMU emulation of a firmware rootfs and check web reachability.
+    
+    Accepts either an extracted rootfs directory or a firmware file (.bin). When a firmware file is given,
+    IRIS extracts it, infers the target architecture from the ELF census, applies boot-fix rules, and proceeds
+    to emulation. Use --arch auto (default) for automatic architecture detection, or specify a concrete arch
+    such as mipsel/mipseb/armel/arm64."""
+    import socket
+    from iris.emulate.auto import prepare_from_firmware, prepare_from_rootfs, pick_host_port
+    from iris.emulate.qemu_config import supported_archs
     from iris.emulate.orchestrator import build_parts_mounts, emulate_firmware, preflight_arch
 
-    if not rootfs.exists():
-        typer.secho(f"rootfs not found: {rootfs}", fg=typer.colors.RED, err=True)
+    if not target.exists():
+        typer.secho(f"not found: {target}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
-
-    if not force:
-        problem = preflight_arch(rootfs, arch)
+    
+    # Only reject zips if input is a file
+    if target.is_file():
+        _reject_zip(target)
+    
+    settings = get_settings()
+    scratch = settings.scratch_dir
+    
+    # Decide whether input is firmware .bin vs pre-extracted rootfs
+    inferred_arch = ""
+    if target.is_file():
+        typer.echo(f"extracting rootfs from {target.name} ...")
+        prepared = prepare_from_firmware(
+            target,
+            scratch_dir=scratch,
+            arch_hint=arch if arch != "auto" else "",
+            apply_rules_flag=apply_rules,
+            rules_dir=settings.rules_dir,
+            dry_run_rules=False,  # Write fixes to disk for auto-pipeline
+        )
+        if prepared.failure_reason:
+            typer.secho(f"extraction failed: {prepared.failure_reason}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=2)
+        if applied_rules := prepared.matched_rule_ids:
+            typer.echo(f"L3 rules matched: {', '.join(applied_rules)}")
+        if arch == "auto":
+            inferred_arch = prepared.arch
+        else:
+            inferred_arch = arch
+        rootfs = prepared.rootfs_dir
+    else:
+        # Pre-extracted rootfs — just infer arch and report rule matches (dry-run)
+        typer.echo(f"using existing rootfs: {target.resolve()}")
+        prepared = prepare_from_rootfs(rootfs_dir=target, rules_dir=settings.rules_dir)
+        if arch == "auto":
+            inferred_arch = prepared.arch
+        else:
+            inferred_arch = arch
+        if arch != "auto" and prepared.arch and prepared.arch != arch:
+            typer.secho(f"warning: rootfs ELF census suggests {prepared.arch}, using {arch} instead", fg=typer.colors.YELLOW)
+        if applied_rules := prepared.matched_rule_ids:
+            typer.echo(f"L3 rules matched: {', '.join(applied_rules)}")
+        rootfs = target
+    
+    # Preflight arch check against the actual chosen arch (apply arch mapping first)
+    if inferred_arch and not inferred_arch.startswith("unk("):
+        # Map ELF census names to QEMU kernel labels
+        arch_map = {"mipsel": "mipsel", "mipseb": "mipseb", "armel": "armel", "aarch64": "arm64"}
+        checked_arch = arch_map.get(inferred_arch, inferred_arch)
+        problem = preflight_arch(rootfs, checked_arch) if not force else ""
         if problem:
             typer.secho(f"preflight: {problem}", fg=typer.colors.RED, err=True)
             typer.secho("  (override with --force)", fg=typer.colors.YELLOW, err=True)
             raise typer.Exit(code=3)
-
-    settings = get_settings()
-    scratch = settings.scratch_dir
-
+    
+    selected_arch = inferred_arch if inferred_arch else "auto"
+    # Apply arch mapping for selected_arch too
+    if selected_arch != "auto":
+        arch_map = {"mipsel": "mipsel", "mipseb": "mipseb", "armel": "armel", "aarch64": "arm64"}
+        selected_arch = arch_map.get(selected_arch, selected_arch)
+    
+    # If still auto after all inference attempts, show error
+    if selected_arch == "auto":
+        supported = supported_archs()
+        typer.secho("unable to determine architecture from ELF census; available:", fg=typer.colors.RED)
+        typer.echo(f"  Supported architectures: {', '.join(supported)}")
+        typer.echo(f"  Usage: iris emulate run <rootfs|bin> --arch {'|'.join(supported)}")
+        raise typer.Exit(code=3)
+    
+    typer.echo(f"emulating {target.name} arch={selected_arch}")
+    result_port = port if port != 0 else 8080
+    try:
+        if port == 0:
+            selected_port = pick_host_port(preferred=port)
+            typer.echo(f"picked host port: {selected_port}")
+            result_port = selected_port
+    except RuntimeError:
+        typer.secho("no available host port in range [8080,8199]; use --port XXX", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=3)
+    
     partition_mounts = None
     if parts_dir is not None:
         if not parts_dir.is_dir():
@@ -356,18 +437,17 @@ def emulate_run(
             typer.secho(f"no .jffs2 slices under {parts_dir}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
 
-    typer.echo(f"emulating {rootfs.name} arch={arch} port={port}")
     result = emulate_firmware(
         rootfs_dir=rootfs,
-        arch=arch,
+        arch=selected_arch,
         iid=iid if iid > 0 else int(hashlib.md5(str(rootfs.resolve()).encode()).hexdigest(), 16) % 10000,
         scratch_dir=scratch,
-        host_port=port,
+        host_port=result_port,
         timeout_sec=timeout,
         parts_slices_dir=parts_dir,
         partition_mounts=partition_mounts,
     )
-
+    
     typer.echo(f"success     : {result.success}")
     typer.echo(f"web ok      : {result.web_ok}")
     typer.echo(f"web url     : {result.web_url or '-'}")
@@ -389,6 +469,172 @@ def emulate_stop(
 
     ok = stop_emulation(iid)
     typer.echo(f"stopped: {ok}")
+
+
+@emulate_app.command("list")
+def emulate_list() -> None:
+    """List all IRIS QEMU emulation containers with status and ports."""
+    import subprocess
+    
+    try:
+        # Use docker format string for consistent output
+        import subprocess
+        result = subprocess.run(
+            ["docker", "ps", "-a", "--filter", "name=iris-qemu", 
+             "--format", "{{.Names}}|{{.Status}}|{{.Ports}}"],
+            capture_output=True, 
+            text=True, 
+            check=True,
+            encoding="utf-8",
+            errors="ignore"
+        )
+        
+        if not result.stdout.strip():
+            typer.secho("No IRIS emulation containers found.", fg=typer.colors.YELLOW)
+            return
+        
+        lines = result.stdout.strip().split('\n')
+        
+        # Print header
+        typer.secho(f"{'CONTAINER':<30} {'STATUS':<35} {'PORTS'}", fg=typer.colors.GREEN)
+        typer.secho("-" * 95, fg=typer.colors.GREEN)
+        
+        # Parse data lines
+        for line in lines:
+            parts = line.split('|')
+            if len(parts) < 3:
+                continue
+            
+            name = parts[0]
+            status = parts[1][:35]
+            ports = parts[2]
+            
+            color = typer.colors.GREEN if "Up" in status else typer.colors.YELLOW
+            typer.secho(f"{name:<30} {status:<35} {ports}", fg=color)
+        
+    except subprocess.CalledProcessError as e:
+        typer.secho(f"Failed to list containers: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    except Exception as e:
+        typer.secho(f"Error listing containers: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@emulate_app.command("status")
+def emulate_status(iid: int = typer.Argument(..., help="image ID to inspect")) -> None:
+    """Display detailed status of an IRIS QEMU emulation container."""
+    import subprocess
+    from pathlib import Path
+    from iris.config import get_settings
+    
+    settings = get_settings()
+    scratch_dir = settings.scratch_dir
+    
+    # Check if container exists
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", f"iris-qemu-{iid}"],
+            capture_output=True, text=True, check=True
+        )
+        
+        if result.returncode != 0:
+            typer.secho(f"Container iris-qemu-{iid} not found.", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
+            
+    except subprocess.CalledProcessError:
+        typer.secho(f"Container iris-qemu-{iid} not found.", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    
+    import json
+    info = json.loads(result.stdout)[0]
+    
+    # Extract key information
+    container_name = info["Name"].lstrip("/")
+    state = info["State"]["Status"]
+    created = info["Created"]
+    started_at = info["State"].get("StartedAt", "N/A")
+    finished_at = info["State"].get("FinishedAt", "N/A")
+    
+    # Get port mappings
+    ports = info.get("NetworkSettings", {}).get("Ports", {})
+    port_info = []
+    for container_port, mapping in ports.items():
+        if mapping:
+            for m in mapping:
+                host_ip = m.get("HostIp", "0.0.0.0")
+                host_port = m.get("HostPort", "")
+                if host_port:
+                    port_info.append(f"{host_port} → {container_port}")
+        else:
+            port_info.append(f"{container_port} (no mapping)")
+    
+    # Get network info
+    networks = info.get("NetworkSettings", {}).get("Networks", {})
+    ip_address = ""
+    network_names = []
+    for net_name, net_info in networks.items():
+        network_names.append(net_name)
+        if net_info.get("IPAddress"):
+            ip_address = net_info["IPAddress"]
+    
+    # Display formatted output
+    typer.echo("\n" + "="*60)
+    typer.secho(f"  Container: {container_name}", fg=typer.colors.GREEN)
+    typer.echo("="*60 + "\n")
+    
+    typer.echo("Status:")
+    typer.echo(f"  State:          {state}")
+    typer.echo(f"  Created:        {created}")
+    typer.echo(f"  Started At:     {started_at}")
+    if state == "exited":
+        typer.echo(f"  Finished At:    {finished_at}")
+    typer.echo()
+    
+    if port_info:
+        typer.echo("Ports:")
+        for p in port_info:
+            typer.echo(f"  -> {p}")
+        typer.echo()
+    
+    if ip_address:
+        typer.echo("Network:")
+        typer.echo(f"  IP Address:     {ip_address}")
+        typer.echo(f"  Networks:       {', '.join(network_names)}")
+        typer.echo()
+    
+    # Check web service accessibility
+    web_ports = [80, 8080, 8000, 443]
+    accessible_ports = []
+    for p in web_ports:
+        try:
+            import socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            result = sock.connect_ex(("127.0.0.1", p))
+            sock.close()
+            if result == 0:
+                accessible_ports.append(p)
+        except:
+            pass
+    
+    if accessible_ports:
+        typer.secho(f"[OK] Web services accessible on ports: {', '.join(map(str, accessible_ports))}", 
+                   fg=typer.colors.GREEN)
+    elif state == "running":
+        typer.secho(f"[NO] No web services detected on standard ports (80/8080/8000/443)", 
+                   fg=typer.colors.YELLOW)
+    typer.echo()
+    
+    # Show scratch directory
+    scratch_path = scratch_dir / str(iid)
+    if scratch_path.exists():
+        typer.echo("Scratch Directory:")
+        typer.echo(f"  Path:           {scratch_path.resolve()}")
+        size_gb = sum(f.stat().st_size for f in scratch_path.rglob("*") if f.is_file()) / (1024**3)
+        typer.echo(f"  Size:           {size_gb:.2f} GB")
+        typer.echo()
+    
+    typer.echo("="*60)
 
 
 @serve_app.command("start")
