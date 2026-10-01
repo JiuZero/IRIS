@@ -660,22 +660,79 @@ def serve_start(
 def emulate_guardian_start(
     iid: int = typer.Argument(..., help="container image ID to monitor"),
     interval: int = typer.Option(30, "--interval", help="health check interval in seconds"),
+    probe_port: int = typer.Option(
+        0, "--probe-port",
+        help="host port to HTTP-probe for the web server (0 = serial log only)",
+    ),
+    restart_verify: int = typer.Option(
+        120, "--restart-verify",
+        help="seconds a WEB_SERVER_RESTART gets to bring the probe port back",
+    ),
 ) -> None:
     """Start AI Guardian for continuous container health monitoring and self-healing."""
     from iris.config import get_settings
-    from iris.monitor.ai_guardian import AIHealthMonitor
+    from iris.monitor.ai_guardian import LEDGER_FILENAME, AIHealthMonitor
 
     settings = get_settings()
+    ledger_path = settings.scratch_dir / LEDGER_FILENAME
     typer.echo(f"starting AI Guardian for container {iid}...")
     typer.echo(f"health check interval: {interval}s")
+    if probe_port:
+        typer.echo(f"http probe: http://127.0.0.1:{probe_port} (failure overrides serial log)")
+    else:
+        typer.echo("http probe: disabled (serial log only)")
+    typer.echo(f"action ledger: {ledger_path}")
     typer.echo("press Ctrl+C to stop monitoring\n")
 
-    guardian = AIHealthMonitor(iid=iid, scratch_dir=settings.scratch_dir)
+    guardian = AIHealthMonitor(
+        iid=iid, scratch_dir=settings.scratch_dir,
+        http_probe_port=probe_port, restart_verify_seconds=restart_verify,
+        ledger_path=ledger_path,
+    )
 
     try:
         guardian.start_continuous_monitoring(check_interval=interval)
     except KeyboardInterrupt:
         typer.echo("\nmonitoring stopped by user")
+
+
+@emulate_app.command("guardian-log")
+def emulate_guardian_log(
+    iid: int = typer.Option(None, "--iid", help="filter by container image ID"),
+    limit: int = typer.Option(20, "--limit", help="max entries to show"),
+) -> None:
+    """Show recent AI Guardian actions and diagnoses from the ledger."""
+    from iris.config import get_settings
+    from iris.monitor.ai_guardian import LEDGER_FILENAME
+    from iris.monitor.ledger import GuardianLedger
+
+    settings = get_settings()
+    ledger_path = settings.scratch_dir / LEDGER_FILENAME
+    if not ledger_path.is_file():
+        typer.secho(f"no ledger at {ledger_path} — guardian-start has not run yet",
+                    fg=typer.colors.YELLOW)
+        raise typer.Exit(code=1)
+
+    ledger = GuardianLedger(ledger_path)
+    entries = ledger.recent(iid=iid, limit=limit)
+    ledger.close()
+    if not entries:
+        typer.echo("ledger is empty")
+        return
+
+    typer.secho(f"{'ID':<6} {'IID':<8} {'TIMESTAMP':<21} {'ACTION':<24} {'KIND':<10} OK",
+                fg=typer.colors.GREEN)
+    typer.echo("-" * 84)
+    for e in entries:
+        mark = "yes" if e["success"] else "NO"
+        color = typer.colors.GREEN if e["success"] else typer.colors.RED
+        typer.secho(
+            f"{e['id']:<6} {e['iid']:<8} {e['ts']:<21} {e['action']:<24} {e['kind']:<10} {mark}",
+            fg=color,
+        )
+    promoted = sum(1 for e in entries if e["promoted"])
+    if promoted:
+        typer.echo(f"\n{promoted} of the shown entries have been promoted to deterministic rules")
 
 
 if __name__ == "__main__":

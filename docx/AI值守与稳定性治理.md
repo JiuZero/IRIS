@@ -166,10 +166,13 @@ TES7002 正是 aarch64 设备，此修复是后续治理的前提。
 
 ### 4.1 定位
 
-把仿真容器从"被动运行"变成"主动值守"。唯一的输入信号是**串口日志**——因为串口日志
+把仿真容器从"被动运行"变成"主动值守"。主输入信号是**串口日志**——因为串口日志
 是 guest 内核与应用层的唯一全量可观测通道，HTTP 探活看不到被重启掩盖的故障。
+但串口日志也会说谎：它记录的是启动时刻的状态（如"vendor web server is already
+running"），不代表此刻 :80 还有人应答，所以监控期补了**第二信号源**——对转发端口的
+HTTP 探活（`--probe-port`），探活失败会推翻串口日志的乐观结论。
 
-代码位置：`src/iris/monitor/ai_guardian.py`。
+代码位置：`src/iris/monitor/ai_guardian.py`（值守）、`src/iris/monitor/ledger.py`（动作账本）。
 
 ### 4.2 串口日志分析（`SerialLogAnalyzer`）
 
@@ -185,25 +188,34 @@ TES7002 正是 aarch64 设备，此修复是后续治理的前提。
 | `web_server_start` | web 服务器进程启动痕迹 |
 | `web_server_active` | web 服务器存活痕迹 |
 
-配套能力：`load_log()` 加载日志、`count_pattern_occurrences(pattern)` 计数、
-`get_boot_sequence_timeline()` 按 `Booting Linux on physical CPU` 切分启动周期时间线
-（据此推算重启次数 = 启动次数 − 1）、`get_latest_crash_context()` 返回崩溃点前后
-各 5 行的上下文窗口。
+配套能力：`load_log(start_line=0)` 加载日志（支持从指定行起读，增量窗口）、
+`total_line_count()` 不缓存地数总行数（游标推进用）、`count_pattern_occurrences(pattern)`
+计数、`get_boot_sequence_timeline()` 按 `Booting Linux on physical CPU` 切分启动周期
+时间线（据此推算重启次数）、`get_latest_crash_context()` 返回崩溃点前后各 5 行的
+上下文窗口。
+
+**增量计数语义（2026-10-02 起）**：连续监控下每轮只统计上次游标之后新增的日志行——
+watchdog/reboot 历史是"过去时"，一个触发过 watchdog、被修复后安静下来的 guest
+不应被历史钉死在 critical。自监控启动以来的累计值保存在 `monitor.cumulative`。
 
 ### 4.3 健康状态机
 
-`ContainerHealthStatus` 承载状态与指标，状态取值：
+`ContainerHealthStatus` 承载状态与指标，状态取值（`expired` 最先评估，压过一切计数器）：
 
 | 状态 | 判定条件 | 含义 |
 |---|---|---|
-| `critical` | 重启次数 ≥ 3 或 watchdog 触发 ≥ 2 | 不可用 |
-| `degraded` | soft lockup > 0 / diag 崩溃 > 0 / web 未启动 | 可用但有隐患 |
-| `expired` | 超过 `timeout_minutes`（默认 60）仍未健康 | 超时 |
+| `expired` | 超过 `timeout_minutes`（默认 60）仍未健康 | 超时（历史计数不再参与判定） |
+| `critical` | 本轮新增：重启次数 ≥ 3 或 watchdog 触发 ≥ 2（含累计重启 ≥ 3） | 不可用 |
+| `degraded` | soft lockup / diag 崩溃 / web 未启动 / **web 启动后意外退出** | 可用但有隐患 |
 | `healthy` | 以上均不满足 | 正常 |
 | `unknown` | 找不到串口日志 | 无法判定 |
 
+`web_server_status` 取值：`active` / `started_but_stopped`（启动后退出——即"Web 意外
+退出"，探活失败或串口只见到启动痕迹时判定）/ `not_started` / `unknown`。
+
 指标字段：`state`、`uptime_seconds`、`reboot_count`、`watchdog_triggers`、
-`diag_crashes`、`soft_lockup_events`、`web_server_status`、`anomalies`、`actions_taken`。
+`diag_crashes`、`soft_lockup_events`、`web_server_status`、`anomalies`、
+`actions_taken`、`diagnoses`。
 
 实测输出样本：
 
@@ -219,18 +231,26 @@ Actions Taken: None
 ===========================================
 ```
 
-### 4.4 四类恢复动作
+### 4.4 五类恢复动作
 
 `recommend_recovery_action()` 按优先级返回建议动作，`execute_recovery(action)` 执行：
 
-| 动作 | 触发条件 | 实现 |
+| 动作 | 触发条件 | 实现层 |
 |---|---|---|
-| `WATCHDOG_RECOVERY` | 检测到 watchdog 触发 | 注入并执行 watchdog 移除脚本 |
-| `RESOURCE_CLEANUP` | soft lockup 事件 | `killall -9 monitord arp_monitor ppp-monitor; sync` |
-| `DIAGNOSTIC_DISABLEMENT` | diag 崩溃循环 | `rm -f /bin/diag /usr/bin/diag` |
-| `WEB_SERVER_DIAGNOSIS` | web 不可达 | 检查 goahead/boa 是否存在、grep init 脚本中的启动痕迹 |
+| `WATCHDOG_RECOVERY` | 检测到 watchdog 触发 | guest 内脚本（构建期语义，见 4.8） |
+| `RESOURCE_CLEANUP` | soft lockup 事件 | guest 内脚本 |
+| `DIAGNOSTIC_DISABLEMENT` | diag 崩溃循环 | guest 内脚本 |
+| `WEB_SERVER_DIAGNOSIS` | web 不可达 | 只排查不修复，结论记 `diagnoses` |
+| `WEB_SERVER_RESTART` | web 启动后意外退出 | **容器层** `docker restart` + 探活复验 |
 
-每次成功执行会追加到 `actions_taken` 与 `recovery_history`，带时间戳以便审计。
+`WEB_SERVER_RESTART` 的关键约束：
+- 重启后必须在 `--restart-verify`（默认 120s）内探活成功才算修复，"重启了但 Web
+  没回来"记失败；
+- 两次重启之间有冷却期（默认 600s），无法救活的 guest 不会被无间隔地反复重启；
+- 修复是否成功以 docker 命令退出码 + 探活双重确认，不做"跑过了就算"。
+
+每次成功执行会追加到 `actions_taken` 与 `recovery_history`，带时间戳以便审计；
+所有动作与诊断同时落**动作账本**（SQLite，见 4.9）。
 
 ### 4.5 持续监控循环
 
@@ -241,7 +261,11 @@ Actions Taken: None
 ### 4.6 CLI 集成
 
 ```bash
-iris emulate guardian-start <iid> --interval 30
+iris emulate guardian-start <iid> --interval 30 \
+    --probe-port 8080 --restart-verify 120
+
+# 查看值守动作账本
+iris emulate guardian-log [--iid 10001] [--limit 20]
 ```
 
 一次性健康检查（不经 CLI 循环）：
@@ -265,11 +289,32 @@ print(m.recommend_recovery_action())
 ### 4.7 已知限制
 
 - 需要 Docker 访问权限，Windows 上可能遇到权限问题；
-- 只分析串口日志，不做 HTTP 探活——串口日志在某个点后完全停止时，正则计数会**低估**
-  真实故障量；
-- `expired` 状态的优先级排在 web 未启动判定之后，长时间运行但 web 未启动的容器会被
-  归为 `degraded` 而非 `expired`；
+- 串口日志在某个点后完全停止时，增量窗口为空，正则计数会**低估**真实故障量
+  （HTTP 探活可弥补"是否还在服务"这半个盲区）；
 - `uptime_seconds` 仅在监控循环中更新，单次调用 `analyze_health()` 时恒为 0。
+
+### 4.8 执行通道的两层语义（重要）
+
+`docker exec` 到达的是**仿真容器**（ubuntu + QEMU 进程），不是 QEMU guest 内部；
+guest 的 rootfs 在 `image.raw` 里，容器内没有它的挂载。因此：
+
+| 层 | 通道 | 能触达什么 | 适用阶段 |
+|---|---|---|---|
+| guest 内 | `docker exec -i ... sh -s` | 容器自身文件系统；**看不到** guest 进程与文件 | 镜像构建期（chroot）语义 |
+| 容器层 | `docker restart` | QEMU 与 guest 一并重来 | **运行期唯一真正触达 guest 的修复** |
+
+`WEB_SERVER_DIAGNOSIS` 在容器层运行，因此它报告的是容器侧可见性（QEMU 进程是否
+存活、容器内是否有 curl 可达的 :80），而不是 guest 内部的进程/配置——后者只能靠
+串口日志与外部探活推断。
+
+### 4.9 动作账本（guardian action ledger）
+
+所有恢复动作与诊断落 `iris-home/scratch/guardian_ledger.sqlite3`（追加式 SQLite，
+`src/iris/monitor/ledger.py`）。字段对齐 `db.models.RepairAction`
+（source/rule_id/evidence/applied/promoted），将来接入 `emulation_run` 主链路时是
+列迁移而非重新设计。`promoted` 标志为 P3"修复沉淀回 L3 规则"预留：
+`mark_promoted(entry_id)` 在一次修复被固化为确定性规则后打上。账本写入失败只告警、
+绝不阻断值守循环。
 
 ---
 
@@ -315,12 +360,16 @@ docker exec iris-qemu-<iid> strace -f /opt/goahead/goahead 2>&1 \
 
 ### 5.3 AI Guardian 后续增强
 
-1. **自动恢复**：让 `execute_recovery()` 真正进入主循环自动触发（当前已接线，见
-   `start_continuous_monitoring`，但需配合执行结果校验才能信任）；
-2. **Web 探活**：在串口日志分析之外增加 HTTP 可达性检查；
-3. **预测性告警**：在 `reboot_count > 0` 之前预测崩溃；
-4. **健康度可视化**：容器健康状态随时间变化的仪表盘；
-5. **规则自学习**：从新发现的失败模式自动生成 YAML 规则。
+1. **自动恢复**：~~让 `execute_recovery()` 真正进入主循环自动触发~~ 已接线并配合
+   执行结果校验（退出码 + echo 标记 + 探活复验）；
+2. **Web 探活**：~~在串口日志分析之外增加 HTTP 可达性检查~~ 已落地（`--probe-port`，
+   探活失败覆盖串口乐观结论）；
+3. **Web 重启闭环**：~~Web 意外退出后自动恢复服务~~ 已落地容器级
+   `WEB_SERVER_RESTART`（重启 + 探活复验 + 冷却期）；
+4. **动作账本**：已落地（`guardian-log` 可查）；
+5. **预测性告警**：在 `reboot_count > 0` 之前预测崩溃（待做）；
+6. **健康度可视化**：容器健康状态随时间变化的仪表盘（待做）；
+7. **规则自学习**：从账本中的有效修复自动生成 YAML 规则草稿（待做，P3）。
 
 ---
 

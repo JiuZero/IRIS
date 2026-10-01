@@ -1,18 +1,30 @@
 """AI 值守：仿真容器的串口日志健康监控与自愈。
 
-串口日志是唯一全量信号——HTTP 探活看不到被重启掩盖的故障：一个 QEMU 容器可以
+串口日志是唯一全量信号——HTTP 探活看不到被重启掩盖的故障：一个 QEMU 仿真容器可以
 端口转发正常、ping 得通，而 guest 内核正在被厂商 watchdog 反复硬复位。
+反过来串口日志也会说谎：它记录的是启动时刻的状态（"vendor web server is already
+running"），不代表此刻 :80 还有人应答。所以监控期补了第二信号源——对转发端口的
+HTTP 探活，探活失败会推翻串口日志的乐观结论。
 
 能力：
 1. 串口日志模式分析（watchdog 重启 / sysrq / reboot 尝试 / diag 崩溃 /
-   soft lockup / Web 启动与存活）
-2. 四态健康判定（healthy / degraded / critical / expired）与结构化异常清单
-3. 四类自愈动作（watchdog 移除 / 资源回收 / 诊断工具禁用 / Web 排查）
+   soft lockup / Web 启动与存活），按增量窗口计数——只统计上次分析之后
+   新增的行，历史告警不会永远钉住状态
+2. 五态健康判定（healthy / degraded / critical / expired / unknown）与结构化异常清单
+3. 五类恢复动作（watchdog 移除 / 资源回收 / 诊断工具禁用 / Web 排查 / Web 重启）
 
 设计约束：自愈动作一律通过 ``docker exec -i`` 把脚本从 stdin 送进容器，
 不落任何中间文件——写宿主再让容器去找，是取不到文件的经典写法。
-动作的成败以容器内命令的退出码为准，而不是"跑过了就算"；只做排查、不做修复的
+动作的成败以命令自身的退出码为准，而不是"跑过了就算"；只做排查、不做修复的
 结论单独记在 ``diagnoses``，不混进 ``actions_taken``。
+
+执行通道有两层，修复必须落在对的层：
+- guest 内（docker exec）：guest 的 rootfs 在 image.raw 里，容器内**没有**它的
+  挂载，所以容器内 exec 看不到 guest 的进程和文件——它只对镜像构建期
+  （chroot）有效；
+- 容器层（docker restart）：运行期唯一真正触达 guest 的修复是重启整个仿真
+  容器，QEMU 与 guest 一并重来。``WEB_SERVER_RESTART`` 即此，且必须以探活
+  复验收尾——重启了但 Web 没回来不算修复。
 
 CLI 入口是 ``iris emulate guardian-start``，本模块不自带命令行。
 """
@@ -25,19 +37,28 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from iris.log import get_logger
+
+if TYPE_CHECKING:
+    from iris.monitor.ledger import GuardianLedger
 
 logger = get_logger(__name__)
 
 CONTAINER_PREFIX = "iris-qemu-"
+#: Where the guardian ledger lives by default, relative to the scratch dir.
+LEDGER_FILENAME = "guardian_ledger.sqlite3"
 
 #: Recovery actions, in the order ``recommend_recovery_action`` prefers them.
 ACTION_WATCHDOG = "WATCHDOG_RECOVERY"
 ACTION_RESOURCE = "RESOURCE_CLEANUP"
 ACTION_DIAGNOSTIC = "DIAGNOSTIC_DISABLEMENT"
 ACTION_WEB_DIAGNOSIS = "WEB_SERVER_DIAGNOSIS"
+#: The container-level restart: the one repair that actually reaches a running
+#: guest, because the guest rootfs is inside image.raw and nothing mounted in
+#: the container can touch its processes or filesystem.
+ACTION_WEB_RESTART = "WEB_SERVER_RESTART"
 
 
 @dataclass
@@ -84,25 +105,40 @@ class SerialLogAnalyzer:
     def __init__(self, log_path: Path):
         self.log_path = Path(log_path)
         self.lines: list[str] = []
+        self._loaded = False
 
-    def load_log(self) -> bool:
-        """Load serial log content.
+    def load_log(self, start_line: int = 0) -> bool:
+        """Load serial log content, optionally skipping an already-read prefix.
 
         Serial output is raw bytes off a UART: UTF-8 with ``replace`` keeps the
         readable part instead of raising on the first stray byte, which is what a
-        bare ``readlines()`` under a Windows locale would do.
+        bare ``readlines()`` under a Windows locale would do. ``start_line`` lets
+        a continuous watcher count only the *new* tail of an appending log —
+        the full-log counts are history, and a repaired guest must not stay
+        pinned at critical by them.
         """
         try:
             self.lines = self.log_path.read_text(
                 encoding="utf-8", errors="replace"
-            ).splitlines(keepends=True)
+            ).splitlines(keepends=True)[max(0, start_line):]
+            self._loaded = True
             return True
         except OSError as exc:
             logger.warning(f"failed to read serial log {self.log_path}: {exc}")
             return False
 
+    def total_line_count(self) -> int:
+        """Number of lines the log currently holds, without caching content."""
+        try:
+            with self.log_path.open(encoding="utf-8", errors="replace") as fh:
+                return sum(1 for _ in fh)
+        except OSError:
+            return 0
+
     def _ensure_loaded(self) -> None:
-        if not self.lines:
+        # An empty window is a *consumed* log, not an unread one: reloading
+        # from line 0 here would silently restore full-history counting.
+        if not self._loaded:
             self.load_log()
 
     def count_pattern_occurrences(self, pattern_name: str) -> int:
@@ -115,16 +151,18 @@ class SerialLogAnalyzer:
         return sum(1 for line in self.lines if re.search(pattern, line, flags))
 
     def get_boot_sequence_timeline(self) -> list[int]:
-        """Line numbers of every kernel boot banner in the log."""
+        """Line numbers of every kernel boot banner in the loaded window."""
         self._ensure_loaded()
         return [i for i, line in enumerate(self.lines, 1)
                 if 'Booting Linux on physical CPU' in line]
 
     def get_latest_crash_context(self, window: int = 5) -> str | None:
-        """Text around the most recent error-looking line, for the health report.
+        """Text around the most recent error-looking line in the loaded window.
 
         The counts say *how many*; this says *what it looked like*, which is the
-        part that makes a report actionable rather than merely alarming.
+        part that makes a report actionable rather than merely alarming. Under
+        incremental watching the window only holds the new tail, so this reports
+        what just went wrong — not whatever failed days ago.
         """
         self._ensure_loaded()
         needles = ('error', 'fail', 'crash', 'signal', 'die', 'not found')
@@ -138,7 +176,10 @@ class SerialLogAnalyzer:
 class AIHealthMonitor:
     """Health analysis and self-healing for one emulation container."""
 
-    def __init__(self, iid: int, scratch_dir: Path, timeout_minutes: int = 60):
+    def __init__(self, iid: int, scratch_dir: Path, timeout_minutes: int = 60,
+                 http_probe_port: int = 0, restart_verify_seconds: int = 120,
+                 restart_cooldown_seconds: int = 600,
+                 ledger_path: Path | None = None):
         self.iid = iid
         self.scratch_dir = Path(scratch_dir)
         self.timeout = timedelta(minutes=timeout_minutes)
@@ -146,6 +187,49 @@ class AIHealthMonitor:
         self.analyzer: SerialLogAnalyzer | None = None
         self.start_time = datetime.now(UTC)
         self.recovery_history: list[dict] = []
+        #: lines of the serial log already folded into the counters; the next
+        #: pass counts only what the guest printed after this point.
+        self._log_cursor: int = 0
+        #: monotonically growing totals since monitoring started (not per-pass)
+        self.cumulative: dict[str, int] = {
+            "reboots": 0, "watchdog": 0, "diag_crashes": 0, "soft_lockups": 0,
+        }
+        #: port to HTTP-probe for the web server; 0 disables probing entirely.
+        self.http_probe_port = http_probe_port
+        #: how long a container restart gets to bring the web port back up.
+        self.restart_verify_seconds = restart_verify_seconds
+        #: minimum seconds between two WEB_SERVER_RESTART attempts.
+        self.restart_cooldown_seconds = restart_cooldown_seconds
+        self._last_web_restart: str | None = None
+        #: append-only action ledger (None in tests that don't ask for one)
+        self.ledger: GuardianLedger | None = None
+        if ledger_path is not None:
+            from iris.monitor.ledger import GuardianLedger as _Ledger
+
+            try:
+                self.ledger = _Ledger(ledger_path)
+            except OSError as exc:
+                logger.warning(f"ledger unavailable at {ledger_path}: {exc}")
+
+    def _ledger_record(self, action: str, kind: str, success: bool,
+                       detail: str = "", evidence: str = "") -> None:
+        """Best-effort ledger write; never let bookkeeping break the watch."""
+        if self.ledger is None:
+            return
+        self.ledger.record(
+            iid=self.iid, action=action, kind=kind, success=success,
+            detail=detail, evidence=evidence,
+        )
+
+    def _web_restart_cooldown_active(self) -> bool:
+        """True while the previous restart is still inside its cooldown window."""
+        if not self._last_web_restart:
+            return False
+        try:
+            last = datetime.strptime(self._last_web_restart, "%Y%m%d%H%M%S").replace(tzinfo=UTC)
+        except ValueError:
+            return False
+        return (datetime.now(UTC) - last).total_seconds() < self.restart_cooldown_seconds
 
     # ------------------------------------------------------------------ logs
 
@@ -180,7 +264,13 @@ class AIHealthMonitor:
     # --------------------------------------------------------------- analysis
 
     def analyze_health(self) -> ContainerHealthStatus:
-        """Perform one full health analysis pass."""
+        """Perform one full health analysis pass.
+
+        Counters reflect only lines appended since the previous pass: a
+        continuously watched log would otherwise re-report every historical
+        watchdog hit on every wake-up, pinning a repaired guest at critical.
+        ``cumulative`` keeps the since-start totals for the report.
+        """
         self.status.uptime_seconds = (datetime.now(UTC) - self.start_time).total_seconds()
 
         log_path = self._get_serial_log_path()
@@ -190,18 +280,35 @@ class AIHealthMonitor:
             self.status.web_server_status = "unknown"
             return self.status
 
+        total_lines = SerialLogAnalyzer(log_path).total_line_count()
+        if total_lines < self._log_cursor:
+            # The log was truncated/recreated (fresh QEMU run): start over.
+            self._log_cursor = 0
+
         self.analyzer = SerialLogAnalyzer(log_path)
-        if not self.analyzer.load_log():
+        if not self.analyzer.load_log(start_line=self._log_cursor):
             self.status.state = "unknown"
             return self.status
 
-        self.status.watchdog_triggers = self.analyzer.count_pattern_occurrences('watchdog_reboot')
-        self.status.diag_crashes = self.analyzer.count_pattern_occurrences('diag_crash')
-        self.status.soft_lockup_events = self.analyzer.count_pattern_occurrences('soft_lockup')
+        new_watchdog = self.analyzer.count_pattern_occurrences('watchdog_reboot')
+        new_diag = self.analyzer.count_pattern_occurrences('diag_crash')
+        new_lockup = self.analyzer.count_pattern_occurrences('soft_lockup')
+        new_boots = len(self.analyzer.get_boot_sequence_timeline())
 
-        boots = self.analyzer.get_boot_sequence_timeline()
-        # One banner is the initial boot; every extra one is the guest restarting.
-        self.status.reboot_count = max(0, len(boots) - 1)
+        self.cumulative["watchdog"] += new_watchdog
+        self.cumulative["diag_crashes"] += new_diag
+        self.cumulative["soft_lockups"] += new_lockup
+        # Each boot banner inside the new window is a restart; the very first
+        # line ever consumed belongs to the initial boot, not a reboot.
+        first_window = self._log_cursor == 0
+        self.cumulative["reboots"] += max(0, new_boots - (1 if first_window else 0))
+
+        self._log_cursor = total_lines
+
+        self.status.watchdog_triggers = new_watchdog
+        self.status.diag_crashes = new_diag
+        self.status.soft_lockup_events = new_lockup
+        self.status.reboot_count = self.cumulative["reboots"]
 
         if self.analyzer.count_pattern_occurrences('web_server_active') > 0:
             self.status.web_server_status = "active"
@@ -209,6 +316,18 @@ class AIHealthMonitor:
             self.status.web_server_status = "started_but_stopped"
         else:
             self.status.web_server_status = "not_started"
+
+        # The serial log only shows what the guest printed; an HTTP probe is
+        # the ground truth for "is it serving *right now*". A probe failure
+        # overrides the optimistic log reading: "already running" lines
+        # describe boot time, not the current state of :80.
+        if (self.http_probe_port and self.status.web_server_status != "not_started"
+                and not self.probe_http(self.http_probe_port)):
+            self.status.web_server_status = "started_but_stopped"
+            logger.info(
+                f"container {self.iid}: serial log suggests a web server but "
+                f"port {self.http_probe_port} does not answer"
+            )
 
         self.status.anomalies.clear()
         self._determine_overall_state()
@@ -219,10 +338,13 @@ class AIHealthMonitor:
         """Fold the metrics into one state.
 
         ``expired`` is checked first, and it outranks *every* counter, critical
-        included. The watchdog/reboot counters are recomputed from the whole log
-        on each pass, so they are history, not current state: a guest that hit
-        its watchdog once, got fixed, and then sat quietly until the window
-        closed would otherwise report critical forever. Past the window,
+        included. The watchdog counters are per-pass increments (lines appended
+        since the previous pass), so they describe what happened *now*;
+        ``reboot_count`` is the since-start total, because restarts compound —
+        three restarts spread over an hour is critical even when each pass saw
+        only one. A guest that hit its watchdog once, got fixed, and then sat
+        quietly reports no new watchdog signal and correctly falls through
+        instead of being pinned at critical by history. Past the window,
         "still not healthy" is the verdict — whether the last stretch was
         degraded or merely quiet.
         """
@@ -236,8 +358,8 @@ class AIHealthMonitor:
         elif s.reboot_count >= 3 or s.watchdog_triggers >= 2:
             s.state = "critical"
             s.anomalies.append(
-                f"repeated restarts: {s.reboot_count} reboot(s), "
-                f"{s.watchdog_triggers} watchdog trigger(s)"
+                f"repeated restarts: {s.reboot_count} reboot(s) total, "
+                f"{s.watchdog_triggers} new watchdog trigger(s) this pass"
             )
         elif s.soft_lockup_events > 0:
             s.state = "degraded"
@@ -248,6 +370,9 @@ class AIHealthMonitor:
         elif s.web_server_status == "not_started":
             s.state = "degraded"
             s.anomalies.append("web server never started")
+        elif s.web_server_status == "started_but_stopped":
+            s.state = "degraded"
+            s.anomalies.append("web server started but is no longer serving (unexpected exit)")
         else:
             s.state = "healthy"
 
@@ -278,9 +403,73 @@ class AIHealthMonitor:
             return ACTION_DIAGNOSTIC
         if s.web_server_status == "not_started":
             return ACTION_WEB_DIAGNOSIS
+        if s.web_server_status == "started_but_stopped":
+            return ACTION_WEB_RESTART
         return None
 
     # ---------------------------------------------------------------- recovery
+
+    def _docker(self, args: list[str], timeout: int = 30) -> tuple[bool, str]:
+        """Run a container-level docker command against the emulation container.
+
+        Container-level repairs (restart) are the only ones that reach a running
+        guest: the guest rootfs lives inside image.raw, so no docker exec can
+        touch its processes. Success is the command's own exit code.
+        """
+        try:
+            proc = subprocess.run(
+                ["docker", *args], capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=timeout, check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.error(f"container {self.iid}: docker {' '.join(args[:2])} failed: {exc}")
+            return False, str(exc)
+        return proc.returncode == 0, ((proc.stdout or "") + (proc.stderr or "")).strip()
+
+    def probe_http(self, host_port: int, timeout: int = 5) -> bool:
+        """True when the forwarded web port answers with any HTTP status.
+
+        Reuses the orchestrator's verdict rule: curl writes ``000`` when the
+        connection itself fails; any other code (even 404/500) means a server
+        is accepting connections on :80.
+        """
+        ok, out = self._docker(
+            ["exec", f"{CONTAINER_PREFIX}{self.iid}", "curl", "-s", "-o", "/dev/null",
+             "-w", "%{http_code}", "--max-time", str(timeout), f"http://127.0.0.1:{host_port}"],
+            timeout=timeout + 15,
+        )
+        code = out.strip().splitlines()[-1].strip() if out.strip() else ""
+        return ok and code != "" and code != "000"
+
+    def _restart_container(self, verify_port: int | None, verify_seconds: int) -> bool:
+        """Restart the QEMU container, then require the web port to come back.
+
+        A restart that is not followed by a serving port is not a repair; the
+        verification window gives the guest time to boot (the orchestration
+        path itself allows minutes, so a short window here can only over-report
+        failure, never success).
+        """
+        ok, out = self._docker(["restart", "-t", "10", f"{CONTAINER_PREFIX}{self.iid}"],
+                               timeout=60)
+        if not ok:
+            logger.error(f"container {self.iid}: restart failed: {out}")
+            return False
+        if not verify_port:
+            return True
+
+        deadline = time.time() + verify_seconds
+        while True:
+            if self.probe_http(verify_port, timeout=5):
+                logger.info(f"container {self.iid}: web serving again on port {verify_port}")
+                return True
+            if time.time() >= deadline:
+                break
+            time.sleep(5)
+        logger.warning(
+            f"container {self.iid}: restarted but port {verify_port} never answered "
+            f"within {verify_seconds}s"
+        )
+        return False
 
     def _exec_in_guest(self, script: str, timeout: int = 30) -> tuple[bool, str]:
         """Run a shell snippet inside the running container.
@@ -309,6 +498,29 @@ class AIHealthMonitor:
             ACTION_RESOURCE: self._cleanup_resources,
             ACTION_DIAGNOSTIC: self._disable_diagnostic_tools,
         }
+        if action == ACTION_WEB_RESTART:
+            if self._web_restart_cooldown_active():
+                logger.info(
+                    f"container {self.iid}: {ACTION_WEB_RESTART} skipped, "
+                    f"restart cooldown active"
+                )
+                return False
+            ok = self._restart_container(
+                verify_port=self.http_probe_port,
+                verify_seconds=self.restart_verify_seconds,
+            )
+            if ok:
+                self._last_web_restart = stamp
+                entry = f"{ACTION_WEB_RESTART}@{stamp}"
+                self.status.actions_taken.append(entry)
+            self.recovery_history.append(
+                {"action": action, "timestamp": stamp, "success": ok}
+            )
+            self._ledger_record(action, "repair", ok)
+            if not ok:
+                logger.warning(f"[{stamp}] {ACTION_WEB_RESTART} did not take effect on {self.iid}")
+            return ok
+
         if action == ACTION_WEB_DIAGNOSIS:
             # Diagnosis only: nothing is repaired, so it must not be logged as a
             # repair — otherwise the report claims a fix that never happened.
@@ -318,6 +530,7 @@ class AIHealthMonitor:
             self.recovery_history.append(
                 {"action": action, "timestamp": stamp, "success": ok, "detail": summary}
             )
+            self._ledger_record(action, "diagnosis", ok, detail=summary)
             logger.info(f"[{stamp}] {ACTION_WEB_DIAGNOSIS}: {summary or 'no findings'}")
             return ok
 
@@ -339,6 +552,7 @@ class AIHealthMonitor:
                 {"action": action, "timestamp": stamp, "success": False}
             )
             logger.warning(f"[{stamp}] {action} did not take effect on {self.iid}")
+        self._ledger_record(action, "repair", success)
         return success
 
     _WATCHDOG_SCRIPT = """\
@@ -409,7 +623,13 @@ exit "$rc"
         return False
 
     def _diagnose_web_server(self) -> tuple[bool, str]:
-        """Collect why the web server is not serving. Reports; repairs nothing."""
+        """Collect why the web server is not serving. Reports; repairs nothing.
+
+        The probes run inside the *container*, not the guest: the guest rootfs
+        lives in image.raw, so a missing binary here is expected and only the
+        HTTP probe from outside (``probe_http``) says anything about the guest's
+        actual web server.
+        """
         script = """\
 for b in /opt/goahead/goahead /usr/bin/boa /bin/boa /usr/sbin/lighttpd \\
          /usr/sbin/uhttpd /usr/sbin/thttpd; do
@@ -417,29 +637,38 @@ for b in /opt/goahead/goahead /usr/bin/boa /bin/boa /usr/sbin/lighttpd \\
 done
 pidof goahead >/dev/null 2>&1 && echo "running: goahead"
 pidof boa >/dev/null 2>&1 && echo "running: boa"
+pidof qemu-system-mipsel >/dev/null 2>&1 && echo "qemu: mipsel running"
+pidof qemu-system-mipseb >/dev/null 2>&1 && echo "qemu: mipseb running"
+pidof qemu-system-arm >/dev/null 2>&1 && echo "qemu: armel running"
+pidof qemu-system-aarch64 >/dev/null 2>&1 && echo "qemu: arm64 running"
 netstat -lnt 2>/dev/null | grep -q ':80 ' && echo "listening: 80"
-echo "init references:"
-grep -rIl -e goahead -e boa /etc/init.d /etc/rc.d 2>/dev/null
-echo "prerequisites:"
-[ -f /opt/goahead/route.txt ] && echo "  ok: /opt/goahead/route.txt"
-[ -f /etc/boa/boa.conf ] && echo "  ok: /etc/boa/boa.conf"
 exit 0
 """
         ok, out = self._exec_in_guest(script, timeout=20)
         summary = out or "no diagnostics collected"
         if "listening: 80" in out and "running:" in out:
             summary = f"web server is up after all: {summary}"
+        elif "qemu:" not in out:
+            summary = f"no QEMU process in container — emulation is down: {summary}"
         elif "binary:" not in out:
-            summary = f"no vendor web binary found in this guest: {summary}"
+            summary = (
+                "guest filesystem is not visible from the container (expected; "
+                "guest lives in image.raw) — use the serial log and the HTTP probe: "
+                + summary
+            )
+        if self.http_probe_port:
+            serving = self.probe_http(self.http_probe_port)
+            summary = f"http probe on {self.http_probe_port}: {'serving' if serving else 'no answer'}; {summary}"
         return ok, summary
 
     # ------------------------------------------------------------------- loop
 
     def start_continuous_monitoring(self, check_interval: int = 30) -> None:
         """Analyse, recover, repeat until interrupted."""
+        probe = f", http probe :{self.http_probe_port}" if self.http_probe_port else ""
         logger.info(
             f"AI Guardian watching container {self.iid} every {check_interval}s "
-            f"(timeout {int(self.timeout.total_seconds() // 60)}m)"
+            f"(timeout {int(self.timeout.total_seconds() // 60)}m{probe})"
         )
         while True:
             try:

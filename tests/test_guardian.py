@@ -18,6 +18,7 @@ from iris.monitor.ai_guardian import (
     ACTION_RESOURCE,
     ACTION_WATCHDOG,
     ACTION_WEB_DIAGNOSIS,
+    ACTION_WEB_RESTART,
     AIHealthMonitor,
     SerialLogAnalyzer,
 )
@@ -194,7 +195,12 @@ class TestAnalyzeHealth:
         monitor.analyze_health()
         first = list(monitor.status.anomalies)
         monitor.analyze_health()
-        assert monitor.status.anomalies == first
+        # The anomaly *list* must never grow across passes. What it contains
+        # may legitimately change: pass two sees an empty log window, so the
+        # historical signals are gone and only the log-derived web verdict
+        # ("not started" for this fixture) remains.
+        assert len(monitor.status.anomalies) <= len(first)
+        assert monitor.status.state in ("degraded", "critical")
 
     def test_soft_lockup_is_degraded(self, tmp_path, monkeypatch):
         (tmp_path / "1").mkdir()
@@ -342,9 +348,19 @@ class TestExecuteRecovery:
         assert "goahead" in monitor.recovery_history[-1]["detail"]
 
     def test_diagnosis_notes_a_missing_binary(self, monitor, monkeypatch):
-        monkeypatch.setattr(subprocess, "run", FakeExec(stdout="init references:\n"))
+        """No QEMU process inside the container means the emulation is down."""
+        monkeypatch.setattr(subprocess, "run", FakeExec(stdout=""))
         monitor.execute_recovery(ACTION_WEB_DIAGNOSIS)
-        assert "no vendor web binary" in monitor.recovery_history[-1]["detail"]
+        assert "emulation is down" in monitor.recovery_history[-1]["detail"]
+
+    def test_diagnosis_reports_live_qemu_without_guest_fs(self, monitor, monkeypatch):
+        """The guest rootfs is inside image.raw; container-side probes see it never."""
+        monkeypatch.setattr(subprocess, "run",
+                            FakeExec(stdout="qemu: mipsel running\n"))
+        monitor.execute_recovery(ACTION_WEB_DIAGNOSIS)
+        detail = monitor.recovery_history[-1]["detail"]
+        assert "image.raw" in detail
+        assert "guest filesystem is not visible" in detail
 
     def test_unknown_action_is_rejected(self, monitor, monkeypatch):
         monkeypatch.setattr(subprocess, "run", FakeExec())
@@ -391,3 +407,268 @@ class TestMonitoringLoop:
 
         monitor.start_continuous_monitoring(check_interval=0)
         assert calls["n"] == 2
+
+class TestIncrementalCounting:
+    """Counters must reflect the new tail of the log, not its whole history."""
+
+    def test_second_pass_counts_only_new_lines(self, tmp_path):
+        log = tmp_path / "1" / "qemu.serial.log"
+        log.parent.mkdir()
+        log.write_text(
+            "[ 0.0] Booting Linux on physical CPU 0x0\n", encoding="utf-8")
+        m = AIHealthMonitor(iid=1, scratch_dir=tmp_path)
+        m.analyze_health()
+        assert m.status.watchdog_triggers == 0
+
+        log.write_text(
+            "[ 0.0] Booting Linux on physical CPU 0x0\n"
+            "Monitor: process gp8 is die.\n", encoding="utf-8")
+        m.analyze_health()
+        assert m.status.watchdog_triggers == 1  # only the new line
+        assert m.status.reboot_count == 0  # the first banner is not a reboot
+
+    def test_repaired_guest_is_not_pinned_by_history(self, tmp_path):
+        """Two watchdog hits, then quiet: the next pass must not stay critical."""
+        log = tmp_path / "1" / "qemu.serial.log"
+        log.parent.mkdir()
+        log.write_text(
+            "[ 0.0] Booting Linux on physical CPU 0x0\n"
+            "Monitor: process gp8 is die.\n"
+            "Monitor: process gp8 is die.\n", encoding="utf-8")
+        m = AIHealthMonitor(iid=1, scratch_dir=tmp_path)
+        assert m.analyze_health().state == "critical"
+        # The file gains nothing new; a fresh log read yields an empty window.
+        # (This is the counter-semantic fix: history must not re-arm critical.)
+        status = m.analyze_health()
+        assert status.watchdog_triggers == 0
+        assert status.state != "critical"
+
+    def test_reboots_accumulate_but_banners_only_in_first_window(self, tmp_path):
+        log = tmp_path / "1" / "qemu.serial.log"
+        log.parent.mkdir()
+        base = "[ 0.0] Booting Linux on physical CPU 0x0\n"
+        log.write_text(base, encoding="utf-8")
+        m = AIHealthMonitor(iid=1, scratch_dir=tmp_path)
+        m.analyze_health()
+        assert m.status.reboot_count == 0
+
+        log.write_text(base + base, encoding="utf-8")
+        m.analyze_health()
+        assert m.status.reboot_count == 1  # second banner is a restart
+
+    def test_truncated_log_restarts_cursor(self, tmp_path):
+        """A fresh QEMU run rewrites the log; the cursor must follow, not stall."""
+        log = tmp_path / "1" / "qemu.serial.log"
+        log.parent.mkdir()
+        log.write_text(
+            "[ 0.0] Booting Linux on physical CPU 0x0\n"
+            "Monitor: process gp8 is die.\n", encoding="utf-8")
+        m = AIHealthMonitor(iid=1, scratch_dir=tmp_path)
+        m.analyze_health()
+        assert m._log_cursor == 2
+
+        log.write_text(
+            "[ 0.0] Booting Linux on physical CPU 0x0\n", encoding="utf-8")
+        m.analyze_health()
+        assert m._log_cursor == 1  # re-consumed from the start of the new log
+
+
+class TestHttpProbe:
+    """The probe is the ground truth for 'serving right now'."""
+
+    @pytest.fixture
+    def probing_monitor(self, tmp_path):
+        (tmp_path / "1").mkdir()
+        (tmp_path / "1" / "qemu.serial.log").write_text(
+            "[ 0.0] Booting Linux on physical CPU 0x0\n"
+            "IRIS-NETFIX: vendor web server is already running, leaving :80 to it\n",
+            encoding="utf-8")
+        return AIHealthMonitor(iid=1, scratch_dir=tmp_path, http_probe_port=8080)
+
+    def test_probe_failure_overrides_optimistic_serial_log(self, probing_monitor, monkeypatch):
+        monkeypatch.setattr(subprocess, "run", FakeExec(stdout="000\n"))
+        status = probing_monitor.analyze_health()
+        assert status.web_server_status == "started_but_stopped"
+        assert status.state == "degraded"
+
+    def test_probe_success_keeps_active(self, probing_monitor, monkeypatch):
+        monkeypatch.setattr(subprocess, "run", FakeExec(stdout="200\n"))
+        status = probing_monitor.analyze_health()
+        assert status.web_server_status == "active"
+        assert status.state == "healthy"
+
+    def test_no_probe_port_keeps_serial_only_semantics(self, tmp_path, monkeypatch):
+        (tmp_path / "1").mkdir()
+        (tmp_path / "1" / "qemu.serial.log").write_text(
+            "[ 0.0] Booting Linux on physical CPU 0x0\n"
+            "IRIS-NETFIX: vendor web server is already running, leaving :80 to it\n",
+            encoding="utf-8")
+        m = AIHealthMonitor(iid=1, scratch_dir=tmp_path)  # probe port 0
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("docker called")))
+        status = m.analyze_health()
+        assert status.web_server_status == "active"
+
+    def test_not_started_is_never_overridden(self, probing_monitor, monkeypatch):
+        """Without a start signal in the log the probe has nothing to refute."""
+        (probing_monitor.scratch_dir / "1" / "qemu.serial.log").write_text(
+            "[ 0.0] Booting Linux on physical CPU 0x0\n", encoding="utf-8")
+        monkeypatch.setattr(subprocess, "run", FakeExec(stdout="000\n"))
+        status = probing_monitor.analyze_health()
+        assert status.web_server_status == "not_started"
+
+    def test_probe_uses_forwarded_localhost_port(self, probing_monitor, monkeypatch):
+        fake = FakeExec(stdout="200\n")
+        monkeypatch.setattr(subprocess, "run", fake)
+        probing_monitor.probe_http(8080)
+        cmd = fake.exec_call
+        assert "curl" in cmd
+        assert "http://127.0.0.1:8080" in cmd
+        assert fake.exec_call[:3] == ["docker", "exec", "iris-qemu-1"]
+
+
+class TestWebServerRestart:
+    """The container-level restart: the only repair that reaches a running guest."""
+
+    @pytest.fixture
+    def restart_monitor(self, tmp_path):
+        (tmp_path / "1").mkdir()
+        (tmp_path / "1" / "qemu.serial.log").write_text(
+            "[ 0.0] Booting Linux on physical CPU 0x0\n", encoding="utf-8")
+        return AIHealthMonitor(iid=1, scratch_dir=tmp_path, http_probe_port=8080,
+                               restart_verify_seconds=1)
+
+    def test_restart_recommended_for_started_but_stopped(self, tmp_path):
+        (tmp_path / "1").mkdir()
+        (tmp_path / "1" / "qemu.serial.log").write_text(
+            "[ 0.0] Booting Linux on physical CPU 0x0\n"
+            "IRIS-NETFIX: probing for a web server on :80\n", encoding="utf-8")
+        m = AIHealthMonitor(iid=1, scratch_dir=tmp_path)
+        status = m.analyze_health()
+        assert status.web_server_status == "started_but_stopped"
+        assert m.recommend_recovery_action() == ACTION_WEB_RESTART
+
+    def test_successful_restart_is_verified_by_probe(self, restart_monitor, monkeypatch):
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            if "restart" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            if "curl" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, "200\n", "")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert restart_monitor.execute_recovery(ACTION_WEB_RESTART) is True
+        assert any("restart" in c for c in calls)
+        assert any("curl" in c for c in calls)
+        assert restart_monitor.status.actions_taken[-1].startswith(ACTION_WEB_RESTART)
+
+    def test_restart_without_web_returning_is_a_failure(self, restart_monitor, monkeypatch):
+        """Restarted but never serving again must not be recorded as a repair."""
+        monkeypatch.setattr(subprocess, "run",
+                            FakeExec(stdout="000\n"))  # restart ok, probe dead
+        monkeypatch.setattr("iris.monitor.ai_guardian.time.sleep", lambda _: None)
+        assert restart_monitor.execute_recovery(ACTION_WEB_RESTART) is False
+        assert restart_monitor.status.actions_taken == []
+        assert restart_monitor.recovery_history[-1]["success"] is False
+
+    def test_failed_restart_command_is_a_failure(self, restart_monitor, monkeypatch):
+        monkeypatch.setattr(subprocess, "run", FakeExec(returncode=1))
+        assert restart_monitor.execute_recovery(ACTION_WEB_RESTART) is False
+
+    def test_cooldown_blocks_immediate_second_restart(self, restart_monitor, monkeypatch):
+        monkeypatch.setattr(subprocess, "run",
+                            FakeExec(stdout="200\n"))
+        assert restart_monitor.execute_recovery(ACTION_WEB_RESTART) is True
+        # second attempt right after: cooldown must veto it
+        assert restart_monitor.execute_recovery(ACTION_WEB_RESTART) is False
+        assert len(restart_monitor.status.actions_taken) == 1
+
+    def test_expired_cooldown_allows_restart_again(self, restart_monitor, monkeypatch):
+        monkeypatch.setattr(subprocess, "run", FakeExec(stdout="200\n"))
+        restart_monitor.execute_recovery(ACTION_WEB_RESTART)
+        restart_monitor._last_web_restart = (
+            (datetime.now(UTC) - timedelta(seconds=601)).strftime("%Y%m%d%H%M%S"))
+        assert restart_monitor.execute_recovery(ACTION_WEB_RESTART) is True
+
+    def test_unknown_action_still_rejected(self, restart_monitor, monkeypatch):
+        monkeypatch.setattr(subprocess, "run", FakeExec())
+        assert restart_monitor.execute_recovery("NOT_AN_ACTION") is False
+
+
+class TestLedger:
+    """Every action and diagnosis lands in the append-only ledger."""
+
+    @pytest.fixture
+    def ledger_monitor(self, tmp_path):
+        (tmp_path / "1").mkdir()
+        (tmp_path / "1" / "qemu.serial.log").write_text(
+            "[ 0.0] Booting Linux on physical CPU 0x0\n", encoding="utf-8")
+        ledger = tmp_path / "ledger.sqlite3"
+        return AIHealthMonitor(iid=1, scratch_dir=tmp_path, ledger_path=ledger), ledger
+
+    def test_repair_is_recorded(self, ledger_monitor, monkeypatch):
+        m, ledger = ledger_monitor
+        monkeypatch.setattr(subprocess, "run",
+                            FakeExec(stdout="WATCHDOG-FIX-APPLIED\n"))
+        m.execute_recovery(ACTION_WATCHDOG)
+        from iris.monitor.ledger import GuardianLedger
+
+        db = GuardianLedger(ledger)
+        entries = db.recent(iid=1)
+        db.close()
+        assert len(entries) == 1
+        assert entries[0]["action"] == ACTION_WATCHDOG
+        assert entries[0]["kind"] == "repair"
+        assert entries[0]["success"] is True
+
+    def test_failed_repair_is_recorded_as_failure(self, ledger_monitor, monkeypatch):
+        m, ledger = ledger_monitor
+        monkeypatch.setattr(subprocess, "run", FakeExec(returncode=1))
+        m.execute_recovery(ACTION_WATCHDOG)
+        from iris.monitor.ledger import GuardianLedger
+
+        db = GuardianLedger(ledger)
+        entries = db.recent(iid=1)
+        db.close()
+        assert entries[0]["success"] is False
+
+    def test_diagnosis_is_recorded_with_detail(self, ledger_monitor, monkeypatch):
+        m, ledger = ledger_monitor
+        monkeypatch.setattr(subprocess, "run",
+                            FakeExec(stdout="qemu: mipsel running\n"))
+        m.execute_recovery(ACTION_WEB_DIAGNOSIS)
+        from iris.monitor.ledger import GuardianLedger
+
+        db = GuardianLedger(ledger)
+        entries = db.recent(iid=1)
+        db.close()
+        assert entries[0]["kind"] == "diagnosis"
+        assert "image.raw" in entries[0]["detail"]
+
+    def test_promotion_flag_is_flippable(self, ledger_monitor, monkeypatch):
+        m, ledger = ledger_monitor
+        monkeypatch.setattr(subprocess, "run",
+                            FakeExec(stdout="WATCHDOG-FIX-APPLIED\n"))
+        m.execute_recovery(ACTION_WATCHDOG)
+        from iris.monitor.ledger import GuardianLedger
+
+        db = GuardianLedger(ledger)
+        entry = db.recent(iid=1)[0]
+        assert db.mark_promoted(entry["id"]) is True
+        assert db.recent(iid=1)[0]["promoted"] is True
+        db.close()
+
+    def test_ledger_failure_never_breaks_recovery(self, ledger_monitor, monkeypatch):
+        m, _ = ledger_monitor
+        m.ledger.close()  # a closed connection makes every write fail
+        monkeypatch.setattr(subprocess, "run",
+                            FakeExec(stdout="WATCHDOG-FIX-APPLIED\n"))
+        assert m.execute_recovery(ACTION_WATCHDOG) is True  # repair still works
+
+    def test_no_ledger_path_means_none(self, tmp_path):
+        m = AIHealthMonitor(iid=1, scratch_dir=tmp_path)
+        assert m.ledger is None

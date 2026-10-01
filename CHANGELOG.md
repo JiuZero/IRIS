@@ -6,6 +6,49 @@
 
 ## [未发布]
 
+### 新增（值守观测与自愈闭环，2026-10-02）
+
+- **串口日志增量感知**：`SerialLogAnalyzer.load_log(start_line)` 支持从指定行起读，
+  `AIHealthMonitor` 以 `_log_cursor` 记录已消费行数，每轮 `analyze_health()` 只统计
+  上轮之后**新增**的日志行；累计值保存在 `monitor.cumulative`。历史告警不再永远
+  钉住状态——触发过 watchdog、被修复后安静下来的 guest 正确回落，而非被全量
+  重算的计数器按住 critical 不放。日志被截断/重建（新一轮 QEMU）时游标自动归零。
+  随此修掉一个真缺陷：`_ensure_loaded` 把"空窗口"误判为"未加载"而从头重载全量
+  日志，增量语义被整体击穿——改为显式 `_loaded` 标记。
+- **HTTP 探活作为第二信号源**：`--probe-port <port>` 开启后每轮对转发端口发
+  curl（复用 orchestrator 的判定规则：HTTP 000 视为不服务），探活失败会覆盖串口
+  日志的乐观结论（"already running"描述的是启动时刻，不是此刻）。`probe_port=0`
+  保持纯串口语义，行为与旧版一致。
+- **`WEB_SERVER_RESTART` 动作（容器级重启闭环）**：Web 启动后意外退出
+  （`started_but_stopped`，即"Web 意外退出"）触发 `docker restart` 整容器重启——
+  这是运行期唯一真正触达 guest 的修复通道（guest rootfs 在 `image.raw` 里，
+  容器内没有挂载，`docker exec` 到不了 guest 进程）。重启后必须在
+  `--restart-verify`（默认 120s）内探活成功才算修复；两次重启间有
+  600s 冷却，救不活的 guest 不会被无间隔反复重启。
+- **动作账本（guardian action ledger）**：`src/iris/monitor/ledger.py`，所有恢复
+  动作与诊断追加落 `iris-home/scratch/guardian_ledger.sqlite3`。字段对齐
+  `db.models.RepairAction`（source/rule_id/evidence/applied/promoted），为 P3
+  "修复沉淀回 L3 规则"预留 `mark_promoted`。账本写入失败只告警，绝不阻断值守。
+- **`iris emulate guardian-log`**：查询值守账本（`--iid` 过滤、`--limit` 截断，
+  双入口一致）。`guardian-start` 新增 `--probe-port`/`--restart-verify` 两个选项。
+- **`tests/test_guardian.py` 扩至 62 例**：新增 `TestIncrementalCounting`（6 例）、
+  `TestHttpProbe`（5 例）、`TestWebServerRestart`（7 例）、`TestLedger`（6 例），
+  覆盖增量窗口、游标重置、探活覆盖、重启验证失败不记账、冷却否决、账本失败不阻断。
+
+### 变更（值守观测与自愈闭环）
+
+- `WEB_SERVER_DIAGNOSIS` 诊断脚本重写：旧脚本探 `/etc/init.d` 与 `/opt/goahead`——
+  这些路径在运行期容器里**本来就不存在**（guest 文件系统在镜像里），结论必然误导；
+  新脚本探容器侧真实可见的东西（QEMU 进程是否存活、容器内 :80 是否有人听），
+  并在外部探活可用时附加探活结论。
+- `started_but_stopped` 从"仅记录"升级为 `degraded` 异常项并纳入动作推荐链
+  （`recommend_recovery_action` 新增末位 `WEB_SERVER_RESTART`）。
+- `docx/AI值守与稳定性治理.md` 同步：4.3 状态机表（expired 优先 + 增量口径）、
+  4.4 五类动作、4.8 新增"执行通道的两层语义"、4.9 动作账本、4.7 已知限制移除
+  已过时两条、5.3 增强清单勾掉已落地三项。
+
+## [0.2.1] - 2026-10-01
+
 ### 修复
 
 - **AI 值守的 `expired` 被 stale `critical` 永久掩盖**：watchdog/reboot 计数每轮从
@@ -26,12 +69,25 @@
 - **全仓空白卫生**：约 40 个文件补缺失的文件末尾换行、清理行尾空白
   （`cli.py` 约 30 行、`pre_init.sh` 等 shell 脚本、`pyproject.toml`、
   `CHANGELOG.md`、`.gitignore` 等）；空的 `__init__.py` 是包标记，不算缺陷。
+- **`iris.py` 被当作包导入时必须代理，否则 `python -m iris.cli` 直接失效**：`-m` 会把
+  当前工作目录放进 `sys.path[0]`，runpy 解析 `iris.cli` 前先导入父包 `iris`，抢在
+  `src/iris` 之前命中调试脚本，报 `No module named 'iris.cli'; 'iris' is not a package`。
+  `iris.py` 现按 `__name__` 分两种身份：`__main__` 时转发到 `main()`；`iris` 时把
+  `__path__` 指向 `src/iris` 并执行真包 `__init__.py`，使 `iris.cli` / `iris.api`
+  等子模块照常解析。
+- **pytest 默认 prepend 导入模式会把仓库根目录插到 `sys.path[0]`**：同样让
+  `from iris.api.server import app` 命中 `iris.py`，`tests/test_api.py` 收集期报错。
+  测试侧改用 `--import-mode=importlib` 并显式声明 `pythonpath = ["src"]`，不再做
+  路径注入——顺带让测试进程里的 `iris` 就是安装后的真包，而非代理模块。
 
 ### 变更
 
 - **`.merkle-snapshot.json` 为过期工具缓存**：内容仍引用已删除的根目录
   `test_guardian.py`/`test_manual_usage.py`，属智能体工具生成的陈旧快照，
   已在 `.gitignore`，无需处理。
+- **`iris.py` 无条件把 `src` 移到 `sys.path` 首位**：editable 安装（`pip install -e .`）
+  已经把 `src` 加进 `sys.path`，原先"不在才插入"的写法会跳过，根目录仍排在 `src` 之前，
+  `python iris.py` 直接启动失败。改为先 remove 再 insert。
 
 ### 新增
 
@@ -46,25 +102,6 @@
   "规则作者写的合法 POSIX 转义"——续接符、`find` 的 `\(` `\)` `\;` 属脚本语义；
   合成规则场景仍由 `TestGuestScriptIsPosix` 钉死零反斜杠，真机规则场景改为
   白名单正则逐行校验，并断言验证日志路径以 POSIX 字面量出现。
-
-### 修复
-
-- **`iris.py` 被当作包导入时必须代理，否则 `python -m iris.cli` 直接失效**：`-m` 会把
-  当前工作目录放进 `sys.path[0]`，runpy 解析 `iris.cli` 前先导入父包 `iris`，抢在
-  `src/iris` 之前命中调试脚本，报 `No module named 'iris.cli'; 'iris' is not a package`。
-  `iris.py` 现按 `__name__` 分两种身份：`__main__` 时转发到 `main()`；`iris` 时把
-  `__path__` 指向 `src/iris` 并执行真包 `__init__.py`，使 `iris.cli` / `iris.api`
-  等子模块照常解析。
-- **pytest 默认 prepend 导入模式会把仓库根目录插到 `sys.path[0]`**：同样让
-  `from iris.api.server import app` 命中 `iris.py`，`tests/test_api.py` 收集期报错。
-  测试侧改用 `--import-mode=importlib` 并显式声明 `pythonpath = ["src"]`，不再做
-  路径注入——顺带让测试进程里的 `iris` 就是安装后的真包，而非代理模块。
-
-### 变更
-
-- **`iris.py` 无条件把 `src` 移到 `sys.path` 首位**：editable 安装（`pip install -e .`）
-  已经把 `src` 加进 `sys.path`，原先"不在才插入"的写法会跳过，根目录仍排在 `src` 之前，
-  `python iris.py` 直接启动失败。改为先 remove 再 insert。
 
 ## [0.2.0] - 2026-10-01
 
