@@ -336,7 +336,7 @@ def emulate_run(
     ),
 ) -> None:
     """Run QEMU emulation of a firmware rootfs and check web reachability.
-    
+
     Accepts either an extracted rootfs directory or a firmware file (.bin). When a firmware file is given,
     IRIS extracts it, infers the target architecture from the ELF census, applies boot-fix rules, and proceeds
     to emulation. Use --arch auto (default) for automatic architecture detection, or specify a concrete arch
@@ -348,14 +348,14 @@ def emulate_run(
     if not target.exists():
         typer.secho(f"not found: {target}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
-    
+
     # Only reject zips if input is a file
     if target.is_file():
         _reject_zip(target)
-    
+
     settings = get_settings()
     scratch = settings.scratch_dir
-    
+
     # Decide whether input is firmware .bin vs pre-extracted rootfs
     inferred_arch = ""
     if target.is_file():
@@ -391,7 +391,7 @@ def emulate_run(
         if applied_rules := prepared.matched_rule_ids:
             typer.echo(f"L3 rules matched: {', '.join(applied_rules)}")
         rootfs = target
-    
+
     # Preflight arch check against the actual chosen arch (apply arch mapping first)
     if inferred_arch and not inferred_arch.startswith("unk("):
         # Map ELF census names to QEMU kernel labels
@@ -402,13 +402,13 @@ def emulate_run(
             typer.secho(f"preflight: {problem}", fg=typer.colors.RED, err=True)
             typer.secho("  (override with --force)", fg=typer.colors.YELLOW, err=True)
             raise typer.Exit(code=3)
-    
+
     selected_arch = inferred_arch if inferred_arch else "auto"
     # Apply arch mapping for selected_arch too
     if selected_arch != "auto":
         arch_map = {"mipsel": "mipsel", "mipseb": "mipseb", "armel": "armel", "aarch64": "arm64"}
         selected_arch = arch_map.get(selected_arch, selected_arch)
-    
+
     # If still auto after all inference attempts, show error
     if selected_arch == "auto":
         supported = supported_archs()
@@ -416,7 +416,7 @@ def emulate_run(
         typer.echo(f"  Supported architectures: {', '.join(supported)}")
         typer.echo(f"  Usage: iris emulate run <rootfs|bin> --arch {'|'.join(supported)}")
         raise typer.Exit(code=3)
-    
+
     typer.echo(f"emulating {target.name} arch={selected_arch}")
     result_port = port if port != 0 else 8080
     try:
@@ -427,7 +427,7 @@ def emulate_run(
     except RuntimeError:
         typer.secho("no available host port in range [8080,8199]; use --port XXX", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=3) from None
-    
+
     partition_mounts = None
     if parts_dir is not None:
         if not parts_dir.is_dir():
@@ -448,7 +448,7 @@ def emulate_run(
         parts_slices_dir=parts_dir,
         partition_mounts=partition_mounts,
     )
-    
+
     typer.echo(f"success     : {result.success}")
     typer.echo(f"web ok      : {result.web_ok}")
     typer.echo(f"web url     : {result.web_url or '-'}")
@@ -478,38 +478,38 @@ def emulate_list() -> None:
     try:
         # Use docker format string for consistent output
         result = subprocess.run(
-            ["docker", "ps", "-a", "--filter", "name=iris-qemu", 
+            ["docker", "ps", "-a", "--filter", "name=iris-qemu",
              "--format", "{{.Names}}|{{.Status}}|{{.Ports}}"],
-            capture_output=True, 
-            text=True, 
+            capture_output=True,
+            text=True,
             check=True,
             encoding="utf-8",
             errors="ignore"
         )
-        
+
         if not result.stdout.strip():
             typer.secho("No IRIS emulation containers found.", fg=typer.colors.YELLOW)
             return
-        
+
         lines = result.stdout.strip().split('\n')
-        
+
         # Print header
         typer.secho(f"{'CONTAINER':<30} {'STATUS':<35} {'PORTS'}", fg=typer.colors.GREEN)
         typer.secho("-" * 95, fg=typer.colors.GREEN)
-        
+
         # Parse data lines
         for line in lines:
             parts = line.split('|')
             if len(parts) < 3:
                 continue
-            
+
             name = parts[0]
             status = parts[1][:35]
             ports = parts[2]
-            
+
             color = typer.colors.GREEN if "Up" in status else typer.colors.YELLOW
             typer.secho(f"{name:<30} {status:<35} {ports}", fg=color)
-        
+
     except subprocess.CalledProcessError as e:
         typer.secho(f"Failed to list containers: {e}", fg=typer.colors.RED)
         raise typer.Exit(code=1) from None
@@ -523,10 +523,10 @@ def emulate_list() -> None:
 @emulate_app.command("status")
 def emulate_status(iid: int = typer.Argument(..., help="image ID to inspect")) -> None:
     """Display detailed status of an IRIS QEMU emulation container."""
-    
+
     settings = get_settings()
     scratch_dir = settings.scratch_dir
-    
+
     # Check if container exists
     try:
         result = subprocess.run(
@@ -547,14 +547,14 @@ def emulate_status(iid: int = typer.Argument(..., help="image ID to inspect")) -
         typer.secho(f"Container iris-qemu-{iid} not found.", fg=typer.colors.RED)
         raise typer.Exit(code=1)
     info = inspected[0]
-    
+
     # Extract key information
     container_name = info["Name"].lstrip("/")
     state = info["State"]["Status"]
     created = info["Created"]
     started_at = info["State"].get("StartedAt", "N/A")
     finished_at = info["State"].get("FinishedAt", "N/A")
-    
+
     # Get port mappings
     ports = info.get("NetworkSettings", {}).get("Ports", {})
     port_info = []
@@ -571,7 +571,7 @@ def emulate_status(iid: int = typer.Argument(..., help="image ID to inspect")) -
                     port_info.append(f"{origin} → {container_port}")
         else:
             port_info.append(f"{container_port} (no mapping)")
-    
+
     # Get network info
     networks = info.get("NetworkSettings", {}).get("Networks", {})
     ip_address = ""
@@ -580,12 +580,12 @@ def emulate_status(iid: int = typer.Argument(..., help="image ID to inspect")) -
         network_names.append(net_name)
         if net_info.get("IPAddress"):
             ip_address = net_info["IPAddress"]
-    
+
     # Display formatted output
     typer.echo("\n" + "="*60)
     typer.secho(f"  Container: {container_name}", fg=typer.colors.GREEN)
     typer.echo("="*60 + "\n")
-    
+
     typer.echo("Status:")
     typer.echo(f"  State:          {state}")
     typer.echo(f"  Created:        {created}")
@@ -593,19 +593,19 @@ def emulate_status(iid: int = typer.Argument(..., help="image ID to inspect")) -
     if state == "exited":
         typer.echo(f"  Finished At:    {finished_at}")
     typer.echo()
-    
+
     if port_info:
         typer.echo("Ports:")
         for p in port_info:
             typer.echo(f"  -> {p}")
         typer.echo()
-    
+
     if ip_address:
         typer.echo("Network:")
         typer.echo(f"  IP Address:     {ip_address}")
         typer.echo(f"  Networks:       {', '.join(network_names)}")
         typer.echo()
-    
+
     # Check web service accessibility
     web_ports = [80, 8080, 8000, 443]
     accessible_ports = []
@@ -621,15 +621,15 @@ def emulate_status(iid: int = typer.Argument(..., help="image ID to inspect")) -
         except OSError:
             # An unbindable or filtered port is just "not reachable", not an error.
             pass
-    
+
     if accessible_ports:
-        typer.secho(f"[OK] Web services accessible on ports: {', '.join(map(str, accessible_ports))}", 
+        typer.secho(f"[OK] Web services accessible on ports: {', '.join(map(str, accessible_ports))}",
                    fg=typer.colors.GREEN)
     elif state == "running":
-        typer.secho("[NO] No web services detected on standard ports (80/8080/8000/443)", 
+        typer.secho("[NO] No web services detected on standard ports (80/8080/8000/443)",
                    fg=typer.colors.YELLOW)
     typer.echo()
-    
+
     # Show scratch directory
     scratch_path = scratch_dir / str(iid)
     if scratch_path.exists():
@@ -638,7 +638,7 @@ def emulate_status(iid: int = typer.Argument(..., help="image ID to inspect")) -
         size_gb = sum(f.stat().st_size for f in scratch_path.rglob("*") if f.is_file()) / (1024**3)
         typer.echo(f"  Size:           {size_gb:.2f} GB")
         typer.echo()
-    
+
     typer.echo("="*60)
 
 

@@ -10,15 +10,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///iris-home/iris.db"
     log_level: str = "INFO"
 
-    timeout_initial: int = 240
-    timeout_check: int = 360
-    check_timeout: int = 360
-
     download_mirror: str = "https://gh-proxy.com/"
-
-    @property
-    def home(self) -> Path:
-        return self.iris_home
 
     @property
     def rules_dir(self) -> Path:
@@ -30,10 +22,6 @@ class Settings(BaseSettings):
     @property
     def corpus_dir(self) -> Path:
         return self.iris_home / "corpus"
-
-    @property
-    def images_dir(self) -> Path:
-        return self.iris_home / "images"
 
     @property
     def scratch_dir(self) -> Path:

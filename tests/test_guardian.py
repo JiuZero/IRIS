@@ -8,7 +8,7 @@ decides success, never "we ran something and assumed it worked".
 from __future__ import annotations
 
 import subprocess
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -185,7 +185,6 @@ class TestAnalyzeHealth:
         assert status.web_server_status == "unknown"
 
     def test_uptime_is_measured_outside_the_loop(self, monitor):
-        from datetime import UTC, timedelta
 
         monitor.start_time = datetime.now(UTC) - timedelta(seconds=90)
         monitor.analyze_health()
@@ -239,6 +238,26 @@ class TestAnalyzeHealth:
         m._determine_overall_state()
         assert m.status.state == "expired"
         assert "web server never started" not in m.status.anomalies
+
+    def test_expired_wins_over_critical_stale_watchdog_history(self, tmp_path):
+        """Watchdog hits recorded long ago must not pin the state at critical.
+
+        Counters are recomputed from the whole log every pass, so they are
+        history, not current state. This drives the REAL analyze_health path
+        (uptime recomputed from start_time) — calling _determine_overall_state
+        directly would skip the recomputation and hide the bug.
+        """
+        (tmp_path / "1").mkdir()
+        (tmp_path / "1" / "qemu.serial.log").write_text(
+            "[ 0.0] Booting Linux on physical CPU 0x0\n"
+            "Monitor: process gp8 is die.\n"
+            "Monitor: process gp8 is die.\n", encoding="utf-8")
+        m = AIHealthMonitor(iid=1, scratch_dir=tmp_path, timeout_minutes=60)
+        m.start_time = datetime.now(UTC) - timedelta(minutes=61)
+        status = m.analyze_health()
+        assert status.uptime_seconds >= 60 * 60
+        assert status.state == "expired"
+        assert not any("repeated restarts" in a for a in status.anomalies)
 
 
 class TestRecommendAction:

@@ -117,7 +117,10 @@ def _census_elfs(rootfs_dir: Path) -> tuple[int, Counter]:
                         arch = f"unk({e_machine})"
                     counter[arch] += 1
                     count += 1
-            except OSError:
+            except (OSError, struct.error, IndexError):
+                # OSError: unreadable file. struct.error/IndexError: a file that
+                # passes the 4-byte magic check but ends mid-header (truncated
+                # vendor blob) — census is a sample, one bad file must not sink it.
                 pass
     return count, counter
 

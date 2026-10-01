@@ -218,23 +218,26 @@ class AIHealthMonitor:
     def _determine_overall_state(self) -> None:
         """Fold the metrics into one state.
 
-        ``expired`` is checked before the degraded triggers: past the monitoring
-        window, "still no web server" is no longer a degradation worth watching —
-        it is a verdict that the guest never came up, and saying so is more useful
-        than reporting degraded every interval until someone stops the loop.
+        ``expired`` is checked first, and it outranks *every* counter, critical
+        included. The watchdog/reboot counters are recomputed from the whole log
+        on each pass, so they are history, not current state: a guest that hit
+        its watchdog once, got fixed, and then sat quietly until the window
+        closed would otherwise report critical forever. Past the window,
+        "still not healthy" is the verdict — whether the last stretch was
+        degraded or merely quiet.
         """
         self.status.anomalies.clear()
         s = self.status
-        if s.reboot_count >= 3 or s.watchdog_triggers >= 2:
+        if s.uptime_seconds > self.timeout.total_seconds():
+            s.state = "expired"
+            s.anomalies.append(
+                f"no healthy state within {int(self.timeout.total_seconds() // 60)} minutes"
+            )
+        elif s.reboot_count >= 3 or s.watchdog_triggers >= 2:
             s.state = "critical"
             s.anomalies.append(
                 f"repeated restarts: {s.reboot_count} reboot(s), "
                 f"{s.watchdog_triggers} watchdog trigger(s)"
-            )
-        elif self.status.uptime_seconds > self.timeout.total_seconds():
-            s.state = "expired"
-            s.anomalies.append(
-                f"no healthy state within {int(self.timeout.total_seconds() // 60)} minutes"
             )
         elif s.soft_lockup_events > 0:
             s.state = "degraded"

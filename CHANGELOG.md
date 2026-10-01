@@ -6,6 +6,33 @@
 
 ## [未发布]
 
+### 修复
+
+- **AI 值守的 `expired` 被 stale `critical` 永久掩盖**：watchdog/reboot 计数每轮从
+  全量日志重算，属"历史"而非"当前状态"——一个曾触发 watchdog、随后被修复、
+  静默跑到监控窗口结束的容器，会永远报 critical 而非"窗口已过仍未健康"。
+  超时判定改为**最先**评估并压过一切计数器；新增测试驱动真实
+  `analyze_health()` 路径（uptime 由 start_time 重算）——直接调
+  `_determine_overall_state()` 会跳过重算，测不出此缺陷。
+- **ELF 普查对截断文件崩溃**：`_census_elfs` 只捕获 `OSError`，而通过 4 字节
+  魔数校验、却在头部中段截断的厂商文件会让 `struct.unpack` 抛
+  `struct.error`，一路穿透 `prepare_from_rootfs` 使仿真前置直接失败。
+  普查是抽样，单个坏文件不应击穿整树——补 `struct.error`/`IndexError` 并
+  记录豁免理由。
+- **配置死项清理**：`Settings.timeout_initial` / `timeout_check` / `check_timeout`
+  （代码零读取，仿真超时实际由 `--timeout` 参数与 API 请求体逐次指定，
+  文档 `docs/04-快速部署.md` 的 env 表同步修正）、`Settings.home` /
+  `Settings.images_dir` property（零引用）。
+- **全仓空白卫生**：约 40 个文件补缺失的文件末尾换行、清理行尾空白
+  （`cli.py` 约 30 行、`pre_init.sh` 等 shell 脚本、`pyproject.toml`、
+  `CHANGELOG.md`、`.gitignore` 等）；空的 `__init__.py` 是包标记，不算缺陷。
+
+### 变更
+
+- **`.merkle-snapshot.json` 为过期工具缓存**：内容仍引用已删除的根目录
+  `test_guardian.py`/`test_manual_usage.py`，属智能体工具生成的陈旧快照，
+  已在 `.gitignore`，无需处理。
+
 ### 新增
 
 - **根目录调试入口 `iris.py`**：与 `iris` 命令、`python -m iris.cli` 完全等价，但作为
@@ -15,6 +42,10 @@
 - **`tests/test_debug_entrypoint.py`**（7 例）：把调试入口的两条保证钉成回归——
   脚本形态转发到 CLI 且输出与 `python -m iris.cli` 逐字一致；包形态下 `iris.cli`
   仍解析到 `src/iris/cli.py`、`__version__` 来自真包 `__init__.py`。
+- **`tests/test_guest_script_hygiene.py`**（3 例）：区分"宿主渲染的反斜杠泄漏"与
+  "规则作者写的合法 POSIX 转义"——续接符、`find` 的 `\(` `\)` `\;` 属脚本语义；
+  合成规则场景仍由 `TestGuestScriptIsPosix` 钉死零反斜杠，真机规则场景改为
+  白名单正则逐行校验，并断言验证日志路径以 POSIX 字面量出现。
 
 ### 修复
 

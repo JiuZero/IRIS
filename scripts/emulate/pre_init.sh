@@ -20,16 +20,16 @@ ${BUSYBOX} mount -t tmpfs tmpfs /run 2>/dev/null || true
 # Waits for firmware boot, then ensures the LAN IP is reachable
 (
     ${BUSYBOX} sleep 20
-    
+
     # Ensure eth0 is up
     ${BUSYBOX} ifconfig eth0 up 2>/dev/null || true
-    
+
     # Check if eth0 already has an IP
     ETH_IP=$(${BUSYBOX} ifconfig eth0 2>/dev/null | ${BUSYBOX} grep "inet addr" | ${BUSYBOX} awk -F: '{print $2}' | ${BUSYBOX} awk '{print $1}')
     if [ -z "${ETH_IP}" ]; then
         ${BUSYBOX} ifconfig eth0 192.168.1.1 netmask 255.255.255.0 up 2>/dev/null || true
     fi
-    
+
     # Also check br-lan
     BR_IP=$(${BUSYBOX} ifconfig br-lan 2>/dev/null | ${BUSYBOX} grep "inet addr" | ${BUSYBOX} awk -F: '{print $2}' | ${BUSYBOX} awk '{print $1}')
     if [ -z "${BR_IP}" ]; then
