@@ -9,7 +9,9 @@ pattern apply to this rootfs) and actions (how to repair it):
 Host-side actions mutate the rootfs directory; ``guest_shell`` lines are
 collected into ``/firmadyne/iris_rules.sh`` which the emulation container
 executes at boot (device nodes and other proc/sysfs work cannot be done
-on the host filesystem). Every application returns a report so runs stay
+on the host filesystem). Text actions (``edit``/``comment_lines``) skip
+files that look binary, so a rule with a broad ``within`` glob can never
+corrupt a vendor ELF. Every application returns a report so runs stay
 auditable, and dry-run mode reports matches without touching files.
 """
 
@@ -32,6 +34,19 @@ def _read_text(path: Path) -> str:
     # silently rewrite every shell script to CRLF on a Windows host.
     with open(path, "r", encoding="utf-8", errors="ignore", newline="") as fh:
         return fh.read()
+
+
+def _is_binary(path: Path) -> bool:
+    """True for files a text edit would destroy (ELF, squashfs, gz, jffs2clean…).
+
+    ``_read_text`` decodes lossily, so writing one back would silently corrupt a
+    vendor binary — which rules now do unattended, in the auto pipeline.
+    """
+    try:
+        with open(path, "rb") as fh:
+            return b"\x00" in fh.read(512)
+    except OSError:
+        return True
 
 
 def _write_text(path: Path, text: str) -> None:
@@ -157,6 +172,8 @@ def _apply_action(rootfs: Path, action: dict, files: list[Path], guest_lines: li
             rel = f.relative_to(rootfs).as_posix()
             if not _match_glob(rel, spec.get("within", "*")):
                 continue
+            if _is_binary(f):
+                continue
             try:
                 text = _read_text(f)
             except OSError:
@@ -179,6 +196,8 @@ def _apply_action(rootfs: Path, action: dict, files: list[Path], guest_lines: li
         for f in files:
             rel = f.relative_to(rootfs).as_posix()
             if not _match_glob(rel, spec.get("within", "*")):
+                continue
+            if _is_binary(f):
                 continue
             try:
                 lines = _read_text(f).splitlines(keepends=True)

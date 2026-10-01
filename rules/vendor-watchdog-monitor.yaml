@@ -1,0 +1,41 @@
+id: vendor-watchdog-monitor
+description: >
+  Vendor supervision daemons reboot the whole guest when a hardware-bound
+  process is missing. Tenda TES7002 (aarch64 GPON OLT) runs /bin/monitor ->
+  /opt/monitor from the inittab line "::once:-/bin/monitor"; it polls
+  `ps | grep -w <name>` for ubusd/goahead/gp8/swg and on any miss executes
+  `reboot` and then `echo 1 > /proc/sys/kernel/sysrq` +
+  `echo b > /proc/sysrq-trigger`. gp8/swg need the RealTek /proc/fc control
+  files and a GPON MAC, so they can never come up under QEMU and the guest
+  hard-resets minutes after every boot — which reads as "the web service
+  crashed" while QEMU and the port forward stay alive. Commenting inittab
+  alone is not enough (rcS chains can re-exec the watchdog), so the binaries
+  are also renamed out of the way; guest_shell here runs in chroot at image
+  build time (fix_image.sh), never against the host /proc.
+  Evidence: 5959/qemu.serial.log — 3x "Monitor: process gp8 is die." each
+  followed by "sh: reboot: not found" + "sysrq: Resetting" + a fresh kernel
+  boot banner.
+stage: service
+detect:
+  - file_regex: '::(once|respawn):[^\n]*/(monitor|watchdog|keep_alive|keepalive|wdt)(\s|$)'
+    within: 'etc/inittab'
+actions:
+  - comment_lines:
+      within: 'etc/inittab'
+      regex: '^[^#]*::(once|respawn):[^\n]*/(monitor|watchdog|keep_alive|keepalive|wdt)(\s|$)'
+      prefix: '#IRIS-watchdog: '
+  - guest_shell:
+      - "# supervision daemons renamed out of PATH and out of their own dirs; the"
+      - "# vendor copy stays in the image as <name>.iris-disabled for forensics"
+      - "for b in /bin/monitor /sbin/monitor /usr/bin/monitor /usr/sbin/monitor \\"
+      - "        /opt/monitor /opt/bin/monitor /bin/watchdog /sbin/watchdog \\"
+      - "        /usr/bin/watchdog /usr/sbin/watchdog /etc/scripts/watchdog; do"
+      - "  if [ -L \"$b\" ]; then rm -f \"$b\" 2>/dev/null"
+      - "  elif [ -e \"$b\" ]; then mv -f \"$b\" \"$b.iris-disabled\" 2>/dev/null"
+      - "  fi"
+      - "done"
+      - ""
+      - "# Disable other monitoring daemons that may interfere or cause resource contention"
+      - "[ -x /bin/monitord ] && mv -f /bin/monitord /bin/monitord.iris-disabled 2>/dev/null || true"
+      - "[ -x /bin/arp_monitor ] && mv -f /bin/arp_monitor /bin/arp_monitor.iris-disabled 2>/dev/null || true"  
+      - "[ -x /bin/ppp-monitor ] && mv -f /bin/ppp-monitor /bin/ppp-monitor.iris-disabled 2>/dev/null || true"

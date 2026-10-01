@@ -15,6 +15,23 @@ has_ip() {
     ifconfig "$1" 2>/dev/null | grep -q "inet addr"
 }
 
+# Busybox netstat is unreliable here: several vendor builds print the service
+# name ("0.0.0.0:http") instead of the numeric port, so a ':0050' grep reports
+# a live web server as absent and IRIS ends up launching a second one (which
+# then logs "Cannot bind to address *:80, errno 98"). Process presence is what
+# the vendor's own supervisor checks, so use that first.
+web_running() {
+    for p in goahead boa lighttpd httpd uhttpd thttpd apache2 nginx; do
+        pidof "$p" >/dev/null 2>&1 && return 0
+        ps 2>/dev/null | grep -w "$p" | grep -v grep >/dev/null 2>&1 && return 0
+    done
+    return 1
+}
+
+port80_listening() {
+    netstat -lan 2>/dev/null | grep -qE '[:.](80|0050|http)([[:space:]]|$)'
+}
+
 fixup() {
     log "start: brief pause before taking over the network"
     # Short grace period: the vendor chain (configd) may configure itself. The IP
@@ -58,8 +75,10 @@ fixup() {
     # Wait a bit longer first so the vendor's own server wins the race for :80.
     sleep 30
     log "probing for a web server on :80"
-    if netstat -ltn 2>/dev/null | grep -q ':0050 '; then
-        log "something already listens on :80"
+    if web_running; then
+        log "vendor web server is already running, leaving :80 to it"
+    elif port80_listening; then
+        log "something else already listens on :80"
     elif [ -x /opt/goahead/goahead ] && [ -f /opt/goahead/route.txt ]; then
         log "web not listening on :80, launching goahead"
         /opt/goahead/goahead --home /opt/goahead --route /opt/goahead/route.txt &

@@ -140,3 +140,51 @@ class TestEngineHardening:
         apply_rules(rootfs, load_rules(PROJECT_RULES), dry_run=False)
         data = (rootfs / GUEST_SCRIPT_PATH).read_bytes()
         assert b"\r\n" not in data
+
+    def test_vendor_watchdog_rule_disables_monitor(self, tmp_path):
+        root = tmp_path / "olt"
+        (root / "etc").mkdir(parents=True)
+        (root / "etc" / "inittab").write_text(
+            "::sysinit:/etc/init.d/rcS\n"
+            "::shutdown:/etc/init.d/shutdown\n"
+            "::once:-/bin/monitor\n"
+            "#::respawn:-/sbin/watchdog\n"
+        )
+        reports = apply_rules(root, load_rules(PROJECT_RULES), dry_run=False)
+        by_id = {r.rule_id: r for r in reports}
+        assert by_id["vendor-watchdog-monitor"].matched
+
+        inittab = (root / "etc" / "inittab").read_text()
+        assert "#IRIS-watchdog: ::once:-/bin/monitor" in inittab
+        assert "::sysinit:/etc/init.d/rcS" in inittab  # unrelated lines untouched
+        assert inittab.count("#IRIS-watchdog: #") == 0  # already-commented stays as-is
+
+        script = (root / GUEST_SCRIPT_PATH).read_text()
+        assert "/opt/monitor" in script and "iris-disabled" in script
+        # re-running must not comment the line twice
+        apply_rules(root, load_rules(PROJECT_RULES), dry_run=False)
+        assert (root / "etc" / "inittab").read_text() == inittab
+
+    def test_watchdog_rule_ignores_rootfs_without_monitor(self, tmp_path):
+        root = tmp_path / "plain"
+        (root / "etc").mkdir(parents=True)
+        (root / "etc" / "inittab").write_text("::sysinit:/etc/init.d/rcS\n")
+        reports = apply_rules(root, load_rules(PROJECT_RULES), dry_run=False)
+        assert not next(r for r in reports if r.rule_id == "vendor-watchdog-monitor").matched
+        assert "iris-disabled" not in (root / GUEST_SCRIPT_PATH).read_text()
+
+    def test_text_actions_never_rewrite_binaries(self, tmp_path):
+        """A broad `within: *` must not corrupt a vendor ELF via lossy text decoding."""
+        from iris.rules.engine import Rule, apply_rules
+
+        root = tmp_path / "rf"
+        (root / "bin").mkdir(parents=True)
+        blob = b"\x7fELF\x02\x01\x01\x00SHELLSTRING\x00" + bytes(range(1, 64))
+        (root / "bin" / "vendor").write_bytes(blob)
+        rule = Rule(
+            id="t", description="d", stage="boot",
+            detect=[{"always": True}],
+            actions=[{"edit": {"regex": "SHELLSTRING", "replacement": "X", "within": "*"}}],
+        )
+        apply_rules(root, [rule], dry_run=False)
+        assert (root / "bin" / "vendor").read_bytes() == blob

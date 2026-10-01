@@ -1,0 +1,50 @@
+id: tenda-web-server-forced-start
+description: >
+  Force start Tenda web server (goahead/boa) immediately after boot to ensure web interface availability.
+  This rule bypasses potential rcS/rc63 init script blocking issues by directly invoking web server binaries
+  during image build time. Evidence: TES7002 firmware shows rcS execution stopping before any web service startup,
+  preventing user access to login interface for extended periods. The rule attempts both goahead and boa binaries.
+stage: service
+detect:
+  - file_regex: '^#!.*[Bb]in/[Ss]h'
+    within: 'etc/init.d/rcS'
+actions:
+  - guest_shell: |
+      # Phase 1: Create necessary directories for web server
+      echo "  Setting up web server directories..."
+      mkdir -p /mnt/log/goahead /opt/goahead/route.txt /home/httpd/web 2>/dev/null || true
+      
+      # Phase 2: Copy goahead files if not already present
+      if [ -d /opt/goahead ] && [ -x /opt/goahead/goahead ]; then
+        echo "  Found goahead binary"
+        cp -rf /opt/goahead/* /mnt/log/goahead/ 2>/dev/null || true
+        chmod -R 755 /mnt/log/goahead 2>/dev/null || true
+        
+        # Try starting goahead in background
+        echo "  Attempting to start goahead..."
+        (nohup /mnt/log/goahead/goahead --home /mnt/log/goahead &>/dev/null &) || \
+        (nohup /opt/goahead/goahead --home /opt/goahead --route /opt/goahead/route.txt &>/dev/null &) || \
+        echo "  Warning: goahead failed to start"
+      fi
+      
+      # Phase 3: Also try starting boa as fallback
+      if [ -x /bin/boa ] && [ ! -d /proc/meminfo ]; then
+        echo "  Trying boa fallback..."
+        (nohup /bin/boa -d /home/httpd/web &>/dev/null &) || \
+        (nohup /bin/boa &>/dev/null &) || \
+        echo "  Warning: boa failed to start"
+      fi
+      
+      # Phase 4: Verify web server is running
+      sleep 2
+      if pgrep -x goahead >/dev/null 2>&1 || pgrep -x boa >/dev/null 2>&1; then
+        echo "✓ Web server started successfully" >> /etc/scripts/boot_fixes.log
+        WEB_PID=$(pgrep -x goahead | head -1 || pgrep -x boa | head -1)
+        echo "  Web server PID: $WEB_PID" >> /etc/scripts/boot_fixes.log
+      else
+        echo "⚠ Web server may still be starting..." >> /etc/scripts/boot_fixes.log
+      fi
+      
+      # Evidence collection
+      echo "#IRIS-tenda-web-forced:" >> /etc/scripts/boot_fixes.log
+      echo "Forced web server startup at $(date) to bypass init script blocking." >> /etc/scripts/boot_fixes.log

@@ -653,3 +653,25 @@ def serve_start(
 
 if __name__ == "__main__":
     main()
+
+
+@emulate_app.command("guardian-start")
+def emulate_guardian_start(
+    iid: int = typer.Argument(..., help="container image ID to monitor"),
+    interval: int = typer.Option(30, "--interval", help="health check interval in seconds"),
+) -> None:
+    """Start AI Guardian for continuous container health monitoring and self-healing."""
+    from iris.config import get_settings
+    from iris.monitor.ai_guardian import AIHealthMonitor
+
+    settings = get_settings()
+    typer.echo(f"starting AI Guardian for container {iid}...")
+    typer.echo(f"health check interval: {interval}s")
+    typer.echo("press Ctrl+C to stop monitoring\n")
+    
+    guardian = AIHealthMonitor(iid=iid, scratch_dir=settings.scratch_dir)
+    
+    try:
+        guardian.start_continuous_monitoring(check_interval=interval)
+    except KeyboardInterrupt:
+        typer.echo("\nmonitoring stopped by user")
