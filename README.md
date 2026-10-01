@@ -20,9 +20,9 @@
 |---|---|---|
 | L1 提取 | 格式识别（TendaW / squashfs / JFFS2 / uImage / UBI / FIT / 加密厂商格式）、rootfs 解包、ELF 架构校验入库 | ✅ |
 | L2 仿真 | QEMU 全系统仿真，四架构通道：`mipsel` / `mipseb` / `armel` / `arm64`；架构预检（不符直接给出正确架构建议，`--force` 可绕过）；Docker 网络桥接 + 主机端口转发 + 串口日志采集 | ✅ |
-| L3 规则 | 最小 YAML 启动修复规则引擎（`rules/`），可插拔、可回归 | ✅ |
+| L3 规则 | YAML 启动修复规则引擎（`rules/`，7 条实证规则），可插拔、可回归，修复后带证据校验 | ✅ |
 | L4 交互 | RTSP/ONVIF 媒体面 | 🔬 M3 |
-| L5 编排 | Typer CLI + FastAPI 服务（上传固件 → 提取 → 仿真一条 `/api/v1/pipeline` 打通） | ✅ |
+| L5 编排 | Typer CLI + FastAPI 服务（上传固件 → 提取 → 仿真一条 `/api/v1/pipeline` 打通）+ AI 值守监控（`emulate guardian-start`） | ✅ |
 
 ## 快速开始
 
@@ -73,18 +73,42 @@ curl -F "file=@firmware.bin" http://127.0.0.1:9000/api/v1/pipeline
 
 ```
 IRIS/
-├── docs/             # 开发规划、技术栈、快速部署、评测日志
-├── src/iris/         # 主代码（L1 提取 / L2 仿真 / L3 规则 / L5 CLI+API）
-├── kernel/           # Linux 内核 fork 补丁与构建脚本（定制插桩内核）
-├── libnvram/         # NVRAM 用户态仿真库（C，-nostdlib）
-├── rules/            # 修补策略库（YAML 规则，可插拔可回归）
-├── scripts/emulate/  # L2 运行脚本：make_image / run_qemu / iris_net_fix /
+├── docx/              # 使用与治理文档（免安装使用指南、AI 值守与稳定性治理）
+├── docs/              # 开发规划、技术栈、快速部署、崩溃归因、架构修复、评测日志
+├── src/iris/          # 主代码（L1 提取 / L2 仿真 / L3 规则 / L4 值守监控 / L5 CLI+API）
+├── kernel/            # Linux 内核 fork 补丁与构建脚本（定制插桩内核，规划中）
+├── libnvram/          # NVRAM 用户态仿真库（C，-nostdlib，规划中）
+├── rules/             # 修补策略库（YAML 规则，可插拔可回归）
+├── scripts/emulate/   # L2 运行脚本：make_image / run_qemu / iris_net_fix /
 │                     # arm64 initramfs 构建与资产下载（get_arm64_assets.py）
 ├── docker/emulate/   # iris-emulate（基础）与 iris-emulate-baked（脚本+资产烘焙）
-├── binaries/         # 内核镜像、console、libnvram、arm64 initramfs 等资产（含 sha256 清单）
-├── tools/            # QEMU fork 管理、镜像构建等辅助脚本
-└── tests/            # 单元测试与评测集回归
+├── binaries/         # 内核镜像、console、libnvram、arm64 initramfs 等资产
+├── tools/            # QEMU fork 管理、镜像构建等辅助脚本（规划中）
+├── tests/            # 单元测试与评测集回归
+└── CHANGELOG.md      # 版本变更记录
 ```
+
+## 文档索引
+
+**`docs/` —— 开发与部署**
+
+| 文档 | 内容 |
+|---|---|
+| [01-开发规划](docs/01-开发规划.md) | 五层架构（L1–L5）、里程碑 M0–M5、与 FirmAE/FirmPilot 的对比分析 |
+| [02-技术栈规划](docs/02-技术栈规划.md) | 依赖选型、工程规范 |
+| [03-M0执行手册](docs/03-M0执行手册.md) | M0 技术验证步骤 |
+| [04-快速部署](docs/04-快速部署.md) | 快速部署与迁移手册，含故障速查表 |
+| [05-崩溃归因](docs/05-崩溃归因.md) | 崩溃诊断方法论与 TES7002 案例技术细节 |
+| [06-稳定性验证](docs/06-稳定性验证.md) | 长时运行稳定性验证方法与观察记录 |
+| [07-架构映射修复](docs/07-架构映射修复.md) | aarch64 → arm64 架构标签映射 |
+| [eval-log](docs/eval-log.md) | 评测集逐设备实测日志指纹 |
+
+**`docx/` —— 使用与治理**
+
+| 文档 | 内容 |
+|---|---|
+| [免安装使用指南](docx/免安装使用指南.md) | 不做 pip 安装直接从源码运行；四种启动方式、命令速查、故障排查 |
+| [AI值守与稳定性治理](docx/AI值守与稳定性治理.md) | TES7002 实战治理全过程：三类故障的证据链、根因、修复，以及 AI 值守能力设计 |
 
 ## 里程碑（详见 docs/01-开发规划.md）
 
