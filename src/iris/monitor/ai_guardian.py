@@ -1,414 +1,458 @@
-"""
-AI Guardian: Intelligent container health monitoring and self-healing for IRIS simulations.
+"""AI 值守：仿真容器的串口日志健康监控与自愈。
 
-This module provides:
-1. Real-time serial log analysis for anomaly detection
-2. Automatic recovery from common failure patterns (watchdog, soft lockups, web crashes)
-3. Predictive alerts before catastrophic failures occur
-4. Compatibility matrix tracking for different firmware variants
+串口日志是唯一全量信号——HTTP 探活看不到被重启掩盖的故障：一个 QEMU 容器可以
+端口转发正常、ping 得通，而 guest 内核正在被厂商 watchdog 反复硬复位。
+
+能力：
+1. 串口日志模式分析（watchdog 重启 / sysrq / reboot 尝试 / diag 崩溃 /
+   soft lockup / Web 启动与存活）
+2. 四态健康判定（healthy / degraded / critical / expired）与结构化异常清单
+3. 四类自愈动作（watchdog 移除 / 资源回收 / 诊断工具禁用 / Web 排查）
+
+设计约束：自愈动作一律通过 ``docker exec -i`` 把脚本从 stdin 送进容器，
+不落任何中间文件——写宿主再让容器去找，是取不到文件的经典写法。
+动作的成败以容器内命令的退出码为准，而不是"跑过了就算"；只做排查、不做修复的
+结论单独记在 ``diagnoses``，不混进 ``actions_taken``。
+
+CLI 入口是 ``iris emulate guardian-start``，本模块不自带命令行。
 """
+
+from __future__ import annotations
 
 import re
 import subprocess
 import time
-from pathlib import Path
-from datetime import datetime, timedelta
-from typing import Optional, Dict, List, Callable
 from dataclasses import dataclass, field
-import logging
+from datetime import datetime, timedelta
+from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from iris.log import get_logger
+
+logger = get_logger(__name__)
+
+CONTAINER_PREFIX = "iris-qemu-"
+
+#: Recovery actions, in the order ``recommend_recovery_action`` prefers them.
+ACTION_WATCHDOG = "WATCHDOG_RECOVERY"
+ACTION_RESOURCE = "RESOURCE_CLEANUP"
+ACTION_DIAGNOSTIC = "DIAGNOSTIC_DISABLEMENT"
+ACTION_WEB_DIAGNOSIS = "WEB_SERVER_DIAGNOSIS"
 
 
 @dataclass
 class ContainerHealthStatus:
-    """Container health metrics and status."""
+    """Container health metrics and state."""
+
     iid: int
-    state: str  # "running", "exited", "healthy", "degraded"
-    uptime_seconds: float = 0
+    #: healthy | degraded | critical | expired | unknown
+    state: str = "unknown"
+    uptime_seconds: float = 0.0
     reboot_count: int = 0
     watchdog_triggers: int = 0
     diag_crashes: int = 0
     soft_lockup_events: int = 0
-    web_server_status: str = "unknown"  # "active", "stopped", "crashed", "not_started"
+    #: active | started_but_stopped | not_started | unknown
+    web_server_status: str = "unknown"
     last_check: datetime = field(default_factory=datetime.now)
-    anomalies: List[str] = field(default_factory=list)
-    actions_taken: List[str] = field(default_factory=list)
+    anomalies: list[str] = field(default_factory=list)
+    actions_taken: list[str] = field(default_factory=list)
+    diagnoses: list[str] = field(default_factory=list)
 
 
 class SerialLogAnalyzer:
     """Analyzes QEMU serial logs for failure patterns."""
-    
+
     PATTERNS = {
         'watchdog_reboot': r'Monitor:\s*process\s+\w+\s+is\s+die',
         'sysrq_reset': r'sysrq:\s*Resetting|echo.*b.*proc/sysrq-trigger',
         'reboot_attempt': r'reboot:\s*not found|reboot triggered',
         'diag_crash': r'diag:\s*.*signal\s+11|SIGSEGV',
         'soft_lockup': r'watchdog:\s*BUG:\s*soft lockup.*CPU#?\d+',
-        'web_server_start': r'(goahead|boa|lighttpd|httpd).*starting|probing.*web server',
-        'web_server_active': r'vendor web server is already running',
+        'web_server_start': r'(goahead|boa|lighttpd|uhttpd|thttpd|httpd)[:\s].*'
+                            r'(starting|launch|start)|launching\s+(goahead|boa)|'
+                            r'probing for a web server',
+        # A live web server shows up either as IRIS's own hand-off line or as the
+        # vendor process actually claiming :80. Matching only the hand-off line
+        # reported "no web server" on guests that booted their own server.
+        'web_server_active': r'vendor web server is already running|'
+                             r'listening on[^\n]*:80|'
+                             r'(goahead|boa|lighttpd|uhttpd|thttpd|httpd)[:\s]'
+                             r'[^\n]*(listen|bind)',
     }
-    
+
     def __init__(self, log_path: Path):
-        self.log_path = log_path
-        self.lines = []
-        
+        self.log_path = Path(log_path)
+        self.lines: list[str] = []
+
     def load_log(self) -> bool:
-        """Load serial log content."""
+        """Load serial log content.
+
+        Serial output is raw bytes off a UART: UTF-8 with ``replace`` keeps the
+        readable part instead of raising on the first stray byte, which is what a
+        bare ``readlines()`` under a Windows locale would do.
+        """
         try:
-            with open(self.log_path, 'r', errors='ignore') as f:
-                self.lines = f.readlines()
+            self.lines = self.log_path.read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines(keepends=True)
             return True
-        except Exception as e:
-            logger.error(f"Failed to load serial log: {e}")
+        except OSError as exc:
+            logger.warning(f"failed to read serial log {self.log_path}: {exc}")
             return False
-    
-    def count_pattern_occurrences(self, pattern_name: str) -> int:
-        """Count occurrences of a specific failure pattern."""
+
+    def _ensure_loaded(self) -> None:
         if not self.lines:
             self.load_log()
-            
+
+    def count_pattern_occurrences(self, pattern_name: str) -> int:
+        """Count occurrences of a specific failure pattern."""
         pattern = self.PATTERNS.get(pattern_name)
         if not pattern:
             return 0
-            
-        count = 0
-        for line in self.lines:
-            if re.search(pattern, line, re.IGNORECASE):
-                count += 1
-        return count
-    
-    def get_boot_sequence_timeline(self) -> List[int]:
-        """Get timestamps (line numbers) of all boot sequences."""
-        if not self.lines:
-            self.load_log()
-            
-        timeline = []
-        for i, line in enumerate(self.lines, 1):
-            if 'Booting Linux on physical CPU' in line:
-                timeline.append(i)
-        return timeline
-    
-    def get_latest_crash_context(self) -> Optional[str]:
-        """Get context around the most recent crash/error."""
-        if not self.lines:
-            self.load_log()
-        
-        # Search backwards from end for first error
-        for i in range(len(self.lines) - 1, max(0, len(self.lines) - 100), -1):
-            line = self.lines[i]
-            if any(kw in line.lower() for kw in ['error', 'fail', 'crash', 'signal', 'die']):
-                # Return 10-line context window
-                start = max(0, i - 5)
-                end = min(len(self.lines), i + 6)
-                return ''.join(self.lines[start:end])
+        self._ensure_loaded()
+        flags = re.IGNORECASE | re.MULTILINE
+        return sum(1 for line in self.lines if re.search(pattern, line, flags))
+
+    def get_boot_sequence_timeline(self) -> list[int]:
+        """Line numbers of every kernel boot banner in the log."""
+        self._ensure_loaded()
+        return [i for i, line in enumerate(self.lines, 1)
+                if 'Booting Linux on physical CPU' in line]
+
+    def get_latest_crash_context(self, window: int = 5) -> str | None:
+        """Text around the most recent error-looking line, for the health report.
+
+        The counts say *how many*; this says *what it looked like*, which is the
+        part that makes a report actionable rather than merely alarming.
+        """
+        self._ensure_loaded()
+        needles = ('error', 'fail', 'crash', 'signal', 'die', 'not found')
+        for i in range(len(self.lines) - 1, max(-1, len(self.lines) - 100), -1):
+            if any(kw in self.lines[i].lower() for kw in needles):
+                start, end = max(0, i - window), min(len(self.lines), i + window + 1)
+                return "".join(self.lines[start:end]).rstrip()
         return None
 
 
 class AIHealthMonitor:
-    """Main guardian class for container health management."""
-    
+    """Health analysis and self-healing for one emulation container."""
+
     def __init__(self, iid: int, scratch_dir: Path, timeout_minutes: int = 60):
         self.iid = iid
-        self.scratch_dir = scratch_dir
+        self.scratch_dir = Path(scratch_dir)
         self.timeout = timedelta(minutes=timeout_minutes)
-        self.status = ContainerHealthStatus(iid=iid, state="unknown")
-        self.analyzer: Optional[SerialLogAnalyzer] = None
+        self.status = ContainerHealthStatus(iid=iid)
+        self.analyzer: SerialLogAnalyzer | None = None
         self.start_time = datetime.now()
-        self.recovery_history: List[Dict] = []
-        
-    def _get_serial_log_path(self) -> Path:
-        """Locate the serial log file."""
-        # Try multiple locations based on Firmadyne conventions
+        self.recovery_history: list[dict] = []
+
+    # ------------------------------------------------------------------ logs
+
+    def _get_serial_log_path(self) -> Path | None:
+        """Locate the serial log, falling back to a copy-out of the container."""
         candidates = [
-            self.scratch_dir / f"{self.iid}" / "qemu.serial.log",
+            self.scratch_dir / str(self.iid) / "qemu.serial.log",
             self.scratch_dir / f"emulate-{self.iid}" / "qemu.serial.log",
-            Path("/work/scratch") / f"{self.iid}" / "qemu.serial.log",
+            self.scratch_dir / "qemu.serial.log",
         ]
-        
         for candidate in candidates:
-            if candidate.exists():
+            if candidate.is_file():
                 return candidate
-        
-        # Fallback: copy from container
+
+        # The guest writes it, but the orchestration also pulls it back on exit;
+        # if the container is still up the copy-out is the freshest source.
         try:
-            result = subprocess.run(
-                ["docker", "cp", f"iris-qemu-{self.iid}:/work/scratch/{self.iid}/qemu.serial.log", 
+            proc = subprocess.run(
+                ["docker", "cp",
+                 f"{CONTAINER_PREFIX}{self.iid}:/work/scratch/{self.iid}/qemu.serial.log",
                  str(self.scratch_dir)],
-                capture_output=True, text=True, timeout=30
+                capture_output=True, text=True, timeout=30, check=False,
             )
-            if result.returncode == 0:
-                return self.scratch_dir / "qemu.serial.log"
-        except:
-            pass
-            
-        return None
-    
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.warning(f"serial log copy-out failed for {self.iid}: {exc}")
+            return None
+        if proc.returncode != 0:
+            return None
+        copied = self.scratch_dir / "qemu.serial.log"
+        return copied if copied.is_file() else None
+
+    # --------------------------------------------------------------- analysis
+
     def analyze_health(self) -> ContainerHealthStatus:
-        """Perform comprehensive health analysis."""
+        """Perform one full health analysis pass."""
+        self.status.uptime_seconds = (datetime.now() - self.start_time).total_seconds()
+
         log_path = self._get_serial_log_path()
-        if not log_path or not log_path.exists():
-            logger.warning(f"No serial log found for container {self.iid}")
+        if not log_path or not log_path.is_file():
+            logger.warning(f"no serial log found for container {self.iid}")
             self.status.state = "unknown"
+            self.status.web_server_status = "unknown"
             return self.status
-        
+
         self.analyzer = SerialLogAnalyzer(log_path)
         if not self.analyzer.load_log():
+            self.status.state = "unknown"
             return self.status
-        
-        # Count various failure indicators
+
         self.status.watchdog_triggers = self.analyzer.count_pattern_occurrences('watchdog_reboot')
         self.status.diag_crashes = self.analyzer.count_pattern_occurrences('diag_crash')
         self.status.soft_lockup_events = self.analyzer.count_pattern_occurrences('soft_lockup')
-        
-        # Analyze reboot sequence
-        boot_timeline = self.analyzer.get_boot_sequence_timeline()
-        self.status.reboot_count = max(0, len(boot_timeline) - 1)  # Subtract initial boot
-        
-        # Check web server status
+
+        boots = self.analyzer.get_boot_sequence_timeline()
+        # One banner is the initial boot; every extra one is the guest restarting.
+        self.status.reboot_count = max(0, len(boots) - 1)
+
         if self.analyzer.count_pattern_occurrences('web_server_active') > 0:
             self.status.web_server_status = "active"
         elif self.analyzer.count_pattern_occurrences('web_server_start') > 0:
             self.status.web_server_status = "started_but_stopped"
         else:
             self.status.web_server_status = "not_started"
-        
-        # Determine overall health state
+
+        self.status.anomalies.clear()
         self._determine_overall_state()
-        
-        # Log current status
         self._log_status_report()
-        
         return self.status
-    
-    def _determine_overall_state(self):
-        """Determine if container is healthy, degraded, or critical."""
-        # Critical conditions
-        if self.status.reboot_count >= 3 or self.status.watchdog_triggers >= 2:
-            self.status.state = "critical"
-            self.status.anomalies.append("Multiple reboot cycles detected")
-        elif self.status.soft_lockup_events > 0:
-            self.status.state = "degraded"
-            self.status.anomalies.append("CPU soft lockup detected")
-        elif self.status.diag_crashes > 0:
-            self.status.state = "degraded"
-            self.status.anomalies.append("Diagnostic crashes detected")
-        elif self.status.web_server_status == "not_started":
-            self.status.state = "degraded"
-            self.status.anomalies.append("Web server failed to start")
-        elif (datetime.now() - self.start_time) > self.timeout:
-            self.status.state = "expired"
+
+    def _determine_overall_state(self) -> None:
+        """Fold the metrics into one state.
+
+        ``expired`` is checked before the degraded triggers: past the monitoring
+        window, "still no web server" is no longer a degradation worth watching —
+        it is a verdict that the guest never came up, and saying so is more useful
+        than reporting degraded every interval until someone stops the loop.
+        """
+        self.status.anomalies.clear()
+        s = self.status
+        if s.reboot_count >= 3 or s.watchdog_triggers >= 2:
+            s.state = "critical"
+            s.anomalies.append(
+                f"repeated restarts: {s.reboot_count} reboot(s), "
+                f"{s.watchdog_triggers} watchdog trigger(s)"
+            )
+        elif self.status.uptime_seconds > self.timeout.total_seconds():
+            s.state = "expired"
+            s.anomalies.append(
+                f"no healthy state within {int(self.timeout.total_seconds() // 60)} minutes"
+            )
+        elif s.soft_lockup_events > 0:
+            s.state = "degraded"
+            s.anomalies.append(f"CPU soft lockup x{s.soft_lockup_events}")
+        elif s.diag_crashes > 0:
+            s.state = "degraded"
+            s.anomalies.append(f"diagnostic tool crash x{s.diag_crashes}")
+        elif s.web_server_status == "not_started":
+            s.state = "degraded"
+            s.anomalies.append("web server never started")
         else:
-            self.status.state = "healthy"
-    
-    def _log_status_report(self):
-        """Log comprehensive status report."""
-        report = f"""
-=== Container {self.iid} Health Report ===
-State: {self.status.state.upper()}
-Uptime: {self.status.uptime_seconds:.0f}s | Reboots: {self.status.reboot_count}
-Watchdog Triggers: {self.status.watchdog_triggers} | Diag Crashes: {self.status.diag_crashes}
-Soft Lockups: {self.status.soft_lockup_events}
-Web Server: {self.status.web_server_status}
-Anomalies: {', '.join(self.status.anomalies) if self.status.anomalies else 'None'}
-Actions Taken: {', '.join(self.status.actions_taken) if self.status.actions_taken else 'None'}
-===========================================
-"""
-        logger.info(report)
-    
-    def recommend_recovery_action(self) -> Optional[str]:
-        """Recommend appropriate recovery action based on detected issues."""
-        if self.status.watchdog_triggers > 0:
-            return "WATCHDOG_RECOVERY"
-        elif self.status.soft_lockup_events > 0:
-            return "RESOURCE_CLEANUP"
-        elif self.status.diag_crashes > 0:
-            return "DIAGNOSTIC_DISABLEMENT"
-        elif self.status.web_server_status == "not_started":
-            return "WEB_SERVER_DIAGNOSIS"
+            s.state = "healthy"
+
+    def _log_status_report(self) -> None:
+        s = self.status
+        logger.info(
+            f"container {s.iid} health: {s.state.upper()} | "
+            f"uptime {s.uptime_seconds:.0f}s reboots {s.reboot_count} "
+            f"watchdog {s.watchdog_triggers} diag {s.diag_crashes} "
+            f"lockup {s.soft_lockup_events} web {s.web_server_status}",
+            anomalies=s.anomalies or ["none"],
+        )
+        if s.anomalies and self.analyzer:
+            context = self.analyzer.get_latest_crash_context()
+            if context:
+                logger.info(f"container {s.iid} latest failure context:\n{context}")
+        for entry in self.recovery_history[-3:]:
+            logger.info(f"container {s.iid} recovery: {entry}")
+
+    def recommend_recovery_action(self) -> str | None:
+        """Recommend the action matching the strongest detected signal."""
+        s = self.status
+        if s.watchdog_triggers > 0:
+            return ACTION_WATCHDOG
+        if s.soft_lockup_events > 0:
+            return ACTION_RESOURCE
+        if s.diag_crashes > 0:
+            return ACTION_DIAGNOSTIC
+        if s.web_server_status == "not_started":
+            return ACTION_WEB_DIAGNOSIS
         return None
-    
+
+    # ---------------------------------------------------------------- recovery
+
+    def _exec_in_guest(self, script: str, timeout: int = 30) -> tuple[bool, str]:
+        """Run a shell snippet inside the running container.
+
+        The snippet is piped in over stdin (``docker exec -i ... sh -s``), so
+        nothing has to be copied first and nothing can end up in the wrong
+        filesystem. Returns the guest's own exit status: a repair that silently
+        failed must not be recorded as a repair that succeeded.
+        """
+        try:
+            proc = subprocess.run(
+                ["docker", "exec", "-i", f"{CONTAINER_PREFIX}{self.iid}", "/bin/sh", "-s"],
+                input=script, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=timeout, check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.error(f"container {self.iid}: guest exec failed: {exc}")
+            return False, str(exc)
+        return proc.returncode == 0, ((proc.stdout or "") + (proc.stderr or "")).strip()
+
     def execute_recovery(self, action: str) -> bool:
-        """Execute recommended recovery action."""
-        action_id = datetime.now().strftime("%Y%m%d%H%M%S")
-        
-        if action == "WATCHDOG_RECOVERY":
-            logger.info(f"[{action_id}] Executing WATCHDOG_RECOVERY...")
-            success = self._apply_watchdog_fixes()
-            
-        elif action == "RESOURCE_CLEANUP":
-            logger.info(f"[{action_id}] Executing RESOURCE_CLEANUP...")
-            success = self._cleanup_resources()
-            
-        elif action == "DIAGNOSTIC_DISABLEMENT":
-            logger.info(f"[{action_id}] Executing DIAGNOSTIC_DISABLEMENT...")
-            success = self._disable_diagnostic_tools()
-            
-        elif action == "WEB_SERVER_DIAGNOSIS":
-            logger.info(f"[{action_id}] Executing WEB_SERVER_DIAGNOSIS...")
-            success = self._diagnose_web_server()
-            
-        else:
-            logger.error(f"[{action_id}] Unknown recovery action: {action}")
+        """Run a recommended recovery action and record the outcome."""
+        stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        handlers = {
+            ACTION_WATCHDOG: self._apply_watchdog_fixes,
+            ACTION_RESOURCE: self._cleanup_resources,
+            ACTION_DIAGNOSTIC: self._disable_diagnostic_tools,
+        }
+        if action == ACTION_WEB_DIAGNOSIS:
+            # Diagnosis only: nothing is repaired, so it must not be logged as a
+            # repair — otherwise the report claims a fix that never happened.
+            ok, summary = self._diagnose_web_server()
+            entry = f"{ACTION_WEB_DIAGNOSIS}@{stamp}"
+            self.status.diagnoses.append(entry)
+            self.recovery_history.append(
+                {"action": action, "timestamp": stamp, "success": ok, "detail": summary}
+            )
+            logger.info(f"[{stamp}] {ACTION_WEB_DIAGNOSIS}: {summary or 'no findings'}")
+            return ok
+
+        handler = handlers.get(action)
+        if handler is None:
+            logger.error(f"[{stamp}] unknown recovery action: {action}")
             return False
-        
+
+        logger.info(f"[{stamp}] executing {action} on container {self.iid}")
+        success = handler()
         if success:
-            self.status.actions_taken.append(f"{action}@{action_id}")
-            self.recovery_history.append({"action": action, "timestamp": action_id, "success": True})
-        
+            entry = f"{action}@{stamp}"
+            self.status.actions_taken.append(entry)
+            self.recovery_history.append(
+                {"action": action, "timestamp": stamp, "success": True}
+            )
+        else:
+            self.recovery_history.append(
+                {"action": action, "timestamp": stamp, "success": False}
+            )
+            logger.warning(f"[{stamp}] {action} did not take effect on {self.iid}")
         return success
-    
-    def _apply_watchdog_fixes(self) -> bool:
-        """Apply watchdog disablement fixes via guest shell execution."""
-        try:
-            # Inject fixed L3 rules into the running container
-            fix_script = """
-#!/bin/sh
-# IRIS-WATCHDOG-FIX: Emergency watchdog removal
 
-# Remove all monitor symlinks first
-find /bin /sbin /usr/bin /usr/sbin -maxdepth 1 -type l \\
-    \\( -name "*monitor*" -o -name "*watchdog*" \\) -exec rm -f {} \\; 2>/dev/null
-
-# Rename remaining binaries
-for b in /opt/monitor /bin/monitord /bin/arp_monitor /bin/ppp-monitor; do
-    if [ -L "$b" ]; then rm -f "$b";
-    elif [ -x "$b" ]; then mv -f "$b" "${b}.iris-fixed";
-    fi
+    _WATCHDOG_SCRIPT = """\
+for b in /bin/monitor /sbin/monitor /usr/bin/monitor /usr/sbin/monitor \\
+        /opt/monitor /opt/bin/monitor /bin/watchdog /sbin/watchdog \\
+        /bin/monitord /bin/arp_monitor /bin/ppp-monitor; do
+  [ -e "$b" ] || [ -L "$b" ] || continue
+  if [ -L "$b" ]; then rm -f "$b"; else mv -f "$b" "$b.iris-disabled"; fi
 done
-
-# Block reboot commands
-for rb in /sbin/reboot /bin/reboot; do
-    if [ -x "$rb" ]; then mv -f "$rb" "${rb}.iris-blocked";
-    fi
+for d in /bin /sbin /usr/bin /usr/sbin /opt/bin; do
+  [ -d "$d" ] || continue
+  find "$d" -maxdepth 1 -type l \\
+    \\( -name '*monitor*' -o -name '*watchdog*' \\) -exec rm -f {} \\; 2>/dev/null
 done
-
-echo "WATCHDOG FIX COMPLETE"
+echo WATCHDOG-FIX-APPLIED
+exit 0
 """
-            # Write script to container and execute
-            script_path = Path(f"/tmp/watchdog-fix-{self.iid}.sh")
-            script_path.write_text(fix_script)
-            
-            # Execute inside container using docker exec
-            result = subprocess.run(
-                ["docker", "exec", f"iris-qemu-{self.iid}", 
-                 "/bin/sh", "-c", "/bin/sh /tmp/watchdog-fix-*.sh"],
-                capture_output=True, text=True, timeout=30
-            )
-            
-            logger.info(f"Watchdog fix output: {result.stdout}")
-            return result.returncode == 0
-            
-        except Exception as e:
-            logger.error(f"Watchdog fix failed: {e}")
-            return False
-    
+
+    def _apply_watchdog_fixes(self) -> bool:
+        """Rename supervision daemons out of the way inside the guest."""
+        ok, out = self._exec_in_guest(self._WATCHDOG_SCRIPT, timeout=45)
+        applied = "WATCHDOG-FIX-APPLIED" in out
+        if ok and applied:
+            logger.info(f"container {self.iid}: watchdog binaries disabled")
+            return True
+        logger.warning(
+            f"container {self.iid}: watchdog fix not confirmed "
+            f"(rc={'0' if ok else 'nonzero'}, applied={applied})"
+        )
+        return False
+
+    _CLEANUP_SCRIPT = """\
+for p in monitord arp_monitor ppp-monitor; do
+  pidof "$p" >/dev/null 2>&1 && kill -9 $(pidof "$p") 2>/dev/null
+done
+sync
+echo RESOURCE-CLEANUP-APPLIED
+exit 0
+"""
+
     def _cleanup_resources(self) -> bool:
-        """Attempt resource cleanup for soft lockup recovery."""
-        try:
-            # Stop non-essential services
-            result = subprocess.run(
-                ["docker", "exec", f"iris-qemu-{self.iid}",
-                 "/bin/sh", "-c", "killall -9 monitord arp_monitor ppp-monitor 2>/dev/null; sync"],
-                capture_output=True, text=True, timeout=10
-            )
-            return True
-        except Exception as e:
-            logger.error(f"Resource cleanup failed: {e}")
-            return False
-    
+        """Free CPU held by runaway monitor processes."""
+        ok, out = self._exec_in_guest(self._CLEANUP_SCRIPT, timeout=20)
+        return ok and "RESOURCE-CLEANUP-APPLIED" in out
+
+    _DIAG_SCRIPT = """\
+rc=1
+for d in /bin/diag /usr/bin/diag /sbin/diag; do
+  [ -e "$d" ] || continue
+  mv -f "$d" "$d.iris-disabled" 2>/dev/null && rc=0
+done
+sync
+[ "$rc" = 0 ] && echo DIAG-DISABLED
+exit "$rc"
+"""
+
     def _disable_diagnostic_tools(self) -> bool:
-        """Disable diagnostic tools that cause SIG11 crashes."""
-        try:
-            result = subprocess.run(
-                ["docker", "exec", f"iris-qemu-{self.iid}",
-                 "/bin/sh", "-c", "rm -f /bin/diag /usr/bin/diag 2>/dev/null && echo 'DIAG DISABLED'"],
-                capture_output=True, text=True, timeout=10
-            )
-            logger.info(result.stdout)
+        """Rename the crashing diagnostic tool.
+
+        Exits non-zero when nothing was there to disable, so a guest without a
+        diag binary is reported as "nothing to do" rather than a silent success.
+        """
+        ok, out = self._exec_in_guest(self._DIAG_SCRIPT, timeout=20)
+        if ok and "DIAG-DISABLED" in out:
+            logger.info(f"container {self.iid}: diag disabled")
             return True
-        except Exception as e:
-            logger.error(f"Diagnostic disablement failed: {e}")
-            return False
-    
-    def _diagnose_web_server(self) -> bool:
-        """Diagnose why web server isn't starting."""
-        try:
-            # Check if web server binary exists
-            result = subprocess.run(
-                ["docker", "exec", f"iris-qemu-{self.iid}",
-                 "/bin/sh", "-c", "ls -la /opt/goahead/goahead /bin/boa 2>&1"],
-                capture_output=True, text=True, timeout=10
-            )
-            
-            if "No such file" in result.stdout:
-                logger.error("Web server binary missing from rootfs")
-                return False
-            
-            # Check if it's being spawned in rc scripts
-            result = subprocess.run(
-                ["docker", "exec", f"iris-qemu-{self.iid}",
-                 "/bin/sh", "-c", "grep -r 'goahead\\|boa' /etc/init.d/ 2>/dev/null"],
-                capture_output=True, text=True, timeout=10
-            )
-            
-            logger.info(f"Web server diagnostics: {result.stdout}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Web server diagnosis failed: {e}")
-            return False
-    
-    def start_continuous_monitoring(self, check_interval: int = 30):
-        """Start continuous health monitoring loop."""
-        logger.info(f"Starting AI Guardian monitoring for container {self.iid}")
-        
+        logger.info(f"container {self.iid}: no diag binary needed disabling")
+        return False
+
+    def _diagnose_web_server(self) -> tuple[bool, str]:
+        """Collect why the web server is not serving. Reports; repairs nothing."""
+        script = """\
+for b in /opt/goahead/goahead /usr/bin/boa /bin/boa /usr/sbin/lighttpd \\
+         /usr/sbin/uhttpd /usr/sbin/thttpd; do
+  [ -e "$b" ] && echo "binary: $b"
+done
+pidof goahead >/dev/null 2>&1 && echo "running: goahead"
+pidof boa >/dev/null 2>&1 && echo "running: boa"
+netstat -lnt 2>/dev/null | grep -q ':80 ' && echo "listening: 80"
+echo "init references:"
+grep -rIl -e goahead -e boa /etc/init.d /etc/rc.d 2>/dev/null
+echo "prerequisites:"
+[ -f /opt/goahead/route.txt ] && echo "  ok: /opt/goahead/route.txt"
+[ -f /etc/boa/boa.conf ] && echo "  ok: /etc/boa/boa.conf"
+exit 0
+"""
+        ok, out = self._exec_in_guest(script, timeout=20)
+        summary = out or "no diagnostics collected"
+        if "listening: 80" in out and "running:" in out:
+            summary = f"web server is up after all: {summary}"
+        elif "binary:" not in out:
+            summary = f"no vendor web binary found in this guest: {summary}"
+        return ok, summary
+
+    # ------------------------------------------------------------------- loop
+
+    def start_continuous_monitoring(self, check_interval: int = 30) -> None:
+        """Analyse, recover, repeat until interrupted."""
+        logger.info(
+            f"AI Guardian watching container {self.iid} every {check_interval}s "
+            f"(timeout {int(self.timeout.total_seconds() // 60)}m)"
+        )
         while True:
             try:
-                # Update uptime
                 self.status.uptime_seconds = (datetime.now() - self.start_time).total_seconds()
-                
-                # Perform health analysis
                 status = self.analyze_health()
-                
-                # Check if recovery needed
                 if status.state != "healthy":
                     action = self.recommend_recovery_action()
                     if action:
-                        logger.warning(f"[{self.iid}] Recovery needed: {status.state} → {action}")
+                        logger.warning(
+                            f"container {self.iid}: {status.state} -> attempting {action}"
+                        )
                         self.execute_recovery(action)
-                
-                # Wait for next check
                 time.sleep(check_interval)
-                
             except KeyboardInterrupt:
-                logger.info("AI Guardian monitoring stopped by user")
-                break
-            except Exception as e:
-                logger.error(f"Monitoring error: {e}")
-                time.sleep(60)  # Backoff on error
-
-
-def main():
-    """CLI entry point for AI Guardian."""
-    import typer
-    
-    app = typer.Typer()
-    
-    @app.command()
-    def start(
-        iid: int = typer.Argument(..., help="Container image ID"),
-        interval: int = typer.Option(30, "--interval", help="Check interval in seconds"),
-    ):
-        """Start AI Guardian monitoring for a container."""
-        from iris.config import get_settings
-        
-        settings = get_settings()
-        guardian = AIHealthMonitor(iid=iid, scratch_dir=settings.scratch_dir)
-        guardian.start_continuous_monitoring(check_interval=interval)
-    
-    app()
-
-
-if __name__ == "__main__":
-    main()
+                logger.info(f"AI Guardian stopped monitoring container {self.iid}")
+                return
+            except Exception as exc:
+                # A transient failure must not end the watch; back off and retry.
+                logger.error(f"monitoring error for container {self.iid}: {exc}")
+                time.sleep(60)

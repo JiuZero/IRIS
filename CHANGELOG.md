@@ -36,8 +36,9 @@
   日志，交给 AI 值守模块分析。
 - **AI 值守模块 `iris.monitor.ai_guardian`**：7 类串口日志正则模式（watchdog 重启 /
   sysrq / reboot 尝试 / diag 崩溃 / soft lockup / Web 启动与存活）+ 四态健康状态机
-  （healthy / degraded / critical / expired）+ 四类自愈动作（WATCHDOG_RECOVERY /
-  RESOURCE_CLEANUP / DIAGNOSTIC_DISABLEMENT / WEB_SERVER_DIAGNOSIS）。
+  （healthy / degraded / critical / expired，另有找不到日志时的 unknown）+ 四类自愈动作
+  （WATCHDOG_RECOVERY / RESOURCE_CLEANUP / DIAGNOSTIC_DISABLEMENT /
+  WEB_SERVER_DIAGNOSIS）。
 - **`iris.emulate.auto` 仿真前置准备层**：`prepare_from_firmware()` /
   `prepare_from_rootfs()` 把「L1 提取 + L3 规则 + 架构推断」收敛为单次调用，
   `pick_host_port()` 提供 8080–8199 空闲端口自动分配。
@@ -73,6 +74,28 @@
 - **`path_exists` 的 `executable` 修饰符跨平台诚实**：`os.access(X_OK)` 在 Windows 上对
   普通文件恒返回 True，会让该修饰符"匹配一切"。改为仅在 POSIX 平台生效，
   其他平台忽略并在 `Rule.warnings` 中声明。
+- **AI 值守的 WATCHDOG_RECOVERY 从未真正生效**：脚本被写到**宿主**的 `/tmp`（Windows 上
+  即 `C:\tmp`），随后让容器去执行 `/tmp/watchdog-fix-*.sh`——文件从不在容器内，动作恒失败。
+  改为 `docker exec -i ... /bin/sh -s` 从 stdin 送入脚本，不落任何中间文件。
+- **AI 值守的执行结果失真**：`_cleanup_resources` / `_disable_diagnostic_tools` 丢弃
+  `docker exec` 的返回码并无条件 `return True`，导致"未生效"被记为"已修复"。改为以容器内
+  命令退出码为准，并用显式标记行二次确认；无 diag 可禁用时返回 False（"无事可做"）
+  而非虚报成功。
+- **AI 值守把 Web 排查记成修复**：`WEB_SERVER_DIAGNOSIS` 不做任何修复，却进入
+  `actions_taken`，报告因此声称"修好了"。新增 `diagnoses` 字段，只排查不修复的结论
+  单独存放。
+- **AI 值守的 `expired` 状态实际不可达**：超时判定排在 degraded 各项之后，一个运行
+  数小时、Web 从未启动的容器会被永远标为 degraded。超时判定前移——监控窗口已过仍未
+  达成健康，是结论而不是持续告警。
+- **`web_server_active` 识别面过窄**：原正则只匹配 IRIS 自己的一句让位日志，
+  厂商自行启动 Web 的 guest 会被误判为"未启动"。补充端口监听与进程绑定痕迹。
+- **串口日志按 locale 解码**：`open(log, 'r', errors='ignore')` 未指定编码，Windows 上
+  按 GBK 读取原始 UART 字节流，遇到非 ASCII 即抛异常。改为 UTF-8 + `replace`，
+  保留可读内容而非中断读取。
+- **`monitor/` 缺少 `__init__.py`**：`[tool.setuptools.packages.find]` 不含
+  `find_namespace`，无 `__init__.py` 的目录不会被打包——构建 wheel 时整个值守子包丢失。
+- **`cli.py` 的 `if __name__ == "__main__"` 位于文件中段**：`guardian-start` 命令注册在
+  其之后，直接 `python src/iris/cli.py` 会静默丢失该命令。已移至文件末尾。
 
 ### 变更
 
@@ -81,6 +104,12 @@
 - **架构映射常量生效**：`_ARCH_MAPPINGS` 取代重复硬编码的映射字典。
 - **规则库去重**：`vendor-watchdog-monitor` 与 `generic-watchdog-guard` 功能重叠
   （同为"注释 inittab + 重命名 monitor 二进制"），合并为前者，规则库由 7 条收敛为 6 条。
+- **AI 值守日志改用项目统一的 structlog**（`iris.log.get_logger`），并移除模块内
+  自带的独立 Typer 入口——`iris emulate guardian-start` 是唯一入口。
+- **`get_latest_crash_context()` 接入健康报告**：此前定义了却无调用方；现在异常时随
+  计数一并输出最近故障上下文，报告从"有多少次"变成"长什么样"。
+- **AI 值守模块 docstring 校正**：原声明的四项能力中"预测性告警"与"兼容性矩阵追踪"
+  从未实现，已删除该声明，只保留实际具备的三项。
 
 ### 文档
 
@@ -99,9 +128,10 @@
 - 死代码与未引用符号：`qemu_config.build_qemu_args()`（与真实 `run_qemu.sh` 的
   TAP+bridge 网络模型已漂移，构成误导）、`arch.identify_file()`、
   `config.reset_settings()`、`EmulationResult.ping_ok` / `EmulationResult.qemu_pid`
-  （定义后从不赋值）、`SerialLogAnalyzer.get_latest_crash_context()`（无调用方）。
-- 临时调试文件：根目录 `test_guardian.py`、`test_manual_usage.py`（其覆盖内容已迁入
-  `tests/`）、`iris-home/scratch;C`（Windows 路径误转义产物）。
+  （定义后从不赋值）。
+- 临时调试文件：根目录 `test_guardian.py`、`test_manual_usage.py`（硬编码本机绝对路径、
+  且 `SerialLogAnalyzer(iid=...)` 参数写错因而从未成功运行；其覆盖内容已重写为
+  `tests/test_guardian.py` 共 38 个用例）、`iris-home/scratch;C`（Windows 路径误转义产物）。
 - `auto.py` 中永不生效的分支（检查引擎从不产生的 `"SKIPPED(binary)"` 标记）。
 
 ### 修复（字段命名）

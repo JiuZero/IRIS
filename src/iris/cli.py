@@ -651,10 +651,6 @@ def serve_start(
     uvicorn.run("iris.api.server:app", host=host, port=port, reload=reload)
 
 
-if __name__ == "__main__":
-    main()
-
-
 @emulate_app.command("guardian-start")
 def emulate_guardian_start(
     iid: int = typer.Argument(..., help="container image ID to monitor"),
@@ -668,10 +664,14 @@ def emulate_guardian_start(
     typer.echo(f"starting AI Guardian for container {iid}...")
     typer.echo(f"health check interval: {interval}s")
     typer.echo("press Ctrl+C to stop monitoring\n")
-    
+
     guardian = AIHealthMonitor(iid=iid, scratch_dir=settings.scratch_dir)
-    
+
     try:
         guardian.start_continuous_monitoring(check_interval=interval)
     except KeyboardInterrupt:
         typer.echo("\nmonitoring stopped by user")
+
+
+if __name__ == "__main__":
+    main()
