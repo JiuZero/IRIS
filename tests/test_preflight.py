@@ -41,7 +41,7 @@ class TestPreflightArch:
     def test_no_elf_evidence_passes(self, tmp_path):
         d = tmp_path / "rootfs"
         (d / "etc").mkdir(parents=True)
-        (d / "etc" / "rcS").write_text("#!/bin/sh\n", newline="\n")
+        (d / "etc" / "rcS").write_text("#!/bin/sh\n", newline="\n", encoding="utf-8")
         assert preflight_arch(d, "mipsel") == ""
 
     def test_armel_rootfs_passes(self, tmp_path):

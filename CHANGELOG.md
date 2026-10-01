@@ -16,15 +16,22 @@
 
 ### 新增
 
-- **L3 规则库扩容至 7 条**：新增 `generic-watchdog-guard`（通用厂商 watchdog 防护，
-  覆盖 `monitor`/`watchdog`/`monitord`/`arp_monitor`/`ppp-monitor`/`keep_alive`/`wdt`
-  共 7 类命名变体与符号链接）、`generic-diag-crash-fix`（`diag` 工具 SIGSEGV 死循环）、
-  `tenda-web-server-forced-start`（Tenda rcS 阻塞导致 Web 拉不起来）、
-  `vendor-watchdog-monitor`（Tenda TES7002 厂商 watchdog 周期性 sysrq 重启整机）。
+- **L3 规则库扩容至 6 条**：新增 `generic-diag-crash-fix`（`diag` 工具 SIGSEGV 死循环）、
+  `tenda-web-server-forced-start`（为 `iris_net_fix.sh` 准备 Web 启动前置条件），
+  `vendor-watchdog-monitor` 由 TES7002 专用扩展为通用厂商 watchdog 防护（覆盖
+  `monitor`/`watchdog`/`monitord`/`arp_monitor`/`ppp-monitor`/`keep_alive`/`keepalive`/
+  `wdt`/`reboot_guard` 共 9 类命名变体与符号链接）。
+- **规则引擎 detect 条件补齐**：新增 `path_exists`（含 `executable` 修饰符）与
+  `all`/`any` 分组，使一条规则可以表达"多个事实同时成立"；原有"顶层条件 OR、无法表达
+  AND"的语义缺口导致 `tenda-web-server-forced-start` 只能用过宽的 `rcS` 存在性做指纹，
+  会对语料内几乎所有固件误命中。
 - **规则引擎支持 `post_action_verify` 证据校验**：`check_files` / `forbidden_patterns` /
   `health_check` 三类断言在修复后回读 rootfs 校验，结果写入报告，取代原先"写了就算"的
-  不可审计行为。同时 `load_rules` 对未知顶层键与未知 detect/action 键不再静默丢弃，
-  而是记录为报告警告。
+  不可审计行为；`health_check` 属 guest 侧检查，会渲染为 shell 段落写入
+  `/firmadyne/iris_rules.sh`，在 chroot 内执行并把裁决落到 `/etc/scripts/iris_verify.log`。
+- **`load_rules` 不再静默丢弃未知键**：未知顶层键、未知 detect/action 键记入
+  `Rule.warnings` 并出现在报告中。这正是 `generic-watchdog-guard.yaml` 里
+  `file_pattern`/`condition` 与整块 `post_action_verify` 长期"配置了但从不执行"的原因。
 - **`iris emulate guardian-start`**（L2/L3 联动）：按 `--interval` 周期拉取仿真容器串口
   日志，交给 AI 值守模块分析。
 - **AI 值守模块 `iris.monitor.ai_guardian`**：7 类串口日志正则模式（watchdog 重启 /
@@ -44,17 +51,36 @@
 - **规则引擎不再改写二进制文件**：`edit` / `comment_lines` 动作新增 `_is_binary()`
   守卫（前 512 字节含 `\x00` 即跳过）。此前 `_read_text()` 以 `errors="ignore"`
   有损解码后回写，会静默损坏厂商 ELF；自动管道无人值守执行规则后该风险已实际发生。
-- **aarch64 架构映射**（`docs/07-arch-mapping-fix.md`）：ELF 普查得到的标准架构名
+- **`tenda-web-server-forced-start` 的运行时启动逻辑无效**：L3 `guest_shell` 动作在
+  镜像构建期的 chroot 内执行（`fix_image.sh`），此处没有 `/proc`，且 chroot 退出后
+  所有后台进程随之消失——原规则用 `nohup goahead &` 拉起 Web 从来不会生效。同时该
+  规则的 boa 分支条件写作 `[ ! -d /proc/meminfo ]`（意图借 chroot 无 `/proc` 绕过，
+  但语义仍是错的），且 `&>/dev/null` 是 bash 语法、busybox `sh` 不支持。规则改为只创建
+  `iris_net_fix.sh` 启动 Web 所必需的前置文件（`/opt/goahead/route.txt`、
+  `/etc/boa/boa.conf`），由脚本层在 guest 启动时完成拉起——各归其位。
+- **`generic-diag-crash-fix` 的 init 脚本处置方式**：`find /etc/init.d -name "*diag*" -delete`
+  改为 `sed` 注释，避免连带删除同一脚本内的其他启动逻辑。
+- **aarch64 架构映射**（`docs/07-架构映射修复.md`）：ELF 普查得到的标准架构名
   `aarch64` 映射到 QEMU 内核标签 `arm64`，修复 arm64 固件被误判为"未知架构"而无法
   自动选参的问题。
 - **Windows 换行保真**：`_read_text` / `_write_text` 使用 `newline=""`，
   避免 Windows 上 universal-newline 把所有被修 shell 脚本重写成 CRLF。
+- **guest 脚本纯 ASCII 化**：规则 guest_shell 里的 `→`/`✓`/`⚠` 会让生成脚本含非 ASCII
+  字节，任何按 locale（Windows 上是 GBK）读取该脚本的工具都会抛 `UnicodeDecodeError`
+  ——此缺陷已实际导致 `tests/test_rules.py` 两个用例崩溃。规则内容改为纯 ASCII，
+  引擎侧新增 `_ascii_safe()` 兜底。同时为全部测试的 `read_text`/`write_text`
+  显式指定 `encoding="utf-8"`，消除同类隐患。
+- **`path_exists` 的 `executable` 修饰符跨平台诚实**：`os.access(X_OK)` 在 Windows 上对
+  普通文件恒返回 True，会让该修饰符"匹配一切"。改为仅在 POSIX 平台生效，
+  其他平台忽略并在 `Rule.warnings` 中声明。
 
 ### 变更
 
 - **文档归档**：根目录 10 份散落的英文说明文档归并去重后迁入 `docx/`，并统一改为
   中文命名（详见下节"文档"）。
 - **架构映射常量生效**：`_ARCH_MAPPINGS` 取代重复硬编码的映射字典。
+- **规则库去重**：`vendor-watchdog-monitor` 与 `generic-watchdog-guard` 功能重叠
+  （同为"注释 inittab + 重命名 monitor 二进制"），合并为前者，规则库由 7 条收敛为 6 条。
 
 ### 文档
 

@@ -1,33 +1,54 @@
 id: generic-diag-crash-fix
 description: >
-  Disable diagnostic tools that crash with SIGSEGV (signal 11) and loop indefinitely,
-  consuming CPU resources and preventing other services from starting. Evidence: TES7002
-  firmware shows 'diag: potentially unexpected fatal signal 11' repeated thousands of times,
-  blocking boot sequence completion and web server initialization. The diag binary runs
-  continuously during init and crashes on invalid memory access patterns not present in
-  real hardware.
+  Vendor diagnostic tools crash under QEMU and are then restarted in a loop.
+  Tenda TES7002 logs "diag: diag: potentially unexpected fatal signal 11."
+  thousands of times per run: the kernel crash handler re-execs the process, it
+  segfaults again, and the cycle burns the CPU time slices that init and the web
+  server need to come up. The trigger is missing vendor hardware (RealTek GPON
+  MAC, hardware crypto), which QEMU cannot provide, so no configuration makes
+  diag survivable — the tool has to go.
+
+  Detection keys on the binary itself rather than a script reference: diag gets
+  started from inittab, an rc script, or a supervisor, and pinning the rule to one
+  launch path would miss the others. Renaming instead of deleting keeps the vendor
+  copy in the image for forensics; init scripts are commented, not deleted, since
+  a "*diag*" script may carry unrelated boot logic too. Every step appends to
+  /etc/scripts/boot_fixes.log so the repair is auditable from inside the guest.
 stage: service
 detect:
-  - file_regex: '^#!.*[Ss]h|/bin/sh.*#.*IRIS'
-    within: 'etc/init.d/rcS'
+  - path_exists: 'bin/diag'
+  - path_exists: 'usr/bin/diag'
+  - path_exists: 'sbin/diag'
 actions:
-  - guest_shell: |
-      # Phase 1: Rename all diagnostic binaries to prevent their execution
-      for diag_binary in /bin/diag /usr/bin/diag /sbin/diag; do
-        if [ -f "$diag_binary" ] || [ -L "$diag_binary" ]; then
-          echo "  Disabling diagnostic tool: $diag_binary"
-          if [ -L "$diag_binary" ]; then
-            rm -f "$diag_binary" 2>/dev/null
-          else
-            mv -f "$diag_binary" "${diag_binary}.iris-disabled" 2>/dev/null || true
-          fi
-        fi
-      done
-      
-      # Phase 2: Remove any cron jobs or init scripts that might trigger diag
-      find /etc/init.d -name "*diag*" -delete 2>/dev/null || true
-      find /etc/cron.* -type f -exec grep -l "diag" {} \; -delete 2>/dev/null || true
-      
-      # Evidence collection
-      echo "#IRIS-diag-fixed:" >> /etc/scripts/boot_fixes.log
-      echo "Diagnostic tools disabled to prevent SIGSEGV loops and allow web server startup." >> /etc/scripts/boot_fixes.log
+  - guest_shell:
+      - "# rename, do not delete: the vendor copy stays available for forensics"
+      - "mkdir -p /etc/scripts 2>/dev/null || true"
+      - "echo \"IRIS: generic-diag-crash-fix active\" >> /etc/scripts/boot_fixes.log"
+      - "for d in /bin/diag /usr/bin/diag /sbin/diag /usr/sbin/diag; do"
+      - "  if [ -L \"$d\" ]; then"
+      - "    rm -f \"$d\" 2>/dev/null"
+      - "    echo \"  removed diag symlink: $d\" >> /etc/scripts/boot_fixes.log"
+      - "  elif [ -e \"$d\" ]; then"
+      - "    mv -f \"$d\" \"$d.iris-disabled\" 2>/dev/null || true"
+      - "    echo \"  disabled diag binary: $d\" >> /etc/scripts/boot_fixes.log"
+      - "  fi"
+      - "done"
+      - "# comment out anything that would re-exec it (deleting may drop other boot logic)"
+      - "for s in /etc/init.d/*diag* /etc/rc.d/*diag*; do"
+      - "  [ -f \"$s\" ] || continue"
+      - "  sed -i 's/^/#IRIS-diag: /' \"$s\" 2>/dev/null || true"
+      - "  echo \"  commented diag init script: $s\" >> /etc/scripts/boot_fixes.log"
+      - "done"
+      - "if [ -f /etc/crontab ]; then"
+      - "  sed -i '/diag/d' /etc/crontab 2>/dev/null || true"
+      - "fi"
+post_action_verify:
+  check_files:
+    - path: 'etc/scripts/boot_fixes.log'
+      expected: 'created by this rule; records which diag paths were disabled'
+  forbidden_patterns:
+    - pattern: '^\s*(/usr)?/?s?bin/diag(\s|$)'
+      in_file: 'etc/crontab'
+  health_check:
+    command: "test -x /bin/diag || test -x /usr/bin/diag || test -x /sbin/diag"
+    expected_exit_code: 1

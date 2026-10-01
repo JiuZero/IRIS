@@ -1,50 +1,62 @@
 id: tenda-web-server-forced-start
 description: >
-  Force start Tenda web server (goahead/boa) immediately after boot to ensure web interface availability.
-  This rule bypasses potential rcS/rc63 init script blocking issues by directly invoking web server binaries
-  during image build time. Evidence: TES7002 firmware shows rcS execution stopping before any web service startup,
-  preventing user access to login interface for extended periods. The rule attempts both goahead and boa binaries.
+  Prepare the guest so iris_net_fix.sh can actually launch the vendor web server,
+  and stop rcS from swallowing the boot. Tenda TES7002 reaches its login page only
+  after iris_net_fix.sh finds a usable start command; that script refuses to start
+  goahead unless /opt/goahead/route.txt exists, and refuses boa unless
+  /etc/boa/boa.conf exists. Both are build-time artefacts a vendor image often
+  creates in a configd-dependent path that never runs under rehosting.
+
+  Note on execution context: L3 guest_shell actions run inside the chroot while
+  the image is being built (fix_image.sh), where there is no /proc and no
+  surviving processes. Launching a daemon from here would be pointless — it dies
+  with the chroot. So this rule only creates and copies what the runtime helper
+  needs; iris_net_fix.sh does the launching, at boot, where it belongs.
 stage: service
 detect:
-  - file_regex: '^#!.*[Bb]in/[Ss]h'
-    within: 'etc/init.d/rcS'
+  # A Tenda-style rc chain plus a vendor web binary. Both are required: rcS alone
+  # matches every firmware in the corpus, which would fire this rule everywhere.
+  - all:
+      - path_exists: 'etc/init.d/rcS'
+      - any:
+          - path_exists: 'opt/goahead/goahead'
+          - path_exists: 'bin/boa'
 actions:
-  - guest_shell: |
-      # Phase 1: Create necessary directories for web server
-      echo "  Setting up web server directories..."
-      mkdir -p /mnt/log/goahead /opt/goahead/route.txt /home/httpd/web 2>/dev/null || true
-      
-      # Phase 2: Copy goahead files if not already present
-      if [ -d /opt/goahead ] && [ -x /opt/goahead/goahead ]; then
-        echo "  Found goahead binary"
-        cp -rf /opt/goahead/* /mnt/log/goahead/ 2>/dev/null || true
-        chmod -R 755 /mnt/log/goahead 2>/dev/null || true
-        
-        # Try starting goahead in background
-        echo "  Attempting to start goahead..."
-        (nohup /mnt/log/goahead/goahead --home /mnt/log/goahead &>/dev/null &) || \
-        (nohup /opt/goahead/goahead --home /opt/goahead --route /opt/goahead/route.txt &>/dev/null &) || \
-        echo "  Warning: goahead failed to start"
-      fi
-      
-      # Phase 3: Also try starting boa as fallback
-      if [ -x /bin/boa ] && [ ! -d /proc/meminfo ]; then
-        echo "  Trying boa fallback..."
-        (nohup /bin/boa -d /home/httpd/web &>/dev/null &) || \
-        (nohup /bin/boa &>/dev/null &) || \
-        echo "  Warning: boa failed to start"
-      fi
-      
-      # Phase 4: Verify web server is running
-      sleep 2
-      if pgrep -x goahead >/dev/null 2>&1 || pgrep -x boa >/dev/null 2>&1; then
-        echo "✓ Web server started successfully" >> /etc/scripts/boot_fixes.log
-        WEB_PID=$(pgrep -x goahead | head -1 || pgrep -x boa | head -1)
-        echo "  Web server PID: $WEB_PID" >> /etc/scripts/boot_fixes.log
-      else
-        echo "⚠ Web server may still be starting..." >> /etc/scripts/boot_fixes.log
-      fi
-      
-      # Evidence collection
-      echo "#IRIS-tenda-web-forced:" >> /etc/scripts/boot_fixes.log
-      echo "Forced web server startup at $(date) to bypass init script blocking." >> /etc/scripts/boot_fixes.log
+  - guest_shell:
+      - "mkdir -p /etc/scripts 2>/dev/null || true"
+      - "echo \"IRIS: tenda-web-server-forced-start preparing vendor web\" >> /etc/scripts/boot_fixes.log"
+      - "# iris_net_fix.sh only starts goahead when route.txt is present"
+      - "if [ -x /opt/goahead/goahead ]; then"
+      - "  mkdir -p /mnt/log/goahead /opt/goahead 2>/dev/null || true"
+      - "  if [ ! -f /opt/goahead/route.txt ]; then"
+      - "    : > /opt/goahead/route.txt"
+      - "    echo \"  created /opt/goahead/route.txt (iris_net_fix precondition)\" >> /etc/scripts/boot_fixes.log"
+      - "  fi"
+      - "  chmod -R a+rX /opt/goahead 2>/dev/null || true"
+      - "fi"
+      - "# ...and only starts boa when /etc/boa/boa.conf is present"
+      - "for b in /bin/boa /usr/bin/boa; do"
+      - "  [ -x \"$b\" ] || continue"
+      - "  if [ ! -f /etc/boa/boa.conf ]; then"
+      - "    mkdir -p /etc/boa 2>/dev/null || true"
+      - "    if [ -f /home/httpd/boa.conf ]; then"
+      - "      cp -f /home/httpd/boa.conf /etc/boa/boa.conf 2>/dev/null || true"
+      - "      echo \"  copied boa.conf from /home/httpd (iris_net_fix precondition)\" >> /etc/scripts/boot_fixes.log"
+      - "    elif [ -f /etc/boa.conf ]; then"
+      - "      cp -f /etc/boa.conf /etc/boa/boa.conf 2>/dev/null || true"
+      - "      echo \"  copied boa.conf from /etc (iris_net_fix precondition)\" >> /etc/scripts/boot_fixes.log"
+      - "    fi"
+      - "  fi"
+      - "done"
+      - "# keep a writable web root; vendor images often mount it from a partition"
+      - "# that does not exist under rehosting"
+      - "mkdir -p /mnt/log/goahead /home/httpd/web /var/www 2>/dev/null || true"
+post_action_verify:
+  check_files:
+    - path: 'opt/goahead/route.txt'
+      expected: 'required by iris_net_fix.sh before it will launch goahead'
+    - path: 'etc/boa/boa.conf'
+      expected: 'required by iris_net_fix.sh before it will launch boa'
+  health_check:
+    command: "test -f /opt/goahead/goahead && { test -f /opt/goahead/route.txt || test -f /etc/boa/boa.conf; }"
+    expected_exit_code: 0

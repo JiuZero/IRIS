@@ -15,27 +15,86 @@ description: >
   Evidence: 5959/qemu.serial.log — 3x "Monitor: process gp8 is die." each
   followed by "sh: reboot: not found" + "sysrq: Resetting" + a fresh kernel
   boot banner.
+
+  Generalised beyond that one device: the inittab fingerprint below also matches
+  monitor/watchdog/keep_alive/keepalive/wdt/reboot_guard under ::once/::respawn/
+  ::restart, and the second fingerprint covers supervisors an inittab entry does
+  not mention but which still get exec'd from an rc script.
 stage: service
 detect:
-  - file_regex: '::(once|respawn):[^\n]*/(monitor|watchdog|keep_alive|keepalive|wdt)(\s|$)'
+  # Fingerprint 1: a supervision daemon spawned straight from inittab.
+  - file_regex: '::(once|respawn|restart):[^\n]*/(monitor|watchdog|keep_alive|keepalive|wdt|reboot_guard)(\s|$)'
     within: 'etc/inittab'
+  # Fingerprint 2: inittab exists and a supervisor binary is installed. Covers
+  # daemons an rc script starts, which fingerprint 1 cannot see.
+  - all:
+      - path_exists: 'etc/inittab'
+      - any:
+          - path_exists: 'opt/monitor'
+          - path_exists: 'bin/monitor'
+          - path_exists: 'sbin/monitor'
+          - path_exists: 'bin/watchdog'
+          - path_exists: 'sbin/watchdog'
+          - path_exists: 'bin/monitord'
+          - path_exists: 'bin/arp_monitor'
+          - path_exists: 'bin/ppp-monitor'
+          - path_exists: 'sbin/keep_alive'
+          - path_exists: 'usr/bin/keepalive'
+          - path_exists: 'bin/wdt'
 actions:
+  # Host side: stop the daemon being respawned, idempotently. The leading ^[^#]*
+  # is what makes a second apply_rules() run a no-op on already-commented lines.
   - comment_lines:
       within: 'etc/inittab'
-      regex: '^[^#]*::(once|respawn):[^\n]*/(monitor|watchdog|keep_alive|keepalive|wdt)(\s|$)'
+      regex: '^[^#]*::(once|respawn|restart):[^\n]*/(monitor|watchdog|keep_alive|keepalive|wdt|reboot_guard)(\s|$)'
       prefix: '#IRIS-watchdog: '
+
+  # Guest side. Order matters: dangling symlinks go first (a broken target still
+  # gets exec'd and burns CPU in a restart loop), then binaries, then the reset
+  # paths themselves.
   - guest_shell:
       - "# supervision daemons renamed out of PATH and out of their own dirs; the"
       - "# vendor copy stays in the image as <name>.iris-disabled for forensics"
       - "for b in /bin/monitor /sbin/monitor /usr/bin/monitor /usr/sbin/monitor \\"
       - "        /opt/monitor /opt/bin/monitor /bin/watchdog /sbin/watchdog \\"
-      - "        /usr/bin/watchdog /usr/sbin/watchdog /etc/scripts/watchdog; do"
+      - "        /usr/bin/watchdog /usr/sbin/watchdog /etc/scripts/watchdog \\"
+      - "        /bin/monitord /bin/arp_monitor /bin/ppp-monitor \\"
+      - "        /sbin/keep_alive /usr/bin/keepalive /bin/wdt; do"
+      - "  [ -e \"$b\" ] || [ -L \"$b\" ] || continue"
       - "  if [ -L \"$b\" ]; then rm -f \"$b\" 2>/dev/null"
-      - "  elif [ -e \"$b\" ]; then mv -f \"$b\" \"$b.iris-disabled\" 2>/dev/null"
+      - "  else mv -f \"$b\" \"$b.iris-disabled\" 2>/dev/null || true"
       - "  fi"
       - "done"
       - ""
-      - "# Disable other monitoring daemons that may interfere or cause resource contention"
-      - "[ -x /bin/monitord ] && mv -f /bin/monitord /bin/monitord.iris-disabled 2>/dev/null || true"
-      - "[ -x /bin/arp_monitor ] && mv -f /bin/arp_monitor /bin/arp_monitor.iris-disabled 2>/dev/null || true"  
-      - "[ -x /bin/ppp-monitor ] && mv -f /bin/ppp-monitor /bin/ppp-monitor.iris-disabled 2>/dev/null || true"
+      - "# Drop supervisor symlinks that may still point into a renamed target."
+      - "for d in /bin /sbin /usr/bin /usr/sbin /opt/bin; do"
+      - "  [ -d \"$d\" ] || continue"
+      - >-
+        find "$d" -maxdepth 1 -type l \( -name '*monitor*' -o -name '*watchdog*' -o -name '*keep*alive*' -o -name '*wdt*' \) -exec rm -f {} \; 2>/dev/null
+      - "done"
+      - ""
+      - "# Cut the degraded reset paths. reboot was absent on this guest, which is"
+      - "# exactly why the daemon fell through to a raw sysrq trigger."
+      - "for rb in /sbin/reboot /bin/reboot /usr/sbin/reboot; do"
+      - "  [ -x \"$rb\" ] && mv -f \"$rb\" \"$rb.iris-disabled\" 2>/dev/null || true"
+      - "done"
+      - "echo 0 > /proc/sys/kernel/sysrq 2>/dev/null || true"
+
+# Applied on the host so a report states what was verified, not just what was
+# attempted. health_check runs inside the guest and logs its own verdict.
+post_action_verify:
+  check_files:
+    - path: 'etc/inittab'
+      expected: 'present; supervision lines must be commented out'
+    - path: 'opt/monitor.iris-disabled'
+      expected: 'may exist as renamed backup'
+    - path: 'bin/monitor.iris-disabled'
+      expected: 'may exist as renamed backup'
+    - path: 'sbin/reboot.iris-disabled'
+      expected: 'may exist as renamed backup'
+  forbidden_patterns:
+    - pattern: '^[^#]*::(once|respawn|restart):[^\n]*/(monitor|watchdog|keep_alive|keepalive|wdt|reboot_guard)(\s|$)'
+      in_file: 'etc/inittab'
+  health_check:
+    command: "ps w | grep -v grep | grep -E '/(monitor|watchdog|monitord|arp_monitor|ppp-monitor|keep_alive|keepalive|wdt)( |$)'"
+    expected_exit_code: 1
