@@ -1,4 +1,6 @@
 import hashlib
+import json
+import subprocess
 from pathlib import Path
 
 import typer
@@ -190,7 +192,7 @@ def extract_add(
                             f"  (ELF census: {ext.elf_count} binaries -> {arch})",
                             fg=typer.colors.GREEN,
                         )
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - best-effort probe, never fail the import
                     typer.secho(f"  (arch verify skipped: {exc})", fg=typer.colors.YELLOW)
         image = Image(
             filename=archive.name,
@@ -339,10 +341,9 @@ def emulate_run(
     IRIS extracts it, infers the target architecture from the ELF census, applies boot-fix rules, and proceeds
     to emulation. Use --arch auto (default) for automatic architecture detection, or specify a concrete arch
     such as mipsel/mipseb/armel/arm64."""
-    import socket
-    from iris.emulate.auto import prepare_from_firmware, prepare_from_rootfs, pick_host_port
-    from iris.emulate.qemu_config import supported_archs
+    from iris.emulate.auto import pick_host_port, prepare_from_firmware, prepare_from_rootfs
     from iris.emulate.orchestrator import build_parts_mounts, emulate_firmware, preflight_arch
+    from iris.emulate.qemu_config import supported_archs
 
     if not target.exists():
         typer.secho(f"not found: {target}", fg=typer.colors.RED, err=True)
@@ -425,7 +426,7 @@ def emulate_run(
             result_port = selected_port
     except RuntimeError:
         typer.secho("no available host port in range [8080,8199]; use --port XXX", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=3)
+        raise typer.Exit(code=3) from None
     
     partition_mounts = None
     if parts_dir is not None:
@@ -474,11 +475,8 @@ def emulate_stop(
 @emulate_app.command("list")
 def emulate_list() -> None:
     """List all IRIS QEMU emulation containers with status and ports."""
-    import subprocess
-    
     try:
         # Use docker format string for consistent output
-        import subprocess
         result = subprocess.run(
             ["docker", "ps", "-a", "--filter", "name=iris-qemu", 
              "--format", "{{.Names}}|{{.Status}}|{{.Ports}}"],
@@ -514,18 +512,17 @@ def emulate_list() -> None:
         
     except subprocess.CalledProcessError as e:
         typer.secho(f"Failed to list containers: {e}", fg=typer.colors.RED)
-        raise typer.Exit(code=1)
-    except Exception as e:
+        raise typer.Exit(code=1) from None
+    except OSError as e:
+        # No JSON parsing happens above, so this is only ever "docker is missing
+        # or not runnable" — say that instead of leaking a traceback.
         typer.secho(f"Error listing containers: {e}", fg=typer.colors.RED)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from None
 
 
 @emulate_app.command("status")
 def emulate_status(iid: int = typer.Argument(..., help="image ID to inspect")) -> None:
     """Display detailed status of an IRIS QEMU emulation container."""
-    import subprocess
-    from pathlib import Path
-    from iris.config import get_settings
     
     settings = get_settings()
     scratch_dir = settings.scratch_dir
@@ -536,17 +533,20 @@ def emulate_status(iid: int = typer.Argument(..., help="image ID to inspect")) -
             ["docker", "inspect", f"iris-qemu-{iid}"],
             capture_output=True, text=True, check=True
         )
-        
-        if result.returncode != 0:
-            typer.secho(f"Container iris-qemu-{iid} not found.", fg=typer.colors.RED)
-            raise typer.Exit(code=1)
-            
     except subprocess.CalledProcessError:
         typer.secho(f"Container iris-qemu-{iid} not found.", fg=typer.colors.RED)
+        raise typer.Exit(code=1) from None
+    except OSError as e:
+        typer.secho(f"docker is unavailable: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1) from None
+
+    # check=True already guarantees a non-empty result for an existing container,
+    # but an empty list here means the id vanished between the two calls.
+    inspected = json.loads(result.stdout)
+    if not inspected:
+        typer.secho(f"Container iris-qemu-{iid} not found.", fg=typer.colors.RED)
         raise typer.Exit(code=1)
-    
-    import json
-    info = json.loads(result.stdout)[0]
+    info = inspected[0]
     
     # Extract key information
     container_name = info["Name"].lstrip("/")
@@ -564,7 +564,11 @@ def emulate_status(iid: int = typer.Argument(..., help="image ID to inspect")) -
                 host_ip = m.get("HostIp", "0.0.0.0")
                 host_port = m.get("HostPort", "")
                 if host_port:
-                    port_info.append(f"{host_port} → {container_port}")
+                    # A wildcard bind is the common case and adds nothing here;
+                    # a specific address does, because it decides where to click.
+                    origin = host_port if host_ip in ("0.0.0.0", "::", "") \
+                        else f"{host_ip}:{host_port}"
+                    port_info.append(f"{origin} → {container_port}")
         else:
             port_info.append(f"{container_port} (no mapping)")
     
@@ -614,14 +618,15 @@ def emulate_status(iid: int = typer.Argument(..., help="image ID to inspect")) -
             sock.close()
             if result == 0:
                 accessible_ports.append(p)
-        except:
+        except OSError:
+            # An unbindable or filtered port is just "not reachable", not an error.
             pass
     
     if accessible_ports:
         typer.secho(f"[OK] Web services accessible on ports: {', '.join(map(str, accessible_ports))}", 
                    fg=typer.colors.GREEN)
     elif state == "running":
-        typer.secho(f"[NO] No web services detected on standard ports (80/8080/8000/443)", 
+        typer.secho("[NO] No web services detected on standard ports (80/8080/8000/443)", 
                    fg=typer.colors.YELLOW)
     typer.echo()
     

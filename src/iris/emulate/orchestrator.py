@@ -13,13 +13,16 @@ Pipeline:
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from iris.emulate.qemu_config import get_config, supported_archs
+from iris.log import get_logger
 
+logger = get_logger(__name__)
 
 # maps an ELF-census arch label (L1 vocabulary) to the emulation arch that can run it
 _CENSUS_TO_RUNNABLE = {
@@ -63,13 +66,18 @@ def preflight_arch(rootfs_dir: Path, arch: str) -> str:
 
 @dataclass
 class EmulationResult:
-    firmware_path: Path
+    """Outcome of one emulation run.
+
+    ``web_ok`` is the reachability verdict; there is no separate ping field
+    because reachability is only ever decided by an HTTP probe against the
+    forwarded port.
+    """
+
+    rootfs_dir: Path
     arch: str
     success: bool = False
-    ping_ok: bool = False
     web_ok: bool = False
     web_url: str = ""
-    qemu_pid: int = 0
     serial_log: str = ""
     error: str = ""
     duration_sec: float = 0.0
@@ -89,7 +97,7 @@ def _build_baked_image() -> str:
     result = _run(["docker", "image", "inspect", image_name])
     if result.returncode == 0:
         return image_name
-    print("Building iris-emulate-baked Docker image...")
+    logger.info("Building iris-emulate-baked Docker image...")
     project_root = Path(__file__).parent.parent.parent.parent
     dockerfile = project_root / "docker" / "emulate" / "Dockerfile.baked"
     result = _run(["docker", "build", "-t", image_name, "-f", str(dockerfile), str(project_root)], timeout=300)
@@ -236,7 +244,7 @@ def emulate_firmware(
     partition_mounts: list[tuple[str, str]] | None = None,
 ) -> EmulationResult:
     start_time = time.time()
-    result = EmulationResult(firmware_path=rootfs_dir, arch=arch)
+    result = EmulationResult(rootfs_dir=rootfs_dir, arch=arch)
 
     config = get_config(arch)
     if config is None:
@@ -255,15 +263,15 @@ def emulate_firmware(
                 host_rules_script = rootfs_dir / "firmadyne" / "iris_rules.sh"
                 if host_rules_script.is_file():
                     guest_script = host_rules_script.read_text(encoding="utf-8", errors="replace")
-                print(
+                logger.info(
                     f"Composing rootfs from {len(partition_mounts)} JFFS2 slices in-container "
                     f"(symlink-safe, guest_script={bool(guest_script)})..."
                 )
                 _compose_rootfs_from_slices(parts_slices_dir, partition_mounts, tarball_path, guest_script)
             else:
-                print("Creating rootfs tarball...")
+                logger.info("Creating rootfs tarball...")
                 _create_tarball(rootfs_dir, tarball_path)
-        print(f"Tarball: {tarball_path.stat().st_size} bytes")
+        logger.info(f"Tarball: {tarball_path.stat().st_size} bytes")
     except RuntimeError as e:
         result.error = str(e)
         result.duration_sec = time.time() - start_time
@@ -275,7 +283,7 @@ def emulate_firmware(
     container_name = f"iris-qemu-{iid}"
     _run(["docker", "rm", "-f", container_name])
 
-    print(f"Starting emulation container {container_name}...")
+    logger.info(f"Starting emulation container {container_name}...")
     create_cmd = [
         "docker", "create", "--privileged",
         "-p", f"{host_port}:{host_port}",
@@ -295,7 +303,7 @@ def emulate_firmware(
         return result
     result.container_id = container_name
 
-    print("Copying tarball into container...")
+    logger.info("Copying tarball into container...")
     cp_target = f"/work/scratch/{iid}/{iid}.tar.gz"
     _run(["docker", "exec", container_name, "mkdir", "-p", f"/work/scratch/{iid}"])
     cp_result = _run(["docker", "cp", str(tarball_path), f"{container_name}:{cp_target}"], timeout=60)
@@ -305,7 +313,7 @@ def emulate_firmware(
         _run(["docker", "rm", "-f", container_name])
         return result
 
-    print(f"Building QEMU image for IID={iid} arch={arch}...")
+    logger.info(f"Building QEMU image for iid={iid} arch={arch}...")
     make_result = _run(
         ["docker", "exec", container_name, "bash", "/work/scripts/make_image.sh", str(iid), arch],
         timeout=180,
@@ -315,9 +323,9 @@ def emulate_firmware(
         result.duration_sec = time.time() - start_time
         _run(["docker", "rm", "-f", container_name])
         return result
-    print(f"Image build output: {make_result.stdout[-200:]}")
+    logger.debug(f"image build output: {make_result.stdout[-200:]}")
 
-    print(f"Starting QEMU (port {host_port} -> guest:80)...")
+    logger.info(f"Starting QEMU (port {host_port} -> guest:80)...")
     qemu_result = _run(
         ["docker", "exec", "-d", container_name, "bash", "/work/scripts/run_qemu.sh", str(iid), arch, str(host_port)],
         timeout=15,
@@ -328,7 +336,7 @@ def emulate_firmware(
         _run(["docker", "rm", "-f", container_name])
         return result
 
-    print(f"Waiting for firmware to boot (timeout {timeout_sec}s)...")
+    logger.info(f"Waiting for firmware to boot (timeout {timeout_sec}s)...")
     boot_deadline = time.time() + timeout_sec
     guest_ip = "192.168.1.1"
     socat_updated = False
@@ -342,7 +350,6 @@ def emulate_firmware(
             log_res = subprocess.run(log_cmd, capture_output=True, text=True, env=_env(), timeout=10, check=False)
             for line in log_res.stdout.splitlines():
                 if "device:lo" not in line and "ifa:0x" in line:
-                    import re
                     m = re.search(r"ifa:0x([0-9a-f]+)", line)
                     if m:
                         raw = int(m.group(1), 16)
@@ -352,7 +359,7 @@ def emulate_firmware(
                             ip = f"{(raw >> 24) & 0xFF}.{(raw >> 16) & 0xFF}.{(raw >> 8) & 0xFF}.{raw & 0xFF}"
                         if ip != guest_ip and not ip.startswith("127."):
                             guest_ip = ip
-                            print(f"  Detected guest IP: {guest_ip}")
+                            logger.info(f"Detected guest IP: {guest_ip}")
                             _run(["docker", "exec", container_name, "pkill", "-f", "socat.*TCP"], timeout=5)
                             _run(["docker", "exec", "-d", container_name, "socat",
                                   f"TCP-LISTEN:{host_port},reuseaddr,fork", f"TCP:{guest_ip}:80"], timeout=5)
@@ -369,9 +376,9 @@ def emulate_firmware(
             result.web_ok = True
             result.web_url = f"http://localhost:{host_port}"
             result.success = True
-            print(f"  Web reachable at {result.web_url} (HTTP {http_code}) after {elapsed}s")
+            logger.info(f"Web reachable at {result.web_url} (HTTP {http_code}) after {elapsed}s")
             break
-        print(f"  [{elapsed}s] waiting... (HTTP {http_code})")
+        logger.info(f"[{elapsed}s] waiting... (HTTP {http_code})")
 
     log_result = _run(["docker", "cp", f"{container_name}:/work/scratch/{iid}/qemu.serial.log", str(work_dir / "qemu.serial.log")])
     if log_result.returncode == 0:

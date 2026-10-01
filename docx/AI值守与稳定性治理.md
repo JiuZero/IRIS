@@ -125,14 +125,13 @@ sh (871): drop_caches: 3
 ### 3.1 L3 规则层：精准阉割 + 强制补偿
 
 IRIS 的应对策略是把修复沉淀为 `rules/*.yaml`，让自动管道在每次仿真时无人值守地应用。
-新增 4 条实证规则（连同既有的 `dev-extended-nodes`，共 7 条）：
+boot-fix 核心规则 3 条（连同 `dev-extended-nodes` 等既有用例，共 6 条）：
 
 | 规则文件 | 阶段 | 针对问题 | 机制 |
 |---|---|---|---|
-| `vendor-watchdog-monitor.yaml` | service | 问题 A | `comment_lines` 注释 `etc/inittab` 中拉起 monitor 的行（前缀 `#IRIS-watchdog: `）；`guest_shell` 将 `/bin/monitor` 等 11 个路径重命名为 `.iris-disabled`（注释 inittab 不够，rcS 链可能重新拉起） |
-| `generic-watchdog-guard.yaml` | service | 问题 A（通用化） | 四阶段 `guest_shell`：删损坏符号链接 → 重命名 watchdog 二进制 → `sed` 注释 inittab → 清理 console 触发器并屏蔽 `reboot` 与 sysrq |
-| `generic-diag-crash-fix.yaml` | service | 问题 B | 重命名 / 删除 `/bin/diag`、`/usr/bin/diag`、`/sbin/diag`；清理 `/etc/init.d/*diag*` 与 cron；把执行证据写入 `/etc/scripts/boot_fixes.log` |
-| `tenda-web-server-forced-start.yaml` | service | 问题 C | 建 `/mnt/log/goahead` 与 `/opt/goahead/route.txt` → 复制 goahead 并 nohup 启动 → boa 兜底 → `pgrep` 验证并写 PID 到 `boot_fixes.log` |
+| `vendor-watchdog-monitor.yaml` | service | 问题 A | 双指纹（inittab 正则 + 9 类命名变体的二进制存在性，AND 后再 OR 任一）；`comment_lines` 注释 `etc/inittab` 中拉起 monitor 的行（前缀 `#IRIS-watchdog: `）；`guest_shell` 清理符号链接、把 watchdog 二进制重命名为 `.iris-disabled`、切断 `reboot` 与 sysrq 触发路径（注释 inittab 不够，rcS 链可能重新拉起） |
+| `generic-diag-crash-fix.yaml` | service | 问题 B | 按 `diag` 二进制存在性做指纹（不绑定某一条启动路径）；重命名 / 删除 `/bin/diag`、`/usr/bin/diag`、`/sbin/diag`；`sed` 注释 init 脚本与 cron 中的启动项；证据写入 `/etc/scripts/boot_fixes.log` |
+| `tenda-web-server-forced-start.yaml` | service | 问题 C | 只创建 `iris_net_fix.sh` 启动所需的前置（`/opt/goahead/route.txt`、`/etc/boa/boa.conf`）；**不在 chroot 内拉起进程**，启动交给 boot 期的 `iris_net_fix.sh` |
 
 **为什么 `guest_shell` 必须在 guest 内执行**：device node 无法在宿主文件系统创建，
 sysrq/proc/sysfs 操作也只能在 chroot 内的真实 init 环境中进行。规则引擎把所有
@@ -337,7 +336,7 @@ docker exec iris-qemu-<iid> strace -f /opt/goahead/goahead 2>&1 \
 | 修复后运行时长 | ≥51 分钟 / ≥60 分钟 | 容器 10000。≥51 分钟为 09-27 首次记录，≥60 分钟为 09-28 复测 |
 | diag 崩溃次数 | 约 3900 次 | 容器 10001 单次运行**累计**出现次数 |
 | diag 崩溃次数 | 47~49 次 | 容器 8630/10000 单份串口日志的**正则匹配计数**。与 3900 是不同统计口径，不构成矛盾 |
-| L3 规则条数 | 7 条 | `rules/` 目录实测。其中 5 条为 boot-fix 核心规则，另 2 条（`mtd-name-lookup-guard`、`shadow-jffs2-opt`）为指纹标记型规则 |
+| L3 规则条数 | 6 条 | `rules/` 目录实测。其中 `dev-extended-nodes` / `mtd-name-lookup-guard` / `shadow-jffs2-opt` 为节点扩展与指纹标记型规则，另 3 条为 boot-fix 核心规则 |
 | 涉及容器 | 8630 / 10000 / 10001 / 10003 / 10004 / 10006 | 各问题在不同容器上复现 |
 
 > 早期文档曾给出"稳定性 +1200%"一类百分比指标。该指标依赖上述存疑的基线选择，
@@ -360,7 +359,8 @@ docker exec iris-qemu-<iid> strace -f /opt/goahead/goahead 2>&1 \
    无法复用到下一个固件。`rules/*.yaml` 是可插拔、可回归的策略库。
 
 5. **守护进程的误判是可预期的**。凡是在 QEMU 下依赖硬件子系统的厂商守护进程，都需要
-   默认怀疑。`generic-watchdog-guard.yaml` 就是把 TES7002 的教训推广到任意厂商。
+   默认怀疑。`vendor-watchdog-monitor.yaml` 就是把 TES7002 的教训推广到任意厂商：
+   指纹既认 inittab 里的 `::once:-/bin/monitor` 形态，也认 rc 脚本里被直接 exec 的形态。
 
 ---
 
@@ -371,5 +371,5 @@ docker exec iris-qemu-<iid> strace -f /opt/goahead/goahead 2>&1 \
 | `docs/05-崩溃归因.md` | 崩溃诊断方法论与 TES7002 案例的完整技术细节 |
 | `docs/06-稳定性验证.md` | 稳定性验证方法与长时运行观察记录 |
 | `docs/07-架构映射修复.md` | aarch64 → arm64 架构标签映射修复 |
-| `rules/*.yaml` | L3 规则库（共 7 条） |
+| `rules/*.yaml` | L3 规则库（共 6 条） |
 | `CHANGELOG.md` | 版本变更记录，含 Phase 1–4 里程碑与 git tag 对应关系 |

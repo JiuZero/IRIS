@@ -4,6 +4,7 @@ import struct
 
 from iris.emulate.orchestrator import preflight_arch
 
+
 # ei_data: 1=LE 2=BE; e_machine: 8=MIPS 40=ARM 183=AArch64
 def _elf(machine: int, ei_data: int) -> bytes:
     hdr = bytearray(b"\x7fELF" + bytes([2, ei_data, 1]) + b"\x00" * 9)

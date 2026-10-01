@@ -139,14 +139,14 @@ class TestFindEcHeaders:
 class TestDeterminePebSize:
     def test_uniform(self):
         offsets = [0, 131072, 262144, 393216]
-        assert determine_peb_size(b"", offsets) == 131072
+        assert determine_peb_size(offsets) == 131072
 
     def test_single_offset(self):
-        assert determine_peb_size(b"", [0]) == 0
+        assert determine_peb_size([0]) == 0
 
     def test_majority_vote(self):
         offsets = [0, 131072, 262144, 262145]
-        assert determine_peb_size(b"", offsets) == 131072
+        assert determine_peb_size(offsets) == 131072
 
 
 class TestExtractVolumes:

@@ -111,7 +111,12 @@ def find_ec_headers(data: bytes, start: int = 0) -> list[int]:
     return results
 
 
-def determine_peb_size(data: bytes, ec_offsets: list[int]) -> int:
+def determine_peb_size(ec_offsets: list[int]) -> int:
+    """Derive the PEB size from the spacing between erase-counter headers.
+
+    Consecutive EC headers are one PEB apart, so the PEB size is the most
+    common offset delta — the image bytes themselves are not needed.
+    """
     if len(ec_offsets) < 2:
         return 0
     sizes: dict[int, int] = {}
@@ -127,7 +132,7 @@ def extract_volumes(data: bytes, ubi_offset: int = 0) -> dict[int, UbiVolume]:
     ec_offsets = find_ec_headers(data, ubi_offset)
     if len(ec_offsets) < 2:
         return {}
-    peb_size = determine_peb_size(data, ec_offsets)
+    peb_size = determine_peb_size(ec_offsets)
     if peb_size == 0:
         return {}
 

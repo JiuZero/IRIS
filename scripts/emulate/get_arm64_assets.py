@@ -88,7 +88,7 @@ def main() -> int:
         print("busybox.arm64 already present and verified")
     else:
         with tarfile.open(fileobj=io.BytesIO(_fetch(MINIROOTFS_URL)), mode="r:gz") as tf:
-            member = [n for n in tf.getnames() if n.endswith("bin/busybox")][0]
+            member = next(n for n in tf.getnames() if n.endswith("bin/busybox"))
             _install(args.dest, "busybox.arm64", tf.extractfile(member).read(), BUSYBOX_SHA256)
     print("arm64 assets OK")
     return 0

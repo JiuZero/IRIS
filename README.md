@@ -20,7 +20,7 @@
 |---|---|---|
 | L1 提取 | 格式识别（TendaW / squashfs / JFFS2 / uImage / UBI / FIT / 加密厂商格式）、rootfs 解包、ELF 架构校验入库 | ✅ |
 | L2 仿真 | QEMU 全系统仿真，四架构通道：`mipsel` / `mipseb` / `armel` / `arm64`；架构预检（不符直接给出正确架构建议，`--force` 可绕过）；Docker 网络桥接 + 主机端口转发 + 串口日志采集 | ✅ |
-| L3 规则 | YAML 启动修复规则引擎（`rules/`，7 条实证规则），可插拔、可回归，修复后带证据校验 | ✅ |
+| L3 规则 | YAML 启动修复规则引擎（`rules/`，6 条实证规则），可插拔、可回归，修复后带证据校验 | ✅ |
 | L4 交互 | RTSP/ONVIF 媒体面 | 🔬 M3 |
 | L5 编排 | Typer CLI + FastAPI 服务（上传固件 → 提取 → 仿真一条 `/api/v1/pipeline` 打通）+ AI 值守监控（`emulate guardian-start`） | ✅ |
 

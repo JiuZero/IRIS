@@ -96,6 +96,33 @@
   `find_namespace`，无 `__init__.py` 的目录不会被打包——构建 wheel 时整个值守子包丢失。
 - **`cli.py` 的 `if __name__ == "__main__"` 位于文件中段**：`guardian-start` 命令注册在
   其之后，直接 `python src/iris/cli.py` 会静默丢失该命令。已移至文件末尾。
+- **`EmulationResult.firmware_path` → `rootfs_dir`**：该字段唯一赋值处传入的是 rootfs 目录，
+  原名与实际语义不符。
+- **AI 值守的时间戳无时区**：`datetime.now()` 产出 naive datetime，一旦宿主时区变化或与
+  tz-aware 时间比较即抛 `TypeError`。全部改为 `datetime.now(UTC)`（`last_check` /
+  `start_time` / `uptime_seconds` / 动作时间戳），保证跨时区与夏令时下行为一致。
+- **CLI 退出码未抑制异常链**：`raise typer.Exit(...)` 跟在已打印过用户可见错误的
+  `except` 之后，Python 仍会把原异常挂到 `__context__` 上，调试输出里出现重复且误导的
+  双重报错。补 `from None`。
+- **guest 验证脚本里的目录名被宿主平台改写**：`mkdir -p {Path(VERIFY_LOG_PATH).parent}`
+  在 Windows 宿主上渲染成 `mkdir -p \etc\scripts`，而该行是要在 Linux chroot 里由
+  POSIX `sh` 执行的——反斜杠是转义符，这条命令实际创建的是 `./etcscripts`，
+  `/etc/scripts` 根本没建，裁决日志落不到预定位置。改为 POSIX 字面量常量
+  `VERIFY_LOG_DIR`；新增 `TestGuestScriptIsPosix` 断言生成的脚本不含任何反斜杠。
+- **`iris emulate status` 的容器不存在判定是死代码**：`subprocess.run(check=True)`
+  已经在非零退出时抛 `CalledProcessError`，其后的 `result.returncode != 0` 分支永不可达。
+  同时 `json.loads(...)[0]` 在容器于两次调用之间消失时会抛 `IndexError` 裸栈。改为先取
+  列表、判空后再取首元素。
+- **`iris emulate list/status` 未处理 docker 不可用**：`docker` 不在 PATH 时抛
+  `FileNotFoundError` 裸栈。补 `except OSError` 并给出明确提示。
+
+### 依赖
+
+- **`pyproject.toml` 漏声明 Web 层依赖**：`api/server.py` import `fastapi`、`cli.py` 的
+  `serve start` import `uvicorn`，但两者都不在 `dependencies` 里——全新环境
+  `pip install -e .` 后 `iris serve start` 直接 `ImportError`。已补
+  `fastapi>=0.110`、`uvicorn>=0.27`、`python-multipart>=0.0.9`（`UploadFile`/`File`
+  表单解析所需）；`httpx>=0.27` 归入 `dev`（`fastapi.testclient` 的传输层）。
 
 ### 变更
 
@@ -110,6 +137,20 @@
   计数一并输出最近故障上下文，报告从"有多少次"变成"长什么样"。
 - **AI 值守模块 docstring 校正**：原声明的四项能力中"预测性告警"与"兼容性矩阵追踪"
   从未实现，已删除该声明，只保留实际具备的三项。
+- **`orchestrator.py` 的 14 处 `print()` 改用 structlog**：进度输出此前绕过项目统一的
+  日志通道，既无法按级别过滤也无法落盘；同时把循环内的 `import re` 提到模块级、
+  `Image build output` 降为 `debug`（原本是直接吞掉最后 200 字节 stdout）。
+- **`determine_peb_size(data, ec_offsets)` 的 `data` 是死参数**：PEB 大小完全由 EC 头
+  偏移间距推导，函数体从未读 `data`；调用方与测试却必须为此传入镜像字节。已删除该
+  参数。
+- **`auto.py` 中重复定义的 `_pick_arch_from_counter`**：同名函数写了两遍，后者覆盖前者，
+  实际生效的是引用 `_ARCH_MAPPINGS` 的版本。删除重复定义。
+- **`SerialLogAnalyzer.PATTERNS` 标注 `ClassVar`**：字典类属性不带标注会被静态检查视为
+  实例可变状态。
+- **`ruff check` 告警清零**：本轮结束时 `ruff check .` 为 `All checks passed!`
+  （起始基线 50 项）。三处有意保留的宽边界捕获改为 `noqa` 并写明理由
+  （`auto.py` 的"提取永不抛异常只上报"契约、`cli.py` 的 arch 探测、值守 watch 循环的
+  存活性），而非机械收窄成具体异常类型——收窄会让未预料的异常穿透到调用方。
 
 ### 文档
 
@@ -122,6 +163,9 @@
 - `docs/05-crash-diagnosis.md` → `docs/05-崩溃归因.md`
 - `docs/06-stability-test.md` → `docs/06-稳定性验证.md`
 - `docs/07-arch-mapping-fix.md` → `docs/07-架构映射修复.md`
+- **规则条数表述校正**：README、`docx/免安装使用指南.md`、`docx/AI值守与稳定性治理.md`
+  中"7 条规则"按合并后的实测值改为 6 条，并同步修正被删除的
+  `generic-watchdog-guard.yaml` 在归并文档中的残留引用。
 
 ### 移除
 
@@ -132,12 +176,8 @@
 - 临时调试文件：根目录 `test_guardian.py`、`test_manual_usage.py`（硬编码本机绝对路径、
   且 `SerialLogAnalyzer(iid=...)` 参数写错因而从未成功运行；其覆盖内容已重写为
   `tests/test_guardian.py` 共 38 个用例）、`iris-home/scratch;C`（Windows 路径误转义产物）。
-- `auto.py` 中永不生效的分支（检查引擎从不产生的 `"SKIPPED(binary)"` 标记）。
-
-### 修复（字段命名）
-
-- `EmulationResult.firmware_path` → `rootfs_dir`：该字段唯一赋值处传入的是 rootfs 目录，
-  原名与实际语义不符。
+- `auto.py` 中永不生效的分支（检查引擎从不产生的 `"SKIPPED(binary)"` 标记），改为把
+  `Rule.warnings` 汇入 `PreparedRootfs.notes`——规则里的未知键不再被丢弃后无人知晓。
 
 ## [0.1.0] - 2026-09-28
 

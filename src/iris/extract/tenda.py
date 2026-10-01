@@ -18,7 +18,6 @@ from __future__ import annotations
 import io
 import re
 import shutil
-import struct
 import subprocess
 import zipfile
 from dataclasses import dataclass, field

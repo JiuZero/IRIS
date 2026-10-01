@@ -7,7 +7,7 @@ import struct
 import zipfile
 from pathlib import Path
 
-from iris.extract.firmware import analyze_firmware, identify_format, parse_uimage
+from iris.extract.firmware import analyze_firmware, identify_format
 from iris.extract.tenda import (
     SEGMENT_MARKER,
     TendaContainer,

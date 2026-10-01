@@ -1,7 +1,12 @@
-"""L2 QEMU configuration — build QEMU launch commands per architecture.
+"""L2 QEMU configuration — per-architecture emulator selection.
 
 Maps IRIS architecture strings to QEMU system emulators, machine types,
 disk interfaces, and network devices. Adapted from FirmAE's run scripts.
+
+This module answers *which* emulator to use. The actual command line is assembled
+by ``scripts/emulate/run_qemu.sh`` inside the emulation container, because the
+guest needs a TAP + bridge network that a user-mode ``hostfwd`` here cannot
+provide; keep ``_CONFIGS`` and that script in step when adding an architecture.
 """
 
 from __future__ import annotations
@@ -73,33 +78,3 @@ def get_config(arch: str) -> QemuConfig | None:
 
 def supported_archs() -> list[str]:
     return list(_CONFIGS.keys())
-
-
-def build_qemu_args(
-    config: QemuConfig,
-    image_path: str,
-    kernel_path: str,
-    host_port: int = 8080,
-    append_extra: str = "",
-) -> list[str]:
-    disk = config.disk_args.format(image=image_path)
-    append = (
-        f"firmadyne.syscall=1 root={config.rootfs_device} "
-        f"console=ttyS0 "
-        f"nandsim.parts=64,64,64,64,64,64,64,64,64,64 "
-        f"rw debug ignore_loglevel print-fatal-signals=1 "
-        f"FIRMAE_NET=true FIRMAE_NVRAM=true FIRMAE_KERNEL=true FIRMAE_ETC=true "
-        f"user_debug=31 {append_extra}"
-    ).strip()
-
-    return [
-        config.qemu_binary,
-        "-m", str(config.memory_mb),
-        "-M", config.machine,
-        "-kernel", kernel_path,
-        *disk.split(),
-        "-append", append,
-        "-display", "none",
-        "-device", f"{config.net_device},netdev=net0",
-        "-netdev", f"user,id=net0,hostfwd=tcp::{host_port}-:80",
-    ]

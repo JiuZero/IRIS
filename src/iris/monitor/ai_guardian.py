@@ -23,8 +23,9 @@ import re
 import subprocess
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import ClassVar
 
 from iris.log import get_logger
 
@@ -53,7 +54,7 @@ class ContainerHealthStatus:
     soft_lockup_events: int = 0
     #: active | started_but_stopped | not_started | unknown
     web_server_status: str = "unknown"
-    last_check: datetime = field(default_factory=datetime.now)
+    last_check: datetime = field(default_factory=lambda: datetime.now(UTC))
     anomalies: list[str] = field(default_factory=list)
     actions_taken: list[str] = field(default_factory=list)
     diagnoses: list[str] = field(default_factory=list)
@@ -62,7 +63,7 @@ class ContainerHealthStatus:
 class SerialLogAnalyzer:
     """Analyzes QEMU serial logs for failure patterns."""
 
-    PATTERNS = {
+    PATTERNS: ClassVar[dict[str, str]] = {
         'watchdog_reboot': r'Monitor:\s*process\s+\w+\s+is\s+die',
         'sysrq_reset': r'sysrq:\s*Resetting|echo.*b.*proc/sysrq-trigger',
         'reboot_attempt': r'reboot:\s*not found|reboot triggered',
@@ -143,7 +144,7 @@ class AIHealthMonitor:
         self.timeout = timedelta(minutes=timeout_minutes)
         self.status = ContainerHealthStatus(iid=iid)
         self.analyzer: SerialLogAnalyzer | None = None
-        self.start_time = datetime.now()
+        self.start_time = datetime.now(UTC)
         self.recovery_history: list[dict] = []
 
     # ------------------------------------------------------------------ logs
@@ -180,7 +181,7 @@ class AIHealthMonitor:
 
     def analyze_health(self) -> ContainerHealthStatus:
         """Perform one full health analysis pass."""
-        self.status.uptime_seconds = (datetime.now() - self.start_time).total_seconds()
+        self.status.uptime_seconds = (datetime.now(UTC) - self.start_time).total_seconds()
 
         log_path = self._get_serial_log_path()
         if not log_path or not log_path.is_file():
@@ -299,7 +300,7 @@ class AIHealthMonitor:
 
     def execute_recovery(self, action: str) -> bool:
         """Run a recommended recovery action and record the outcome."""
-        stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        stamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
         handlers = {
             ACTION_WATCHDOG: self._apply_watchdog_fixes,
             ACTION_RESOURCE: self._cleanup_resources,
@@ -439,7 +440,7 @@ exit 0
         )
         while True:
             try:
-                self.status.uptime_seconds = (datetime.now() - self.start_time).total_seconds()
+                self.status.uptime_seconds = (datetime.now(UTC) - self.start_time).total_seconds()
                 status = self.analyze_health()
                 if status.state != "healthy":
                     action = self.recommend_recovery_action()
@@ -452,7 +453,7 @@ exit 0
             except KeyboardInterrupt:
                 logger.info(f"AI Guardian stopped monitoring container {self.iid}")
                 return
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - a watch loop must outlive any single failure
                 # A transient failure must not end the watch; back off and retry.
                 logger.error(f"monitoring error for container {self.iid}: {exc}")
                 time.sleep(60)

@@ -185,9 +185,9 @@ class TestAnalyzeHealth:
         assert status.web_server_status == "unknown"
 
     def test_uptime_is_measured_outside_the_loop(self, monitor):
-        from datetime import timedelta
+        from datetime import UTC, timedelta
 
-        monitor.start_time = datetime.now() - timedelta(seconds=90)
+        monitor.start_time = datetime.now(UTC) - timedelta(seconds=90)
         monitor.analyze_health()
         assert monitor.status.uptime_seconds >= 90
 

@@ -10,9 +10,11 @@ import yaml
 
 from iris.rules.engine import (
     GUEST_SCRIPT_PATH,
+    VERIFY_LOG_DIR,
     VERIFY_LOG_PATH,
     Rule,
     _can_judge_executable,
+    _verify_lines,
     apply_rules,
     load_rules,
 )
@@ -421,3 +423,29 @@ class TestGuestScriptIsAscii:
         script = (rootfs / GUEST_SCRIPT_PATH).read_text(encoding="utf-8")
         assert script.isascii()
         assert "-> .iris-disabled" in script
+
+class TestGuestScriptIsPosix:
+    """The script runs in a Linux chroot; host-OS separators must never reach it.
+
+    Deriving a guest path with ``Path(...)`` renders backslashes on Windows, and
+    POSIX sh reads a backslash as an escape — so ``mkdir -p /etc/scripts`` with
+    host separators silently creates ``./etcscripts`` and the verdict log lands
+    nowhere.
+    """
+
+    def test_verify_lines_use_posix_paths(self, tmp_path):
+        rule = Rule(id="v", description="", stage="service", detect=[{"always": True}],
+                    actions=[], post_action_verify={"health_check": {"command": "true"}})
+        lines = _verify_lines(rule, rule.post_action_verify)
+        assert f"mkdir -p {VERIFY_LOG_DIR} " in "\n".join(lines)
+        assert VERIFY_LOG_DIR == "/etc/scripts"
+
+    def test_generated_script_has_no_backslashes(self, tmp_path):
+        rootfs = tmp_path / "rootfs"
+        rootfs.mkdir()
+        rule = Rule(id="v", description="", stage="service", detect=[{"always": True}],
+                    actions=[{"guest_shell": ["mkdir -p /etc/scripts"]}],
+                    post_action_verify={"health_check": {"command": "true"}})
+        apply_rules(rootfs, [rule], dry_run=False)
+        script = (rootfs / GUEST_SCRIPT_PATH).read_text(encoding="utf-8")
+        assert "\\" not in script

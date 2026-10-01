@@ -77,10 +77,6 @@ def identify_elf(data: bytes) -> ArchInfo | None:
     )
 
 
-def identify_file(path: Path) -> ArchInfo | None:
-    with open(path, "rb") as fh:
-        return identify_elf(fh.read(20))
-
 
 def identify_tar_members(archive: Path, max_samples: int = 80) -> Counter:
     """Scan regular files inside a tar/tar.gz archive and count arch labels."""

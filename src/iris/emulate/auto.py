@@ -15,7 +15,8 @@ import socket
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from iris.extract.rootfs_extract import extract_rootfs as do_extract, classify_failure
+from iris.extract.rootfs_extract import _census_elfs
+from iris.extract.rootfs_extract import extract_rootfs as do_extract
 from iris.rules.engine import apply_rules, load_rules
 
 
@@ -34,7 +35,7 @@ class PreparedRootfs:
     notes: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_error(cls, reason: str) -> "PreparedRootfs":
+    def from_error(cls, reason: str) -> PreparedRootfs:
         return cls(rootfs_dir=Path("."), failure_reason=reason, arch="")
 
 
@@ -58,7 +59,7 @@ def pick_host_port(preferred: int = 0, start: int = 8080, stop: int = 8199) -> i
     raise RuntimeError(f"no free port found in [{start}, {stop}]")
 
 
-# Map ELF census arch labels to runnable QEMU kernels
+#: ELF census arch labels -> runnable QEMU kernel labels.
 _ARCH_MAPPINGS = {
     "mipsel": "mipsel",
     "mipseb": "mipseb",
@@ -67,28 +68,18 @@ _ARCH_MAPPINGS = {
 }
 
 
-def _pick_arch_from_counter(counter):
-    """Map ELF census arch → runnable kernel label."""
+def _pick_arch_from_counter(counter) -> str:
+    """Map the dominant ELF census label to a runnable kernel label.
+
+    ``aarch64`` is the ELF standard name while ``arm64`` is what the kernel
+    assets and ``run_qemu.sh`` call it, so the mapping has to exist; without it
+    an aarch64 guest is reported as an unknown architecture and never auto-selected.
+    """
     known = {a: n for a, n in counter.items() if not a.startswith("unk(")}
     if not known:
         return ""
     dominant = max(known, key=known.get)
     return _ARCH_MAPPINGS.get(dominant, "")
-
-
-def _pick_arch_from_counter(counter):
-    """Map ELF census arch → runnable kernel label."""
-    mapping = {
-        "mipsel": "mipsel",
-        "mipseb": "mipseb",
-        "armel": "armel",
-        "aarch64": "arm64",
-    }
-    known = {a: n for a, n in counter.items() if not a.startswith("unk(")}
-    if not known:
-        return ""
-    dominant = max(known, key=known.get)
-    return mapping.get(dominant, "")
 
 
 def prepare_from_firmware(
@@ -105,7 +96,7 @@ def prepare_from_firmware(
 
     try:
         result = do_extract(firmware, scratch_dir, arch_hint=arch_hint)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - contract: extraction never raises, it reports
         return PreparedRootfs.from_error(f"extraction error: {e}")
 
     if result.rootfs_dir is None:
@@ -139,8 +130,8 @@ def prepare_from_firmware(
             for r in reports:
                 if r.matched:
                     prepared.matched_rule_ids.append(r.rule_id)
-                    if "SKIPPED(binary)" in r.detail:
-                        prepared.notes.append(f"rule {r.rule_id}: skipped binary edits")
+                    for warning in r.warnings:
+                        prepared.notes.append(f"rule {r.rule_id}: {warning}")
                 else:
                     prepared.failed_rule_ids.append(r.rule_id)
             prepared.notes.append(
@@ -160,7 +151,6 @@ def prepare_from_rootfs(rootfs_dir: Path, rules_dir: Path | None = None) -> Prep
     )
 
     # Try to infer arch from rootfs ELF census
-    from iris.extract.rootfs_extract import _census_elfs
 
     count, counter = _census_elfs(rootfs_dir)
     prepared.elf_count = count
