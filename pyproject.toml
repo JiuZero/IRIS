@@ -38,4 +38,8 @@ src = ["src", "tests"]
 ignore = ["B008"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests"]# src-layout: 默认的 prepend 导入模式会把仓库根目录塞进 sys.path[0]，而根目录
+# 有调试入口 iris.py——它会抢在 src/iris 之前被 `import iris` 命中。importlib
+# 模式不做路径注入，src 由 pythonpath 显式提供，两者不再互相干扰。
+addopts = "--import-mode=importlib"
+pythonpath = ["src"]

@@ -52,6 +52,19 @@ iris serve start                                   # docs: http://127.0.0.1:9000
 curl -F "file=@firmware.bin" http://127.0.0.1:9000/api/v1/pipeline
 ```
 
+**调试入口 / Debug entrypoint**：根目录 `iris.py` 与 `iris` 命令、`python -m iris.cli` 完全等价，
+但它是个真实文件，IDE 的"调试当前文件"可直接打上断点跑通整条 CLI 链路，无需配置 module 与工作目录：
+
+```bash
+python iris.py --help
+python iris.py rules list
+python iris.py emulate run ./rootfs_out --arch mipsel --port 8080
+```
+
+> 因项目为 src-layout 且该文件名与包同名 `iris`，`pytest` 已改用 `--import-mode=importlib`
+> 并显式声明 `pythonpath = ["src"]`；否则仓库根目录会被插到 `sys.path[0]`，`import iris`
+> 会先命中 `iris.py` 而非 `src/iris` 包。
+
 `iris emulate run` 的输出即"失败可归因"的入口：`success / web ok / web url / duration / error / 串口日志尾部`；
 完整日志在 `iris-home/scratch/<iid>/qemu.serial.log`，排查顺序见 docs/04-快速部署.md 第 7 节故障速查表。
 

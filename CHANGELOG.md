@@ -6,7 +6,34 @@
 
 ## [未发布]
 
-暂无。下一批改动将在此累积。
+### 新增
+
+- **根目录调试入口 `iris.py`**：与 `iris` 命令、`python -m iris.cli` 完全等价，但作为
+  真实文件存在，IDE 的"调试当前文件"可直接打上断点跑通整条 CLI 链路，无需手工配置
+  module 与工作目录。同时导出 `app`（Typer 应用对象）与 `main`，便于在调试器里直接构造
+  `CliRunner` 用例。
+- **`tests/test_debug_entrypoint.py`**（7 例）：把调试入口的两条保证钉成回归——
+  脚本形态转发到 CLI 且输出与 `python -m iris.cli` 逐字一致；包形态下 `iris.cli`
+  仍解析到 `src/iris/cli.py`、`__version__` 来自真包 `__init__.py`。
+
+### 修复
+
+- **`iris.py` 被当作包导入时必须代理，否则 `python -m iris.cli` 直接失效**：`-m` 会把
+  当前工作目录放进 `sys.path[0]`，runpy 解析 `iris.cli` 前先导入父包 `iris`，抢在
+  `src/iris` 之前命中调试脚本，报 `No module named 'iris.cli'; 'iris' is not a package`。
+  `iris.py` 现按 `__name__` 分两种身份：`__main__` 时转发到 `main()`；`iris` 时把
+  `__path__` 指向 `src/iris` 并执行真包 `__init__.py`，使 `iris.cli` / `iris.api`
+  等子模块照常解析。
+- **pytest 默认 prepend 导入模式会把仓库根目录插到 `sys.path[0]`**：同样让
+  `from iris.api.server import app` 命中 `iris.py`，`tests/test_api.py` 收集期报错。
+  测试侧改用 `--import-mode=importlib` 并显式声明 `pythonpath = ["src"]`，不再做
+  路径注入——顺带让测试进程里的 `iris` 就是安装后的真包，而非代理模块。
+
+### 变更
+
+- **`iris.py` 无条件把 `src` 移到 `sys.path` 首位**：editable 安装（`pip install -e .`）
+  已经把 `src` 加进 `sys.path`，原先"不在才插入"的写法会跳过，根目录仍排在 `src` 之前，
+  `python iris.py` 直接启动失败。改为先 remove 再 insert。
 
 ## [0.2.0] - 2026-10-01
 
