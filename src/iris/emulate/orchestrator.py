@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from iris.arch import census_to_runnable, is_little_endian, normalize_arch
 from iris.emulate.qemu_config import get_config, supported_archs
 from iris.failures import BootDiagnosis, Failure, FailureKind
 from iris.fsutil import safe_is_file, safe_present, safe_read_text, safe_stat_size
@@ -241,14 +242,6 @@ def _failure_diagnosis(container_name: str, iid: int, *, reboots: int = 0) -> Bo
         )
     return diagnose_boot_failure(res.stdout, reboots=reboots)
 
-# maps an ELF-census arch label (L1 vocabulary) to the emulation arch that can run it
-_CENSUS_TO_RUNNABLE = {
-    "mipsel": "mipsel",
-    "mipseb": "mipseb",
-    "armel": "armel",
-    "aarch64": "arm64",
-}
-
 
 def preflight_arch(rootfs_dir: Path, arch: str) -> Failure | None:
     """Validate the requested arch before spinning up docker.
@@ -257,6 +250,7 @@ def preflight_arch(rootfs_dir: Path, arch: str) -> Failure | None:
       UNSUPPORTED_ARCH: requested arch has no QEMU config
       ARCH_MISMATCH:    rootfs ELF census disagrees with the requested arch
     """
+    arch = normalize_arch(arch)
     supported = supported_archs()
     if arch not in supported:
         return Failure(
@@ -272,8 +266,21 @@ def preflight_arch(rootfs_dir: Path, arch: str) -> Failure | None:
     if not known:
         return None  # no ELF evidence (script-only rootfs etc.) — can't judge
     dominant = max(known, key=known.get)
-    runnable = _CENSUS_TO_RUNNABLE.get(dominant)
-    if runnable and runnable != arch:
+    runnable = census_to_runnable(dominant)
+    if not runnable:
+        # A real architecture with no kernel here -- armeb, mips64, x64. Starting
+        # it anyway fails as "the emulator is broken" rather than "this arch is
+        # unsupported", and the user has no way to tell the two apart from the
+        # outside. Refusing with the reason is the recoverable answer.
+        return Failure(
+            FailureKind.UNSUPPORTED_ARCH,
+            f"rootfs is dominated by {dominant} ELFs ({known[dominant]} samples), "
+            f"and no kernel for that architecture exists "
+            f"(supported: {', '.join(supported)})",
+            evidence={"dominant": dominant, "samples": known[dominant],
+                      "supported": list(supported)},
+        )
+    if runnable != arch:
         return Failure(
             FailureKind.ARCH_MISMATCH,
             f"rootfs is dominated by {dominant} ELFs "
@@ -765,7 +772,7 @@ def _emulate_firmware(
                     m = re.search(r"ifa:0x([0-9a-f]+)", line)
                     if m:
                         raw = int(m.group(1), 16)
-                        if arch in ("mipsel", "armel", "arm64"):
+                        if is_little_endian(arch):
                             ip = f"{raw & 0xFF}.{(raw >> 8) & 0xFF}.{(raw >> 16) & 0xFF}.{(raw >> 24) & 0xFF}"
                         else:
                             ip = f"{(raw >> 24) & 0xFF}.{(raw >> 16) & 0xFF}.{(raw >> 8) & 0xFF}.{raw & 0xFF}"

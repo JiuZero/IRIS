@@ -15,6 +15,7 @@ import socket
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from iris.arch import census_to_runnable
 from iris.extract.rootfs_extract import _census_elfs
 from iris.extract.rootfs_extract import extract_rootfs as do_extract
 from iris.fsutil import safe_is_dir
@@ -60,27 +61,20 @@ def pick_host_port(preferred: int = 0, start: int = 8080, stop: int = 8199) -> i
     raise RuntimeError(f"no free port found in [{start}, {stop}]")
 
 
-#: ELF census arch labels -> runnable QEMU kernel labels.
-_ARCH_MAPPINGS = {
-    "mipsel": "mipsel",
-    "mipseb": "mipseb",
-    "armel": "armel",
-    "aarch64": "arm64",  # ELF standard name -> QEMU kernel label
-}
-
-
 def _pick_arch_from_counter(counter) -> str:
     """Map the dominant ELF census label to a runnable kernel label.
 
     ``aarch64`` is the ELF standard name while ``arm64`` is what the kernel
     assets and ``run_qemu.sh`` call it, so the mapping has to exist; without it
     an aarch64 guest is reported as an unknown architecture and never auto-selected.
+    The mapping itself lives in :mod:`iris.arch` -- this used to be a private dict
+    byte-identical to ``orchestrator._CENSUS_TO_RUNNABLE``, kept in step by hand.
     """
     known = {a: n for a, n in counter.items() if not a.startswith("unk(")}
     if not known:
         return ""
     dominant = max(known, key=known.get)
-    return _ARCH_MAPPINGS.get(dominant, "")
+    return census_to_runnable(dominant)
 
 
 def prepare_from_firmware(

@@ -422,7 +422,26 @@ docker exec iris-qemu-<iid> strace -f /opt/goahead/goahead 2>&1 \
 由测试双向守卫，新增成员未配 stage 会直接变红。
 
 尚未收口：语料登记名 `image.arch`（`aarch64`）与运行时名 `emulation_run.arch`
-（`arm64`）尚非同一套词表，`db stats` 的 arch 分组暂不能与语料表直接对齐（P1-a）。
+（`arm64`）尚非同一套词表，`db stats` 的 arch 分组暂不能与语料表直接对齐。
+
+### 6.2 架构命名已收口为单一权威（0.3.8）
+
+上面那条遗留的前半段已解决：`src/iris/arch.py` 现在是架构命名的唯一权威，
+`normalize_arch()` 把 `aarch64` / `arm64` / `arm64le` 归一到内核资产名。收口前这个
+名字有八个家（两份内联 dict、两份私有副本、三份各自的 `e_machine` 解析、一份自创的
+`arm64le`），漂移已经实际生效——API 层把 `aarch64` 判为不支持，而这正是 ELF 头写的名字。
+
+对值守闭环的意义：失败归因此前有一个静默出口。guest 识别为 `aarch64` 而启动器只认
+`arm64` 时，失败会被记成「未知架构」，进不了任何可聚合的分类。现在这类失败统一走
+`iris.failures` 的既有 kind，直方图能看见它。
+
+QEMU 设备模型同时补全为 `run_qemu.sh` 的镜像，并由 `tests/test_qemu_config_matches_script.py`
+逐字段比对两侧。跨语言无法共用一份数据源，一致性守卫是替代方案：此前 Python 侧的
+8 个字段在生产代码中零消费，脚本 arm64 分支的 `-cpu max` / `console=ttyAMA0` /
+initramfs 三个设置 Python 侧连字段都没有，而 `-cpu max` 直接决定 guest 是否 SIGILL。
+
+仍未收口的是另一半：`image.arch` 的历史登记值仍是 `aarch64`，与落库的 `arm64` 对不上。
+这需要一个迁移决策（改历史行 or 改查询口径），本次未做。
 
 ---
 

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import typer
 
+from iris.arch import census_to_runnable, normalize_arch
 from iris.config import get_settings
 from iris.db.engine import get_engine, init_db, make_session
 from iris.failures import Failure, FailureKind
@@ -418,7 +419,10 @@ def emulate_run(
     target: Path = typer.Argument(..., help="firmware .bin or extracted rootfs directory"),
     arch: str = typer.Option(
         "auto",
-        help="target architecture (mipsel/mipseb/armel/arm64) or 'auto' for ELF census inference",
+        help=(
+            "target architecture (mipsel/mipseb/armel/arm64; the ELF spellings "
+            "aarch64/arm64le are accepted too) or 'auto' for ELF census inference"
+        ),
     ),
     iid: int = typer.Option(0, help="image ID for scratch directory naming"),
     port: int = typer.Option(8080, help="host port for web access (use 0 to pick a free one)"),
@@ -486,22 +490,25 @@ def emulate_run(
             out.info(f"L3 rules matched: {', '.join(applied_rules)}")
         rootfs = target
 
-    # Preflight arch check against the actual chosen arch (apply arch mapping first)
-    if inferred_arch and not inferred_arch.startswith("unk("):
-        # Map ELF census names to QEMU kernel labels
-        arch_map = {"mipsel": "mipsel", "mipseb": "mipseb", "armel": "armel", "aarch64": "arm64"}
-        checked_arch = arch_map.get(inferred_arch, inferred_arch)
-        problem = preflight_arch(rootfs, checked_arch) if not force else None
+    # One normaliser for every spelling a caller may use: the ELF census reports
+    # `aarch64`, the kernel assets and --arch take `arm64`, and extract/arch.py
+    # still reports `arm64le`. This used to be two inline copies of a four-entry
+    # dict in this function plus a third in auto.py and a fourth in orchestrator.py.
+    selected_arch = ""
+    if inferred_arch:
+        selected_arch = census_to_runnable(inferred_arch) or normalize_arch(inferred_arch)
+
+    # Preflight is the authority on whether an architecture can be emulated; it
+    # also rejects a rootfs whose dominant architecture has no kernel here.
+    if selected_arch and not selected_arch.startswith("unk("):
+        problem = preflight_arch(rootfs, selected_arch) if not force else None
         if problem:
             err.error(f"preflight: {problem}")
             err.warning("(override with --force)")
             raise typer.Exit(code=3)
 
-    selected_arch = inferred_arch if inferred_arch else "auto"
-    # Apply arch mapping for selected_arch too
-    if selected_arch != "auto":
-        arch_map = {"mipsel": "mipsel", "mipseb": "mipseb", "armel": "armel", "aarch64": "arm64"}
-        selected_arch = arch_map.get(selected_arch, selected_arch)
+    if not selected_arch:
+        selected_arch = "auto"
 
     # If still auto after all inference attempts, show error
     if selected_arch == "auto":

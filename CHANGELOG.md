@@ -4,6 +4,91 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.8] - 2026-10-02
+
+新增架构此前要改八处，而且已经改乱了：`cli.py` 里两份逐字相同的内联 dict、
+`emulate/auto.py` 与 `emulate/orchestrator.py` 各一份私有副本、提取层三份各自实现的
+`e_machine` 解析（其中两份对大端 ARM 一律报 `armel`），再加 `extract/arch.py` 自己发明的
+第四种写法 `arm64le`。这些副本的漂移是实际生效的：API 层把 `aarch64` 判为不支持，而这正是
+ELF 头里写的名字。
+
+### 新增（`src/iris/arch.py`：架构命名的唯一权威）
+
+- **`normalize_arch()`**：任意拼法归一到内核资产名。`aarch64` / `arm64` / `arm64le` /
+  `ARM64` 都得到 `arm64`；未知名字原样返回，让报错能引用调用方真正给的东西。
+- **`census_to_runnable()`**：ELF census 标签 → 可启动架构，不可启动返回 `""`（调用方据此
+  继续看下一个信号）。`x64` / `mips64le` / `armeb` 不映射到任何现有内核——大端 ARM 跑在
+  小端 `zImage.armel` 上会执行完 init 脚本再 misexec，mips64 跑 `vmlinux.mipsel.4` 同理。
+- **`census_label()`**：`e_machine` + 端序 + 位宽 → 标签的唯一实现，含 64 位 MIPS 与 32 位
+  MIPS 的区分。
+- **`LITTLE_ENDIAN_ARCHS` / `is_little_endian()`**：从串口日志解码 guest 地址时用。判错会
+  得到一个「看起来合理」的错地址而不是显性失败，`mipseb` 是唯一大端成员。
+
+### 修复（收口过程中暴露的真实缺陷）
+
+- **API 层读 ELF 时无视 `EI_DATA`**：`int.from_bytes(data[18:20], "little")` 硬编码小端，
+  大端 MIPS 的 `e_machine` 8 被解成 2048，落到 `unk` 分支。改用 `identify_elf`。
+- **API 层拒绝 `aarch64`**：现在先归一化再判定，拒绝时列出支持列表。
+- **`FIRMAE_SUPPORTED_ARCHS` 答的是别的问题**：它答「FirmAE 能不能」，而调用方要的是
+  「IRIS 能不能」，两者矛盾——arm64 在这里能跑（自有 `Image.arm64` + initramfs）而那个集合
+  说不能。该集合删除，`ArchInfo.firmae_supported` 更名 `runnable`，判定来源改为
+  `census_to_runnable`。
+- **`preflight_arch` 对真架构但无内核的情况放行**：大端 ARM 固件会被放去启动，报出来的是
+  「仿真器坏了」而不是「这个架构没内核」，用户无从分辨。现在返回 `UNSUPPORTED_ARCH`。
+- **`census_label` 缺位宽参数会把 64 位 MIPS 标成 `mipsel`**：共享 `e_machine` 8，
+  误标等于给 64 位用户空间配 32 位内核。端序不可知时返回 `mips` / `arm`（机器已知、
+  决定标签的那一个事实未知）而不是猜一个 `mipsel`——固件镜像里截断的厂商 blob 会走到这条
+  路径，`census_to_runnable` 对这两个标签一律拒绝。
+- **`EM_*` 常量与标签映射分居两处**：收口时新引入的重复——`iris/arch.py` 的 `_EM_LABELS`
+  用裸数字，而 `extract/arch.py` 另有一份 `EM_MIPS = 8` 命名常量。常量搬到权威模块，
+  `extract/arch.py` 改为 re-export，`iris.arch` 不反向依赖提取层。
+
+### 变更
+
+- **`qemu_config.py` 补全为 `run_qemu.sh` 的镜像**：新增 `cpu` / `console` / `initramfs`
+  字段，删除名不副实且无消费的 `net_device` / `net_backend`（后者被填成了同一个设备模型名）。
+  此前 dataclass 的 8 个字段在生产代码中**零消费**——唯一调用是 `get_config(arch) is None`
+  判定位——而脚本 arm64 分支里的 `-cpu max`、`console=ttyAMA0`、initramfs 三个设置 Python
+  侧连字段都没有。`-cpu max` 不是细节：`cortex-a72` 无法执行厂商 aarch64 二进制的 ARMv8.3
+  pointer-auth，guest 会 SIGILL。
+- **`tests/test_qemu_config_matches_script.py`**：解析脚本的 `case` 块（不是 grep 字符串），
+  逐字段比对两侧。跨语言无法复用同一份数据源，所以用一致性守卫替代。Python 侧字段此前
+  无人读取，也就无人会注意到它错了。
+- **守卫 `tests/test_arch.py`**：除行为测试外，反向断言旧副本不能回来——禁止模块自定义
+  架构映射（扫源码找 `"aarch64": "arm64"` 这种形状）、要求每个映射 arch 的模块都经过
+  权威入口、禁止 `FIRMAE_SUPPORTED_ARCHS` 复活（只匹配代码行，不匹配解释移除原因的注释）、
+  要求 `RunnableArch` 与 QEMU 配置集合相等。白名单只保留 `arch.py` 与 `qemu_config.py`：
+  `api/server.py` 与 `cli.py` 是在内联 dict 删除之后才退出的，一条没人需要的豁免就是一个
+  守卫再也看不穿的洞。
+
+### 测试修正
+
+- **`tests/test_preflight.py` 的 ELF 夹具硬编码 `EI_CLASS=2`**：即造出 64 位二进制。census
+  从不读该字段，所以 mips64 被报成 `mipsel`，整份文件是在一个谎上通过的。读位宽之后转红，
+  夹具改为显式参数化。
+
+### 实测（TES7002 arm64 真实固件）
+
+| 步骤 | 结果 |
+|---|---|
+| `iris emulate run <rootfs>`（**完全省略 `--arch`**） | census 产 `aarch64` → 归一化 `arm64`，80s Web 可达 |
+| 落库 | `emulation_run` 2 行，均 `arch=arm64` / `image_id=11` |
+| `iris db stats` | `2 recorded run(s)` / `web reachable 2/2 (100.0%)` |
+
+### 变异验证（7 项，全部如期变红并恢复）
+
+Python 表丢掉 `-cpu max` / 脚本把 `-cpu max` 改回 `cortex-a72`（精确模拟 SIGILL bug）/
+脚本单侧把 `mipsel)` 改名 `mipsel64)` / 去掉 `census_to_runnable` 的字节序防护 /
+删除 `aarch64` 别名（7 个测试红，含 `test_preflight` 的 aarch64 用例）/
+把内联 `arch_map` 加回 `cli.py`（守卫收紧后立即变红）/
+把 `EM_MIPS = 8` 改成 `80`（5 个测试红）。
+
+### 遗留
+
+- `image.arch` 登记名与 `emulation_run.arch` 运行时名的口径差异仍在：归一化后
+  `aarch64` 在进入编排器时就变成 `arm64`，而语料表里是 `aarch64`。两份数据的对齐需要一个
+  迁移决策（改历史行 or 改查询），本次未做。
+
 ## [0.3.7] - 2026-10-02
 
 ### 新增（仿真结果落库，此前每张统计表都是手工填的）

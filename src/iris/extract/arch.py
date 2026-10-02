@@ -1,8 +1,14 @@
 """ELF header based architecture identification (L1).
 
 Maps e_machine + endianness to firmadyne/FirmAE style arch labels:
-mipseb / mipsel / armel (+ informational x86 / x64 / ppc / arm64 ...).
+mipseb / mipsel / armel (+ informational x86 / x64 / ppc / arm64le ...).
 Only the first 20 bytes of the file are required.
+
+The labels produced here are the *census* vocabulary, deliberately including
+architectures nothing can boot (``armeb``, ``x64``, ``ppcle``) because the
+question this module answers is "what does the firmware contain", not "what can
+we start". :mod:`iris.arch` translates a label to a runnable architecture and is
+the only place that mapping exists.
 """
 
 import struct
@@ -10,16 +16,34 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+from iris.arch import (
+    EM_AARCH64,
+    EM_ARM,
+    EM_I386,
+    EM_MIPS,
+    EM_PPC,
+    EM_X86_64,
+    census_label,
+    census_to_runnable,
+)
+
 ELF_MAGIC = b"\x7fELF"
 
-EM_MIPS = 8
-EM_PPC = 20
-EM_I386 = 3
-EM_ARM = 40
-EM_X86_64 = 62
-EM_AARCH64 = 183
-
-FIRMAE_SUPPORTED_ARCHS = frozenset({"mipseb", "mipsel", "armel"})
+# Re-exported, not redefined: these name the same ELF numbers the census labels in
+# iris.arch are built from, and two copies of a number is one of the ways this
+# vocabulary drifted in the first place.
+__all__ = [
+    "ELF_MAGIC",
+    "EM_AARCH64",
+    "EM_ARM",
+    "EM_I386",
+    "EM_MIPS",
+    "EM_PPC",
+    "EM_X86_64",
+    "ArchInfo",
+    "identify_elf",
+    "identify_tar_members",
+]
 
 
 @dataclass(frozen=True)
@@ -27,25 +51,25 @@ class ArchInfo:
     arch: str
     bits: int
     endianness: str  # "le" / "eb"
-    firmae_supported: bool
+    #: Whether IRIS has a kernel that can boot this architecture.
+    #:
+    #: This used to be read off a hardcoded `FIRMAE_SUPPORTED_ARCHS` of
+    #: {mipseb, mipsel, armel}, which answered a different question: whether
+    #: *FirmAE* could. The two disagreed -- arm64 boots here (Image.arm64 plus
+    #: its own initramfs) while that set said it could not -- and the set was the
+    #: one a caller would reach for. The emulator's own configuration is now the
+    #: answer, so "supported" cannot drift away from what actually starts.
+    runnable: bool
 
 
 def _map_arch(e_machine: int, bits: int, endianness: str) -> str | None:
-    if e_machine == EM_MIPS and bits == 32:
-        return "mipseb" if endianness == "eb" else "mipsel"
-    if e_machine == EM_MIPS and bits == 64:
-        return "mips64" + endianness
-    if e_machine == EM_ARM and bits == 32:
-        return "armeb" if endianness == "eb" else "armel"
-    if e_machine == EM_AARCH64:
-        return "arm64" + endianness
-    if e_machine == EM_I386:
-        return "x86"
-    if e_machine == EM_X86_64:
-        return "x64"
-    if e_machine == EM_PPC:
-        return "ppc" + endianness
-    return None
+    if e_machine in (EM_I386, EM_X86_64) and bits != (32 if e_machine == EM_I386 else 64):
+        # A 64-bit e_machine in a 32-bit class, or the reverse, means the header
+        # is inconsistent rather than unusual -- there is no such architecture to
+        # name, and reporting one would attribute the failure to the emulator.
+        return None
+    label = census_label(e_machine, endianness, bits)
+    return None if label.startswith("unk(") else label
 
 
 def identify_elf(data: bytes) -> ArchInfo | None:
@@ -73,7 +97,7 @@ def identify_elf(data: bytes) -> ArchInfo | None:
         arch=arch,
         bits=bits,
         endianness=endianness,
-        firmae_supported=arch in FIRMAE_SUPPORTED_ARCHS,
+        runnable=bool(census_to_runnable(arch, endianness)),
     )
 
 

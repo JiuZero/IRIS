@@ -11,9 +11,11 @@ from typing import Any
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
+from iris.arch import normalize_arch
 from iris.config import get_settings
 from iris.emulate.orchestrator import emulate_firmware, preflight_arch, stop_emulation
 from iris.emulate.qemu_config import supported_archs
+from iris.extract.arch import identify_elf
 from iris.fsutil import safe_is_dir, safe_present
 
 _SUPPORTED_ARCHS = tuple(supported_archs())
@@ -80,16 +82,14 @@ async def list_firmware() -> list[FirmwareInfo]:
                             data = f.read_bytes()[:20]
                         except OSError:
                             continue
-                        if len(data) >= 18 and data[:4] == b"\x7fELF":
-                            ei_data = data[5]
-                            ei_machine = int.from_bytes(data[18:20], "little")
-                            endian = "el" if ei_data == 1 else "eb"
-                            if ei_machine == 8:
-                                arch = f"mips{endian}"
-                            elif ei_machine == 40:
-                                arch = "armel"
-                            elif ei_machine == 183:
-                                arch = "aarch64"
+                        # The same census every other layer uses. This used to be
+                        # a fourth copy of the e_machine switch, and it read the
+                        # field with a hardcoded "little" regardless of EI_DATA --
+                        # so a big-endian MIPS binary decoded e_machine 8 into
+                        # 2048 and fell through to the `unk` case.
+                        info = identify_elf(data)
+                        if info is not None:
+                            arch = info.arch
                             break
                 result.append(FirmwareInfo(name=d.name, path=str(d), arch=arch))
     return result
@@ -101,10 +101,18 @@ async def emulate(req: EmulateRequest) -> EmulateResponse:
     if not safe_is_dir(rootfs):
         raise HTTPException(status_code=404, detail=f"rootfs not found: {req.rootfs_path}")
 
-    if req.arch not in _SUPPORTED_ARCHS:
-        raise HTTPException(status_code=400, detail=f"unsupported arch: {req.arch}")
+    # A caller that read the architecture off an ELF header sends `aarch64`; the
+    # kernel asset is `arm64`. Rejecting that spelling with "unsupported arch"
+    # pointed at the wrong thing -- the architecture was supported, the string was
+    # not translated.
+    arch = normalize_arch(req.arch)
+    if arch not in _SUPPORTED_ARCHS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported arch: {req.arch} (supported: {', '.join(_SUPPORTED_ARCHS)})",
+        )
 
-    problem = await asyncio.to_thread(preflight_arch, rootfs, req.arch)
+    problem = await asyncio.to_thread(preflight_arch, rootfs, arch)
     if problem:
         raise HTTPException(status_code=400, detail=f"preflight: {problem.message}")
 
@@ -116,7 +124,7 @@ async def emulate(req: EmulateRequest) -> EmulateResponse:
     result = await asyncio.to_thread(
         emulate_firmware,
         rootfs_dir=rootfs,
-        arch=req.arch,
+        arch=arch,
         iid=iid,
         scratch_dir=scratch,
         host_port=req.port,
@@ -125,7 +133,7 @@ async def emulate(req: EmulateRequest) -> EmulateResponse:
 
     _active_emulations[iid] = {
         "iid": iid,
-        "arch": req.arch,
+        "arch": arch,
         "success": result.success,
         "web_ok": result.web_ok,
         "web_url": result.web_url,

@@ -13,12 +13,12 @@ from __future__ import annotations
 import os
 import re
 import shutil
-import struct
 import subprocess
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+from iris.extract.arch import identify_elf
 from iris.extract.firmware import FirmwareInfo, analyze_firmware
 from iris.extract.ubi import extract_squashfs_from_ubi
 from iris.failures import Failure, FailureKind
@@ -183,31 +183,20 @@ def _census_elfs(rootfs_dir: Path) -> tuple[int, Counter]:
             path = os.path.join(root, f)
             try:
                 with open(path, "rb") as fh:
-                    magic = fh.read(4)
-                    if magic != b"\x7fELF":
-                        continue
-                    fh.seek(5)
-                    ei_data = ord(fh.read(1))
-                    fh.seek(18)
-                    e_machine = struct.unpack("<H" if ei_data == 1 else ">H", fh.read(2))[0]
-                    if e_machine == 8:
-                        arch = "mipsel" if ei_data == 1 else "mipseb"
-                    elif e_machine == 40:
-                        arch = "armel"
-                    elif e_machine == 62:
-                        arch = "x64"
-                    elif e_machine == 3:
-                        arch = "x86"
-                    elif e_machine == 183:
-                        arch = "aarch64"
-                    else:
-                        arch = f"unk({e_machine})"
-                    counter[arch] += 1
+                    header = fh.read(20)
+                # One census implementation, shared with firmware.py and
+                # extract/arch.py. These three used to parse e_machine
+                # separately and had already drifted -- two of them reported
+                # `armel` for a big-endian ARM binary and the third reported
+                # `armeb`, so the same firmware was named differently depending
+                # on which path looked at it.
+                info = identify_elf(header)
+                if info is not None:
+                    counter[info.arch] += 1
                     count += 1
-            except (OSError, struct.error, IndexError):
-                # OSError: unreadable file. struct.error/IndexError: a file that
-                # passes the 4-byte magic check but ends mid-header (truncated
-                # vendor blob) — census is a sample, one bad file must not sink it.
+            except OSError:
+                # Unreadable file. The census is a sample, so one bad file must
+                # not sink it.
                 pass
     return count, counter
 

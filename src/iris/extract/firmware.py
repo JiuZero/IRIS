@@ -18,6 +18,7 @@ import struct
 from collections import Counter
 from dataclasses import dataclass, field
 
+from iris.arch import census_label, class_bits, endianness_of
 from iris.extract.tenda import (
     TendaContainer,
     detect_segmented_regions,
@@ -161,21 +162,11 @@ def find_elf_archs(data: bytes) -> Counter:
         if pos == -1:
             break
         if pos + 18 < len(data):
+            ei_class = data[pos + 4]
             ei_data = data[pos + 5]
             e_machine = struct.unpack("<H" if ei_data == 1 else ">H", data[pos + 18 : pos + 20])[0]
-            if e_machine == 8:
-                arch = "mipsel" if ei_data == 1 else "mipseb"
-            elif e_machine == 40:
-                arch = "armel"
-            elif e_machine == 62:
-                arch = "x64"
-            elif e_machine == 3:
-                arch = "x86"
-            elif e_machine == 183:
-                arch = "aarch64"
-            else:
-                arch = f"unk({e_machine})"
-            counter[arch] += 1
+            bits = class_bits(ei_class) or 32
+            counter[census_label(e_machine, endianness_of(ei_data), bits)] += 1
         pos += 1
     return counter
 
