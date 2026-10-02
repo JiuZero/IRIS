@@ -270,6 +270,10 @@ Actions Taken: None
 每次成功执行会追加到 `actions_taken` 与 `recovery_history`，带时间戳以便审计；
 所有动作与诊断同时落**动作账本**（SQLite，见 4.9）。
 
+前三个动作的成功判定在 0.3.10 收紧：**脚本必须输出实际计数**（`n=<数>`）才算修过，
+且 `n=0` 会把该动作记为「探针够不到」并在后续推荐中跳过——因为这三个脚本在容器里执行，
+而 guest 根文件系统在 `image.raw` 里，找不到不等于没问题。详见 8.7。
+
 ### 4.5 持续监控循环
 
 `start_continuous_monitoring(check_interval=30)` 每 30 秒：更新 uptime →
@@ -324,6 +328,13 @@ guest 的 rootfs 在 `image.raw` 里，容器内没有它的挂载。因此：
 `WEB_SERVER_DIAGNOSIS` 在容器层运行，因此它报告的是容器侧可见性（QEMU 进程是否
 存活、容器内是否有 curl 可达的 :80），而不是 guest 内部的进程/配置——后者只能靠
 串口日志与外部探活推断。
+
+0.3.10 起这段语义在代码里也有名字：`docker exec` 那条通道的方法从 `_exec_in_guest`
+改名为 `_exec_in_container`，docstring 明说「不是 guest，guest rootfs 在 `image.raw`」。
+`_WATCHDOG_RECOVERY` / `RESOURCE_CLEANUP` / `DIAGNOSTIC_DISABLEMENT` 三个动作的表里
+「实现层」标注为 guest 内脚本，因此**在运行期够不到 guest**——它们现在会输出实际计数并
+在被证明够不到时停止被推荐，而不是记成成功的修复。**只有 `WEB_SERVER_RESTART`
+（容器层重启）真正触达 guest。**
 
 ### 4.9 动作账本（guardian action ledger）
 
@@ -465,12 +476,12 @@ initramfs 三个设置 Python 侧连字段都没有，而 `-cpu max` 直接决�
 
 ---
 
-## 7 自愈动作的真实性
+## 8 自愈动作的真实性
 
 前面几条讲的是「怎么发现固件坏了」。这一条讲相反的方向：**IRIS 自己的修复动作，怎么确认
 它真的生效了**。0.3.9 之前，这个方向上有一整类缺陷，而且它们有一个共同形状。
 
-### 7.1 三种「声称成功」
+### 8.1 三种「声称成功」
 
 在 Tenda TES7002 上追一个 7002 端口的排查过程里，同一个缺陷换了三张脸：
 
@@ -483,7 +494,7 @@ initramfs 三个设置 Python 侧连字段都没有，而 `-cpu max` 直接决�
 第二行是最危险的一行：它**比第一行更可信**——它经过了探活、有返回码、有轮询。正因如此，
 它能骗过所有只看日志不看连接的人。
 
-### 7.2 结论必须与证据同源
+### 8.2 结论必须与证据同源
 
 `ensure_command_channel` 的返回码和日志行由**同一个分支**产生，测试对四组 outcome 参数化
 断言二者严格配对。理由不是洁癖：一个恒返回 0 的函数可以满足任何只看文本的测试。
@@ -494,20 +505,20 @@ LISTEN，所以两者不可能同真，有一个探针是坏的。最终改成�
 （`pidof said: [466]`）——事实进日志，判断留给读日志的人。这条正是本轮唯一一次**自己
 引入的谎报**，值得单列。
 
-### 7.3 探针要报告它看见了什么
+### 8.3 探针要报告它看见了什么
 
 失败报告现在是一行五路证据：`pidof` 原话、`netstat -lan` 原文、客户端原话、`bindv6only`
 当前值、`/proc/net` 原文。这些不是日志噪音——正是它们把「telnetd 坏了」一步步逼到
 「BusyBox 1.22.1 绑 IPv6-only、QEMU 用户态网络不转发 IPv6、BusyBox nc 连 `::1` 都做不到」
 这个只能靠实测得出的结论。任何布尔值都无法替代它们。
 
-### 7.4 一个端口在表里，不等于它在监听
+### 8.4 一个端口在表里，不等于它在监听
 
 `/proc/net/tcp{,6}` 里有该端口，可能是 LISTEN（`0A`），也可能是 TIME_WAIT（`06`）。
 按端口号匹配会把后者报成「daemon 活着但拒绝我们」——与谎报成功同型、方向相反的错误。
 `port_listening_in_proc` 因此匹配状态位而不只是端口。
 
-### 7.5 探测手段本身要先验证
+### 8.5 探测手段本身要先验证
 
 本轮踩到的三个坑，都是「探针错了，被当成结论」：
 
@@ -519,31 +530,71 @@ LISTEN，所以两者不可能同真，有一个探针是坏的。最终改成�
   无 `timeout` 的 guest 从未被覆盖；断言写成「数启动行个数」，把条件改成永假照样通过。
   两处都由变异验证暴露——**静态守卫必须做变异验证，否则它守的东西可能已经不在了**。
 
-### 7.6 guest 侧 shell 脚本必须保持 LF
+### 8.6 guest 侧 shell 脚本必须保持 LF
 
 本轮两次栽在同一个坑：编辑工具在 Windows 上把整个 `.sh` 写成 CRLF。host 上完全隐形
 （`bash -n` 通过，`.gitattributes` 的 `*.sh text eol=lf` 只管 checkout 路径），guest BusyBox
 ash 直接崩，报 `/etc/init.d/iris_net_fix: line 7: : not found`。`tests/test_guest_shell_scripts_are_lf.py`
 是为此存在，改完任何 shell 脚本必跑。
 
+### 8.7 修好返回值还不够：探针够不到的动作要停止推荐
+
+0.3.10 修掉 8.1 那类假成功之后，出现了第二层问题：`_apply_watchdog_fixes()` 老实地
+返回 `False`，而 `recommend_recovery_action()` 每 30 秒照旧推荐它，`start_continuous_monitoring`
+就把一条失败写进 append-only ledger。**一个永远修不好的东西持续刷审计记录，会把真正需要人看的
+失败淹掉**——ledger 的价值来自「可信」，不是来自「完整」。
+
+修法是把「探针够不到」变成一个**可记录的状态**而不是一个每次重试的返回值：
+
+- 脚本末尾输出**实际计数**而非标记（`n=0` / 无 `n=` / `n>0` 是三种不同的事实）；
+- `n=0` 时把动作记入 `_unreachable_actions` 并附原因，之后跳过它；
+- 全部候选都不可达时打出原因并返回 `None`，**不做无效重试**。
+
+`n=0` 的措辞是这里最要紧的部分：它不是「guest 是干净的」，而是「guest 的状态 UNKNOWN」。
+探针在容器里，被探的东西在 `image.raw` 里——**找不到不等于没问题，只等于看不见**。
+
+### 8.8 mock 掉被信任的对象，等于没测
+
+`_WATCHDOG_SCRIPT` / `_CLEANUP_SCRIPT` 原有的一整套测试全部用 `FakeExec` 伪造 stdout，
+返回 `"WATCHDOG-FIX-APPLIED\n"`。**一个恒 `echo X; exit 0` 的脚本能通过其中每一个断言**——
+被测的正是「脚本说了什么」，而测试把它的输出替换成了自己写的字符串。
+
+`tests/test_guardian_repairs_are_honest.py` 因此不 mock：把脚本写到文件、用真实 bash 执行、
+通过环境变量喂 fixture rootfs（这也是三个脚本的路径可覆盖的原因，不是为了方便）。
+`pidof` / `kill` / `mv` 用 shell 函数替身注入到同一个 shell 里，因为本机是 Windows：
+`bash.exe` 的后台 job 的 `$!` 是 Windows pid，而脚本里的 `kill` 解析 MSYS pid，
+`cygpath -p` 无法调和两者。**替身必须复现真实行为**——一个会忽略自身参数的 `nc` 替身
+在 0.3.9 里就已经让整类探测 bug 溜过去了。
+
+这套测试当场抓到一个连变异验证都没抓到的真 bug：`_CLEANUP_SCRIPT` 默认值赋给
+`IRIS_GUARDIAN_PROCESSES`，循环读的却是 `IRIS_GUARDAN_PROCESSES`（少一个 `I`）。
+未设置时它展开为空 → 循环一次都不跑 → `n=0`——**与「guest 里确实没有可杀进程」的输出
+完全相同**，靠看输出无法区分，靠「把实际被问到的进程名写下来」才抓得住。
+
+### 8.9 变异验证发现盲区的方式：先变绿才是信号
+
+6 项变异中 5 项一次变红，1 项**先变绿**：把 `mv ... && count++` 改成 `mv ...; count++`
+（rename 失败也算已禁用）后测试全绿。这说明「计数由 `&&` 守卫」这件事当时**根本没有被测**，
+于是补了两项测试（watchdog 与 diag 各一项，用 `mv() { return 1; }` 替身）再复跑，才变红。
+
+先变绿 = 盲区被打开的信号，不是失败的信号。
+
 ---
 
-## 8 尚未修复（0.3.9 记录在案）
+## 9 尚未修复（截至 0.3.10 记录在案）
 
-- **`src/iris/monitor/ai_guardian.py` 的两处无条件成功标记**：`_WATCHDOG_SCRIPT`
-  （619-633 行）与 `_CLEANUP_SCRIPT`（648-655 行）在容器里遍历 `/bin/monitor` 等厂商二进制
-  （容器里永远不存在），脚本末尾却无条件 `echo ...-APPLIED; exit 0`，两个自愈动作因此永远
-  返回 `True`。这与 7.1 是同一类缺陷，只是还没修。
-- **`_exec_in_guest` 名不副实**：函数名与 docstring 说 "inside the running container"，
-  实际执行 `docker exec -i <container> /bin/sh -s`——进的是**容器**，而 guest 根文件系统在
-  `image.raw` 里。它自己的注释（689-692 行）承认了这一点。
 - **通道路线需要另一条设计**：telnetd 在该固件上只服务一次连接即退出（`TIME_WAIT` 证据），
   且 BusyBox nc 无 `-e`、telnetd 无 `-b`，无法让它绑到 guest 的 eth0。可行方向是 guest 内
   第二串口 + `inittab` respawn，或 QMP。
+- **三个修复脚本仍然只能作用于容器可见的对象**（0.3.10 修的是它们**如何汇报**，不是它们
+  能修什么）。要真正修 guest 需要能进 guest 的通道。在那之前，探针报 `n=0` 的含义是
+  「guest 状态 UNKNOWN」，不是「一切正常」。
+- **`kill -9` 计数是「信号送达数」而非「确认已死的进程数」**：脚本在容器侧无法复验目标是否
+  真的消失。计数语义已在脚本注释里写明，读 ledger 时需要知道这一点。
 
 ---
 
-## 9 相关文档
+## 10 相关文档
 
 | 文档 | 内容 |
 |---|---|

@@ -287,11 +287,11 @@ class TestRecommendAction:
 class TestGuestExec:
     def test_script_is_piped_to_stdin_not_written_to_disk(self, monitor, monkeypatch):
         """The earlier version wrote to the host's /tmp, then the guest never saw it."""
-        fake = FakeExec(stdout="WATCHDOG-FIX-APPLIED\n")
+        fake = FakeExec(stdout="WATCHDOG-FIX-APPLIED n=1\n")
         monkeypatch.setattr(subprocess, "run", fake)
         monitor._apply_watchdog_fixes()
         assert fake.exec_call[:4] == ["docker", "exec", "-i", "iris-qemu-10001"]
-        assert fake.scripts[0].strip().startswith("for b in")
+        assert fake.scripts[0].strip().startswith(': "${IRIS_WATCHDOG_BINARIES')
         assert "/tmp" not in fake.exec_call
 
     def test_docker_failure_is_reported_not_raised(self, monitor, monkeypatch):
@@ -305,11 +305,11 @@ class TestGuestExec:
 
     def test_watchdog_fix_confirmed_by_marker(self, monitor, monkeypatch):
         monkeypatch.setattr(subprocess, "run",
-                            FakeExec(stdout="WATCHDOG-FIX-APPLIED\n"))
+                            FakeExec(stdout="WATCHDOG-FIX-APPLIED n=1\n"))
         assert monitor._apply_watchdog_fixes() is True
 
     def test_diag_disabled_confirmed_by_marker(self, monitor, monkeypatch):
-        monkeypatch.setattr(subprocess, "run", FakeExec(stdout="DIAG-DISABLED\n"))
+        monkeypatch.setattr(subprocess, "run", FakeExec(stdout="DIAG-DISABLED n=1\n"))
         assert monitor._disable_diagnostic_tools() is True
 
     def test_diag_absent_is_not_a_silent_success(self, monitor, monkeypatch):
@@ -320,14 +320,14 @@ class TestGuestExec:
 
     def test_cleanup_confirmed_by_marker(self, monitor, monkeypatch):
         monkeypatch.setattr(subprocess, "run",
-                            FakeExec(stdout="RESOURCE-CLEANUP-APPLIED\n"))
+                            FakeExec(stdout="RESOURCE-CLEANUP-APPLIED n=2\n"))
         assert monitor._cleanup_resources() is True
 
 
 class TestExecuteRecovery:
     def test_successful_repair_is_recorded(self, monitor, monkeypatch):
         monkeypatch.setattr(subprocess, "run",
-                            FakeExec(stdout="WATCHDOG-FIX-APPLIED\n"))
+                            FakeExec(stdout="WATCHDOG-FIX-APPLIED n=1\n"))
         assert monitor.execute_recovery(ACTION_WATCHDOG)
         assert len(monitor.status.actions_taken) == 1
         assert monitor.status.actions_taken[0].startswith(ACTION_WATCHDOG)
@@ -384,7 +384,7 @@ class TestMonitoringLoop:
 
         monkeypatch.setattr(monitor, "analyze_health", fake_analyze)
         monkeypatch.setattr(subprocess, "run",
-                            FakeExec(stdout="WATCHDOG-FIX-APPLIED\n"))
+                            FakeExec(stdout="WATCHDOG-FIX-APPLIED n=1\n"))
         monkeypatch.setattr(mod.time, "sleep", lambda _: None)
 
         monitor.start_continuous_monitoring(check_interval=0)
@@ -682,7 +682,7 @@ class TestLedger:
     def test_repair_is_recorded(self, ledger_monitor, monkeypatch):
         m, ledger = ledger_monitor
         monkeypatch.setattr(subprocess, "run",
-                            FakeExec(stdout="WATCHDOG-FIX-APPLIED\n"))
+                            FakeExec(stdout="WATCHDOG-FIX-APPLIED n=1\n"))
         m.execute_recovery(ACTION_WATCHDOG)
         from iris.monitor.ledger import GuardianLedger
 
@@ -721,7 +721,7 @@ class TestLedger:
     def test_promotion_flag_is_flippable(self, ledger_monitor, monkeypatch):
         m, ledger = ledger_monitor
         monkeypatch.setattr(subprocess, "run",
-                            FakeExec(stdout="WATCHDOG-FIX-APPLIED\n"))
+                            FakeExec(stdout="WATCHDOG-FIX-APPLIED n=1\n"))
         m.execute_recovery(ACTION_WATCHDOG)
         from iris.monitor.ledger import GuardianLedger
 
@@ -735,7 +735,7 @@ class TestLedger:
         m, _ = ledger_monitor
         m.ledger.close()  # a closed connection makes every write fail
         monkeypatch.setattr(subprocess, "run",
-                            FakeExec(stdout="WATCHDOG-FIX-APPLIED\n"))
+                            FakeExec(stdout="WATCHDOG-FIX-APPLIED n=1\n"))
         assert m.execute_recovery(ACTION_WATCHDOG) is True  # repair still works
 
     def test_no_ledger_path_means_none(self, tmp_path):

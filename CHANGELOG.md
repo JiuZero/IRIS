@@ -4,6 +4,57 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.10] - 2026-10-02
+
+上一轮在 `iris_net_fix.sh` 里修掉了「声称成功、实测失败」，同一类缺陷在 `ai_guardian`
+这一侧还完整留着，本轮把它修完了。核心结论一句话：**探针在容器里，而被修的东西在 guest
+的 `image.raw` 里，所以这些自愈动作从来就不可能生效——但每次启动都被记成了两次成功修复。**
+
+### 修复
+
+- **自愈动作无条件报成功**。`_WATCHDOG_SCRIPT` / `_CLEANUP_SCRIPT` 末尾是无条件的
+  `echo ...-APPLIED; exit 0`，而两个脚本遍历的是 guest 的二进制与进程路径——这些路径在
+  容器里永远不存在。三个脚本现在改为输出**实际计数**：
+  `WATCHDOG-FIX-APPLIED n=<数>` / `RESOURCE-CLEANUP-APPLIED n=<数>` / `DIAG-DISABLED n=<数>`。
+- **三种状态不再混为一谈**。`n=0`（看了，什么都没有）、没有 `n=`（探针根本没跑成）、
+  `n>0`（真的动了东西）分别对应不同处理：前两者都不记成功，第三个才写 ledger。
+  `_exec_in_container` 返回 rc≠0 时同样不算修复。
+- **`_exec_in_guest` → `_exec_in_container`**。旧 docstring 写着 "inside the running
+  container" 却返回 "the guest's own exit status"，而同一类的 `_docker` docstring 已经
+  正确地写着「no docker exec can touch its processes」——两处自相矛盾，而所有脚本都建立在
+  错的那一处上。
+- **不可达的动作不再每 30 秒重试**。修好返回值之后，`recommend_recovery_action` 会对一个
+  注定失败的动作反复推荐，`start_continuous_monitoring` 循环每轮都往 append-only ledger 里
+  塞一条失败记录。现在探针报 `n=0` 时把该动作记入 `_unreachable_actions` 并附原因，
+  推荐时跳过；全部不可达时打出原因并返回 `None`（`recommend_recovery_action` 由
+  一串提前 return 改为候选列表 + 过滤，优先级顺序不变且有测试守住）。
+- **`_CLEANUP_SCRIPT` 少一个字母的变量名**。默认值赋给了 `IRIS_GUARDIAN_PROCESSES`，循环
+  读的却是 `IRIS_GUARDAN_PROCESSES`（少一个 I），未设置时展开为空 → for 循环一次都不跑 →
+  `n=0`。这个 bug 是被本轮新增的测试逼出来的：它和「guest 里确实没有可杀进程」输出完全相同。
+- **按 pid 计数而非按进程名**。`monitord` 有三个进程就是杀了三个；少报的数字和虚报的成功
+  是同一类谎报。
+
+### 测试
+
+- `tests/test_guardian_repairs_are_honest.py`（33 项，1 项 skip）：**真实执行三个 shell
+  脚本**（写文件 + 真实 bash + 环境变量覆盖 + prelude 注入 shell 函数替身）。
+  原有 `tests/test_guardian.py` 的相关用例全部用 `FakeExec` 伪造 stdout 返回
+  `"WATCHDOG-FIX-APPLIED\n"`——一个恒 `echo X; exit 0` 的脚本能通过全部这些测试，这正是
+  缺陷能存活的原因。mock 掉被信任的对象等于没测。
+- **6 项变异验证全部如期变红**，其中 M6（把 `mv ... && count++` 改成 `mv ...; count++`）
+  **先变绿**，暴露了「rename 失败仍被计为已禁用」这个真实盲区，补了两项测试（watchdog 与
+  diag 各一项，用 `mv(){ return 1; }` 替身）后复跑变红。
+- 符号链接用例在本机 skip：Windows 上 `ln -s` 创建的是文件副本而非符号链接，`find -type l`
+  恒为空，会让该分支被当成「找到 0 个」而静默通过——正是本套件要区分的那两种答案之一。
+
+### 已知局限（如实记录，未修）
+
+- 三个修复脚本仍然只能作用于**容器**可见的对象。要真正修 guest，需要能进 guest 的通道
+  （例如上一轮那个只在部分固件上可用的 telnetd，或 QEMU guest agent）。本轮不假装这个
+  通道存在：探针报告 0 时说的是「guest 状态 UNKNOWN」，不是「guest 是干净的」。
+- `kill -9` 计数是「信号送达数」，不是「确认已死的进程数」——脚本在容器侧无法复验目标是否
+  真的消失。
+
 ## [0.3.9] - 2026-10-02
 
 `iris_net_fix.sh` 每次启动都往串口日志里写「正在 7002 端口启动 telnetd」，而该端口从未被

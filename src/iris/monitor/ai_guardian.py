@@ -208,6 +208,13 @@ class AIHealthMonitor:
         #: minimum seconds between two WEB_SERVER_RESTART attempts.
         self.restart_cooldown_seconds = restart_cooldown_seconds
         self._last_web_restart: str | None = None
+        #: action -> why it cannot be performed from here. Set when a repair's own
+        #: probe reports it disabled nothing, which for the guest-scoped scripts is
+        #: structural rather than incidental: they run inside the container and the
+        #: guest rootfs is in image.raw. Recommending such an action again every
+        #: check interval would fill the ledger with failures that no code change
+        #: can fix, and bury the ones a person could.
+        self._unreachable_actions: dict[str, str] = {}
         #: append-only action ledger (None in tests that don't ask for one)
         self.ledger: GuardianLedger | None = None
         if ledger_path is not None:
@@ -400,18 +407,36 @@ class AIHealthMonitor:
             logger.info(f"container {s.iid} recovery: {entry}")
 
     def recommend_recovery_action(self) -> str | None:
-        """Recommend the action matching the strongest detected signal."""
+        """Recommend the action matching the strongest detected signal.
+
+        Actions already known to be unreachable from here are skipped in favour of
+        the next candidate, and when nothing reachable is left the reason is
+        logged. Repeating them anyway would spend a ledger entry every interval on
+        an outcome no code change can produce, which is the opposite of what an
+        append-only audit is for.
+        """
         s = self.status
+        candidates: list[str] = []
         if s.watchdog_triggers > 0:
-            return ACTION_WATCHDOG
+            candidates.append(ACTION_WATCHDOG)
         if s.soft_lockup_events > 0:
-            return ACTION_RESOURCE
+            candidates.append(ACTION_RESOURCE)
         if s.diag_crashes > 0:
-            return ACTION_DIAGNOSTIC
+            candidates.append(ACTION_DIAGNOSTIC)
         if s.web_server_status == "not_started":
-            return ACTION_WEB_DIAGNOSIS
+            candidates.append(ACTION_WEB_DIAGNOSIS)
         if s.web_server_status == "started_but_stopped":
-            return ACTION_WEB_RESTART
+            candidates.append(ACTION_WEB_RESTART)
+
+        reachable = [a for a in candidates if a not in self._unreachable_actions]
+        if reachable:
+            return reachable[0]
+        if candidates:
+            logger.warning(
+                f"container {self.iid}: {s.state} detected, but every matching action "
+                f"is unreachable from here and none was attempted: "
+                + "; ".join(f"{a} ({self._unreachable_actions[a]})" for a in candidates)
+            )
         return None
 
     # ---------------------------------------------------------------- recovery
@@ -532,13 +557,18 @@ class AIHealthMonitor:
         )
         return False
 
-    def _exec_in_guest(self, script: str, timeout: int = 30) -> tuple[bool, str]:
-        """Run a shell snippet inside the running container.
+    def _exec_in_container(self, script: str, timeout: int = 30) -> tuple[bool, str]:
+        """Run a shell snippet inside the emulation **container**.
+
+        Not the guest. The guest's root filesystem is ``image.raw``, so this sees
+        the container's own binaries and processes and none of the guest's -- the
+        same boundary ``_docker`` documents. Named for where it runs because the
+        earlier name said "guest" in both the docstring and its return value, and
+        every script below it makes a claim about the guest.
 
         The snippet is piped in over stdin (``docker exec -i ... sh -s``), so
         nothing has to be copied first and nothing can end up in the wrong
-        filesystem. Returns the guest's own exit status: a repair that silently
-        failed must not be recorded as a repair that succeeded.
+        filesystem. Returns the container shell's exit status.
         """
         try:
             proc = subprocess.run(
@@ -547,7 +577,7 @@ class AIHealthMonitor:
                 encoding="utf-8", errors="replace", timeout=timeout, check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            logger.error(f"container {self.iid}: guest exec failed: {exc}")
+            logger.error(f"container {self.iid}: container exec failed: {exc}")
             return False, str(exc)
         return proc.returncode == 0, ((proc.stdout or "") + (proc.stderr or "")).strip()
 
@@ -616,72 +646,152 @@ class AIHealthMonitor:
         self._ledger_record(action, "repair", success)
         return success
 
+    #: Every repair script below ends by printing a *count* of what it changed, not a
+    #: marker that only the script itself could have printed. Two of them used to print
+    #: an unconditional ``echo ...-APPLIED; exit 0`` while searching a container for
+    #: binaries that live in the guest -- so a boot where the guardian could not touch
+    #: a single thing was recorded as two successful repairs. A count is checkable: it
+    #: is zero on the boot that found nothing, and no exit code can hide that.
+    #:
+    #: The paths are overridable so the test suite can run these against a fixture
+    #: rootfs. That is not for convenience: with a mocked ``docker exec`` in the way,
+    #: a script that always claimed success passes every assertion, and the whole point
+    #: of the change is that the script's own output is what is being trusted.
     _WATCHDOG_SCRIPT = """\
-for b in /bin/monitor /sbin/monitor /usr/bin/monitor /usr/sbin/monitor \\
-        /opt/monitor /opt/bin/monitor /bin/watchdog /sbin/watchdog \\
-        /bin/monitord /bin/arp_monitor /bin/ppp-monitor; do
+: "${IRIS_WATCHDOG_BINARIES:=/bin/monitor /sbin/monitor /usr/bin/monitor \
+/usr/sbin/monitor /opt/monitor /opt/bin/monitor /bin/watchdog /sbin/watchdog \
+/bin/monitord /bin/arp_monitor /bin/ppp-monitor}"
+: "${IRIS_WATCHDOG_DIRS:=/bin /sbin /usr/bin /usr/sbin /opt/bin}"
+
+_disabled=0
+for b in ${IRIS_WATCHDOG_BINARIES}; do
   [ -e "$b" ] || [ -L "$b" ] || continue
-  if [ -L "$b" ]; then rm -f "$b"; else mv -f "$b" "$b.iris-disabled"; fi
+  if [ -L "$b" ]; then
+    rm -f "$b" && _disabled=$((_disabled + 1))
+  else
+    mv -f "$b" "$b.iris-disabled" && _disabled=$((_disabled + 1))
+  fi
 done
-for d in /bin /sbin /usr/bin /usr/sbin /opt/bin; do
+for d in ${IRIS_WATCHDOG_DIRS}; do
   [ -d "$d" ] || continue
-  find "$d" -maxdepth 1 -type l \\
-    \\( -name '*monitor*' -o -name '*watchdog*' \\) -exec rm -f {} \\; 2>/dev/null
+  _links=$(find "$d" -maxdepth 1 -type l \\
+    \\( -name '*monitor*' -o -name '*watchdog*' \\) 2>/dev/null)
+  # grep -c, not wc -l: an empty result is a count of zero rather than one blank.
+  _n=$(echo "${_links}" | grep -c . 2>/dev/null)
+  [ "${_n}" -gt 0 ] 2>/dev/null || continue
+  echo "${_links}" | while IFS= read -r _l; do rm -f "${_l}"; done
+  _disabled=$((_disabled + _n))
 done
-echo WATCHDOG-FIX-APPLIED
+sync
+echo "WATCHDOG-FIX-APPLIED n=${_disabled}"
 exit 0
 """
 
-    def _apply_watchdog_fixes(self) -> bool:
-        """Rename supervision daemons out of the way inside the guest."""
-        ok, out = self._exec_in_guest(self._WATCHDOG_SCRIPT, timeout=45)
-        applied = "WATCHDOG-FIX-APPLIED" in out
-        if ok and applied:
-            logger.info(f"container {self.iid}: watchdog binaries disabled")
+    _CLEANUP_SCRIPT = """\
+: "${IRIS_GUARDIAN_PROCESSES:=monitord arp_monitor ppp-monitor}"
+
+_killed=0
+for p in ${IRIS_GUARDIAN_PROCESSES}; do
+  _pids=$(pidof "$p" 2>/dev/null)
+  [ -n "${_pids}" ] || continue
+  # Counted per pid, not per name: "monitord" owning three processes is three
+  # things killed, and a number that under-reports is the same kind of lie as one
+  # that reports success for nothing.
+  for _pid in ${_pids}; do
+    kill -9 "${_pid}" 2>/dev/null && _killed=$((_killed + 1))
+  done
+done
+sync
+echo "RESOURCE-CLEANUP-APPLIED n=${_killed}"
+exit 0
+"""
+
+    _DIAG_SCRIPT = """\
+: "${IRIS_DIAG_BINARIES:=/bin/diag /usr/bin/diag /sbin/diag}"
+
+_disabled=0
+for d in ${IRIS_DIAG_BINARIES}; do
+  [ -e "$d" ] || continue
+  mv -f "$d" "$d.iris-disabled" 2>/dev/null && _disabled=$((_disabled + 1))
+done
+sync
+echo "DIAG-DISABLED n=${_disabled}"
+exit 0
+"""
+
+    #: Word boundaries on both ends on purpose: a digit run right after ``n=`` is the
+    #: count. ``_exec_in_container`` concatenates stderr into the same string, so an
+    #: unrelated ``mon=12`` in a warning must not be read as a count of twelve.
+    _ACTION_COUNT_RE = re.compile(r"\bn=(\d+)\b")
+
+    def _action_count(self, output: str) -> int | None:
+        """How many things a repair script actually changed, or None if it did not
+        say. None is the answer for a probe that produced nothing parseable, and it
+        is not zero: zero means "looked, found nothing", while None means the probe
+        never got far enough to look.
+        """
+        match = self._ACTION_COUNT_RE.search(output or "")
+        return int(match.group(1)) if match else None
+
+    def _apply_container_scoped_repair(
+        self, action: str, script: str, timeout: int, what: str
+    ) -> bool:
+        """Run one repair script and report only what it can actually vouch for.
+
+        True means something the probe could see was changed. False covers two
+        different situations that must not be recorded the same way: the probe ran
+        and found nothing, and the probe did not run usefully at all. The first is
+        not evidence of a healthy guest -- this runs inside the container and the
+        guest rootfs is in image.raw, so nothing found means the guest's state is
+        unknown, never clean -- which is why the action stops being recommended.
+        """
+        ok, out = self._exec_in_container(script, timeout=timeout)
+        count = self._action_count(out)
+        if not ok:
+            logger.warning(
+                f"container {self.iid}: {action} probe failed: {out or 'no output'}"
+            )
+            return False
+        if count is None:
+            # A script that exits zero without naming a count is the shape this
+            # whole change exists to remove, so it is not read as "nothing to do".
+            logger.warning(
+                f"container {self.iid}: {action} probe reported no count and is not "
+                f"credited with a repair (output: {out!r})"
+            )
+            return False
+        if count > 0:
+            logger.info(f"container {self.iid}: {action} disabled {count} {what}")
+            self._unreachable_actions.pop(action, None)
             return True
         logger.warning(
-            f"container {self.iid}: watchdog fix not confirmed "
-            f"(rc={'0' if ok else 'nonzero'}, applied={applied})"
+            f"container {self.iid}: {action} changed nothing. That is not a clean "
+            f"guest: this probe runs inside the container while the guest rootfs "
+            f"lives in image.raw, so the guest's {what} remain UNKNOWN. "
+            f"Not recommending {action} again."
+        )
+        self._unreachable_actions[action] = (
+            "probe runs in the container; the guest rootfs is in image.raw"
         )
         return False
 
-    _CLEANUP_SCRIPT = """\
-for p in monitord arp_monitor ppp-monitor; do
-  pidof "$p" >/dev/null 2>&1 && kill -9 $(pidof "$p") 2>/dev/null
-done
-sync
-echo RESOURCE-CLEANUP-APPLIED
-exit 0
-"""
+    def _apply_watchdog_fixes(self) -> bool:
+        """Rename supervision daemons out of the way, where the probe can see them."""
+        return self._apply_container_scoped_repair(
+            ACTION_WATCHDOG, self._WATCHDOG_SCRIPT, 45, "watchdog binaries"
+        )
 
     def _cleanup_resources(self) -> bool:
-        """Free CPU held by runaway monitor processes."""
-        ok, out = self._exec_in_guest(self._CLEANUP_SCRIPT, timeout=20)
-        return ok and "RESOURCE-CLEANUP-APPLIED" in out
-
-    _DIAG_SCRIPT = """\
-rc=1
-for d in /bin/diag /usr/bin/diag /sbin/diag; do
-  [ -e "$d" ] || continue
-  mv -f "$d" "$d.iris-disabled" 2>/dev/null && rc=0
-done
-sync
-[ "$rc" = 0 ] && echo DIAG-DISABLED
-exit "$rc"
-"""
+        """Kill runaway monitor processes, where the probe can see them."""
+        return self._apply_container_scoped_repair(
+            ACTION_RESOURCE, self._CLEANUP_SCRIPT, 20, "monitor processes"
+        )
 
     def _disable_diagnostic_tools(self) -> bool:
-        """Rename the crashing diagnostic tool.
-
-        Exits non-zero when nothing was there to disable, so a guest without a
-        diag binary is reported as "nothing to do" rather than a silent success.
-        """
-        ok, out = self._exec_in_guest(self._DIAG_SCRIPT, timeout=20)
-        if ok and "DIAG-DISABLED" in out:
-            logger.info(f"container {self.iid}: diag disabled")
-            return True
-        logger.info(f"container {self.iid}: no diag binary needed disabling")
-        return False
+        """Rename the crashing diagnostic tool, where the probe can see it."""
+        return self._apply_container_scoped_repair(
+            ACTION_DIAGNOSTIC, self._DIAG_SCRIPT, 20, "diag binaries"
+        )
 
     def _diagnose_web_server(self) -> tuple[bool, str]:
         """Collect why the web server is not serving. Reports; repairs nothing.
@@ -705,7 +815,7 @@ pidof qemu-system-aarch64 >/dev/null 2>&1 && echo "qemu: arm64 running"
 netstat -lnt 2>/dev/null | grep -q ':80 ' && echo "listening: 80"
 exit 0
 """
-        ok, out = self._exec_in_guest(script, timeout=20)
+        ok, out = self._exec_in_container(script, timeout=20)
         summary = out or "no diagnostics collected"
         if "listening: 80" in out and "running:" in out:
             summary = f"web server is up after all: {summary}"
