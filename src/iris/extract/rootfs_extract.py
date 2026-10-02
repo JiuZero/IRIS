@@ -61,21 +61,89 @@ def _slice_squashfs(data: bytes, offset: int, dest: Path) -> Path:
     return dest
 
 
-def _docker_unsquashfs(squashfs_path: Path, dest_dir: Path, image: str = "alpine:3.20") -> Path:
-    scratch_dir = squashfs_path.parent
-    rel_sqfs = squashfs_path.name
-    rel_dest = dest_dir.name
+def _bind_mount(*paths: Path) -> Path:
+    """Smallest directory that contains every path, used as the single docker mount.
 
-    if safe_present(dest_dir) and not safe_rmtree(dest_dir):
+    Docker accepts one bind source per volume, so both the squashfs slice and the
+    destination must be reachable from it. The previous code mounted
+    ``squashfs_path.parent`` and addressed the destination by *name only*, which
+    silently re-rooted any caller-supplied ``--out`` outside the scratch tree into
+    the scratch directory -- the command reported success while writing the tree
+    somewhere the caller never asked for.
+
+    Raises ValueError when the paths span volumes: no ancestor can contain both,
+    and walking up to the volume root would never terminate.
+    """
+    resolved = [Path(p).resolve() for p in paths]
+    common = resolved[0]
+    for other in resolved[1:]:
+        while not other.is_relative_to(common):
+            if common.parent == common:
+                raise ValueError(
+                    f"cannot bind {resolved[0]} and {other} into a single docker "
+                    "mount: they sit on different volumes, so no shared ancestor "
+                    "exists. Keep --out on the same drive as the scratch directory."
+                )
+            common = common.parent
+    return common
+
+
+def _dir_has_entries(path: Path) -> bool:
+    """True when path is a directory holding at least one entry."""
+    if not safe_is_dir(path):
+        return False
+    try:
+        return any(True for _ in Path(path).iterdir())
+    except OSError:
+        return False
+
+
+def _reset_dest(dest_dir: Path, *, force: bool, explicit: bool) -> None:
+    """Clear a previous extraction so the next one cannot merge into a remnant.
+
+    ``explicit`` marks a caller-chosen ``--out`` path. The scratch tree holds only
+    IRIS-derived directories, so clearing those unconditionally is fine, but a
+    user-named directory may hold unrelated work and is only cleared on ``--force``.
+    """
+    if not safe_present(dest_dir):
+        return
+    if explicit and not force:
+        if not safe_is_dir(dest_dir):
+            raise ValueError(
+                f"--out {dest_dir} already exists and is not a directory; "
+                "remove it or choose another path"
+            )
+        if _dir_has_entries(dest_dir):
+            raise ValueError(
+                f"refusing to overwrite non-empty --out directory {dest_dir}: a "
+                "caller-named path may hold unrelated work. Re-run with --force, "
+                "or point --out at an empty path."
+            )
+    if not safe_rmtree(dest_dir):
         raise RuntimeError(
             f"cannot clear stale extraction {dest_dir}: reparse points or "
-            "locked files survive the delete, so unsquashfs would merge into a "
+            "locked files survive the delete, so the new tree would merge into a "
             "partial tree"
         )
 
+
+def _docker_unsquashfs(squashfs_path: Path, dest_dir: Path, image: str = "alpine:3.20") -> Path:
+    """Unpack ``squashfs_path`` into ``dest_dir``.
+
+    The caller owns clearing ``dest_dir`` (see ``_reset_dest``); this only fills it,
+    so a stale tree can never silently merge into a new one.
+    """
+    mount_src = _bind_mount(squashfs_path.parent, dest_dir)
+    rel_sqfs = squashfs_path.resolve().relative_to(mount_src).as_posix()
+    rel_dest = dest_dir.resolve().relative_to(mount_src).as_posix()
+
+    # unsquashfs will not create missing parents for -d, and the bind mount only
+    # exposes what already exists on the host side.
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
     cmd = [
         "docker", "run", "--rm",
-        "-v", f"{scratch_dir.resolve()}:/work",
+        "-v", f"{mount_src.as_posix()}:/work",
         image, "sh", "-c",
         (
             f"apk add --no-cache squashfs-tools >/dev/null 2>&1 && "
@@ -238,18 +306,16 @@ def _extract_tendaw(
     firmware_path: Path,
     scratch_dir: Path,
     result: RootfsExtraction,
+    out_dir: Path | None = None,
+    force: bool = False,
 ) -> RootfsExtraction:
     from iris.extract.tenda import jefferson_extract, slice_partition
 
     container = fw_info.tendaw
     stem = firmware_path.stem
     parts_dir = scratch_dir / f"{stem}-parts"
-    rootfs_dir = scratch_dir / f"{stem}-rootfs"
-    if safe_present(rootfs_dir) and not safe_rmtree(rootfs_dir):
-        raise RuntimeError(
-            f"cannot clear stale extraction {rootfs_dir}: reparse points or locked "
-            "files survive the delete, so the new tree would merge into a remnant"
-        )
+    rootfs_dir = out_dir if out_dir is not None else scratch_dir / f"{stem}-rootfs"
+    _reset_dest(rootfs_dir, force=force, explicit=out_dir is not None)
 
     extracted: dict[str, Path] = {}
     for part in container.partitions:
@@ -300,13 +366,24 @@ def extract_rootfs(
     scratch_dir: Path,
     arch_hint: str = "",
     docker_image: str = "alpine:3.20",
+    out_dir: Path | None = None,
+    force: bool = False,
 ) -> RootfsExtraction:
+    """Extract the rootfs tree of ``firmware_path``.
+
+    ``out_dir`` relocates the extracted tree out of the scratch directory; the
+    squashfs slice and the TendaW ``-parts`` cache stay in ``scratch_dir`` because
+    they are regenerable intermediates rather than caller-facing results. Without
+    it the tree lands in ``scratch_dir/<firmware-stem>-rootfs`` as before.
+    """
     data = firmware_path.read_bytes()
     fw_info = analyze_firmware(data, arch_hint=arch_hint)
     result = RootfsExtraction(firmware_info=fw_info)
 
     if fw_info.tendaw is not None:
-        return _extract_tendaw(data, fw_info, firmware_path, scratch_dir, result)
+        return _extract_tendaw(
+            data, fw_info, firmware_path, scratch_dir, result, out_dir=out_dir, force=force
+        )
 
     if fw_info.rootfs_offset is None:
         result.failure = classify_failure(fw_info)
@@ -314,7 +391,7 @@ def extract_rootfs(
 
     stem = firmware_path.stem
     sqfs_path = scratch_dir / f"{stem}.squashfs"
-    rootfs_dir = scratch_dir / f"{stem}-rootfs"
+    rootfs_dir = out_dir if out_dir is not None else scratch_dir / f"{stem}-rootfs"
 
     if fw_info.ubi_offset is not None:
         sqfs_data = extract_squashfs_from_ubi(data, fw_info.ubi_offset)
@@ -330,6 +407,7 @@ def extract_rootfs(
 
     result.squashfs_path = sqfs_path
 
+    _reset_dest(rootfs_dir, force=force, explicit=out_dir is not None)
     _docker_unsquashfs(sqfs_path, rootfs_dir, image=docker_image)
     result.rootfs_dir = rootfs_dir
 

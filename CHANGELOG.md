@@ -4,6 +4,49 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.5] - 2026-10-02
+
+### 新增（`iris extract rootfs` 可指定输出目录，2026-10-02）
+
+- **`--out` / `--force`**：README 一直把 `iris extract rootfs --out ./rootfs_out`
+  写进快速上手，但 CLI 从未接受过该参数——照文档执行会直接报 "No such option"；
+  即使提取成功，产物也只在 `iris-home/scratch/<固件名>-rootfs` 里，下一步
+  `iris emulate run ./rootfs_out` 接不上。现在 `--out` 把提取出的 rootfs 树写到
+  调用方指定的路径，文档描述的分步流程真正可用；不给 `--out` 时行为与旧版一致。
+- **中间产物仍留在 scratch**：squashfs 切片与 TendaW 的 `-parts` 缓存是可再生的
+  临时文件，不跟随 `--out` 搬走。
+- **非空目录需显式 `--force`**：scratch 下的派生目录归 IRIS 所有，清掉即可；而
+  `--out` 指向的是调用方自己的资产，可能放着别的工作。目录非空时按退出码 2 拒绝
+  并**不做任何删除**，只有 `--force` 才替换内容。目标是已存在的文件时同样拒绝。
+
+### 修复（`--out` 本会被静默忽略到 scratch，2026-10-02）
+
+- **`_docker_unsquashfs` 只把目标目录的 basename 交给容器**：docker 单个 volume
+  以 squashfs 所在目录为挂载源，代码用 `dest_dir.name` 拼容器内路径，于是 `--out`
+  的父目录链被整段丢弃——命令打印成功、退出码 0，rootfs 却落在
+  `iris-home/scratch/<basename>`。现在改为计算能同时容纳切片与目标的**最紧公共
+  祖先**作为挂载源，两者都按相对路径寻址。
+- **跨盘目标不再无界上跳**：公共祖先不存在时（上跳到卷根仍不包含另一个目标），
+  立即报 `ValueError` 说明需同盘，而不是死循环。
+- **`unsquashfs` 不会为 `-d` 补建父目录**，而 bind mount 只暴露宿主已存在的路径，
+  因此写入前先在宿主侧 `mkdir -p` 目标，避免多层 `--out` 静默失败。
+
+### 修复（`--out` 参数遮蔽了 logger，2026-10-02）
+
+- `extract_rootfs()` 内把选项命名为 `out`，遮蔽了模块级
+  `out = get_stream_logger()`，函数体第一行就抛
+  `AttributeError: 'WindowsPath' object has no attribute 'info'`。ruff 与编译器
+  都不会报错（这是合法 Python 的名字重绑定），只有真实执行才会暴露；已补
+  `tests/test_cli_output.py` 的 subprocess 用例固定住。
+
+### 实测
+
+真实固件 `US_AC15V1.0BR_V15.03.05.18_multi_TD01.bin`（uimage + squashfs，
+ELF 普查 334/334 armel）：`--out .verify_out` 提取出 672 个文件的 rootfs 树且确实
+落在 `.verify_out`，scratch 未出现同名误落目录；重复执行被拒（退出码 2，用户文件
+未删），`--force` 后重提取成功（退出码 0）；该目录可直接作为
+`iris emulate run .verify_out --arch armel` 的输入并起壳。
+
 ## [0.3.4] - 2026-10-02
 
 ### 变更（所有输出统一带时间戳与色彩，2026-10-02）

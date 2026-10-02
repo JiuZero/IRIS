@@ -238,6 +238,15 @@ def extract_add(
 def extract_rootfs(
     firmware: Path,
     arch_hint: str = typer.Option("", help="arch hint (mipseb/mipsel/armel/x64)"),
+    out_dir: Path = typer.Option(
+        None,
+        "--out",
+        help="write the extracted rootfs tree here instead of iris-home/scratch; "
+        "refuses to overwrite a non-empty directory unless --force",
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="replace the contents of --out when it already holds a tree"
+    ),
 ) -> None:
     """Extract squashfs rootfs from a firmware image and verify arch via ELF census."""
     from iris.extract.rootfs_extract import extract_rootfs as do_extract
@@ -250,7 +259,15 @@ def extract_rootfs(
     settings = get_settings()
     scratch = settings.scratch_dir
     out.info(f"extracting rootfs from {firmware.name} ...")
-    result = do_extract(firmware, scratch, arch_hint=arch_hint)
+    try:
+        result = do_extract(
+            firmware, scratch, arch_hint=arch_hint, out_dir=out_dir, force=force
+        )
+    except ValueError as exc:
+        # The exception already names the path and the remedy; repeating them in a
+        # prefix just prints the directory twice.
+        err.error(str(exc))
+        raise typer.Exit(code=2) from exc
 
     fi = result.firmware_info
     pairs = [

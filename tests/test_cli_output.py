@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -41,7 +42,7 @@ SGR_RE = re.compile(r"\033\[[0-9;]*m")
 OUTPUT_MODULES = ["cli.py", "corpus/manifest.py"]
 
 
-def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
+def run_cli(*args: str, env_extra: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     """Invoke the CLI the way an operator would, with a predictable environment."""
     env = {
         **os.environ,
@@ -49,6 +50,7 @@ def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
         # A subprocess pipe is not a terminal, so color is off by default anyway;
         # pinning it makes that explicit rather than incidental.
         "NO_COLOR": "1",
+        **(env_extra or {}),
     }
     return subprocess.run(
         [sys.executable, "-m", "iris.cli", *args],
@@ -209,3 +211,55 @@ def test_no_escape_sequences_when_color_is_disabled():
     result = run_cli("rules", "list")
     assert "\033" not in result.stdout
     assert "\033" not in result.stderr
+
+def test_out_option_does_not_shadow_the_stream_logger(tmp_path):
+    """``--out`` must not rebind the module-level ``out`` logger.
+
+    Naming the option ``out`` inside ``extract_rootfs`` shadowed
+    ``out = get_stream_logger()``, so the first progress line raised
+    ``AttributeError: 'WindowsPath' object has no attribute 'info'`` before any
+    work happened. Neither ruff nor the compiler can see a rebinding that is
+    legal Python; only running the command can.
+    """
+    firmware = tmp_path / "junk.bin"
+    firmware.write_bytes(b"\x00" * 8192)
+
+    result = run_cli("extract", "rootfs", str(firmware), "--out", str(tmp_path / "rootfs_out"))
+
+    # Junk bytes carry no squashfs/UBI/TendaW structure, so extraction itself
+    # fails: that is exit code 2 reached through the real reporting path.
+    assert result.returncode == 2, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert "AttributeError" not in result.stderr
+    # Reaching the format failure (rather than the overwrite guard) also shows
+    # the option arrived as a plain path instead of shadowing the logger.
+    assert "refusing to overwrite" not in result.stderr
+    assert "no-rootfs" in result.stderr
+
+
+def test_out_option_refuses_a_populated_directory(tmp_path):
+    # Bytes with no container magic stop at format detection, which returns before
+    # the destination guard runs. find_squashfs() only accepts a magic that also
+    # carries a plausible bytes_used at +40, so build a header it will believe.
+    # Execution then reaches the guard -- still before any docker run, so the test
+    # needs no image.
+    header = bytearray(48)
+    header[0:4] = b"hsqs"
+    struct.pack_into("<Q", header, 40, 96)
+    firmware = tmp_path / "ac15.bin"
+    firmware.write_bytes(b"\x00" * 1875220 + bytes(header) + b"\x5a" * 96)
+    populated = tmp_path / "rootfs_out"
+    populated.mkdir()
+    (populated / "keep.txt").write_text("user work", encoding="utf-8")
+
+    result = run_cli(
+        "extract",
+        "rootfs",
+        str(firmware),
+        "--out",
+        str(populated),
+        env_extra={"IRIS_IRIS_HOME": str(tmp_path / "home")},
+    )
+
+    assert result.returncode == 2, result.stderr
+    assert "refusing to overwrite non-empty" in result.stderr
+    assert (populated / "keep.txt").exists(), "the guard must not delete first"

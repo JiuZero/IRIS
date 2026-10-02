@@ -39,6 +39,8 @@ docker build -t iris-emulate-baked:latest   -f docker/emulate/Dockerfile.baked .
 # 3) 分析一个固件包：识别格式/架构，提取 rootfs
 iris extract inspect "path/to/firmware.bin"
 iris extract add      "path/to/firmware.bin"      # 入库（ELF 架构校验）
+# --out 可选：把 rootfs 提取到指定目录，默认落在 iris-home/scratch/<固件名>-rootfs。
+# 目标目录非空时拒绝覆盖（需显式 --force）；squashfs 切片等中间产物始终留在 scratch。
 iris extract rootfs   "path/to/firmware.bin" --out ./rootfs_out
 
 # 4) 仿真并检查 Web 可达（端口转发到主机 8080）
