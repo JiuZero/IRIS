@@ -6,6 +6,71 @@
 
 ## [未发布]
 
+### 修复（arm64 固件的 Web 兜底从未执行，2026-10-02）
+
+- **`iris emulate run` 不再永远停在 `HTTP 000`**：某 arm64 固件（TES7002）的
+  `/etc/init.d/rcS` 按 `rc0..rc63` 顺序跑厂商脚本，而其中某个脚本在仿真环境下会
+  **永久阻塞**（等真实硬件，或等一次阻塞的 mib 调用）。IRIS 唯一的网络/Web 兜底
+  挂在 rcS **末尾**，于是被同一个阻塞连带杀死——串口日志里从头到尾没有一行
+  `IRIS-NETFIX:`，这正是该判断的决定性证据（实测卡点每次不同，分别停在 rc50、rc63）。
+- **兜底改挂 inittab 的 `::sysinit:`，并插在第一个 `::sysinit:` 之前**：BusyBox init
+  顺序执行 `::sysinit:` 并逐个阻塞等待，所以追加在 rcS 之后的条目仍然要等整条厂商链跑完
+  才有机会执行。新增 `iris_net_fix_bg.sh` 承担后台化——BusyBox 对 process 字段是
+  **verbatim exec**，不解释 shell 元字符，写在 inittab 里的尾部 `&` 只是一个普通参数。
+  修复后串口稳定出现 `starting pid 396 ... iris_net_fix_bg` **早于** `starting pid 398 ...
+  rcS`，`http://localhost:8080/login.html` 返回 200。
+- **新增 `scripts/emulate/inject_boot_hooks.sh`**：inittab 注入与 rcS 追踪从
+  `make_image.sh` 抽出，使其可针对合成 `/etc` 直接执行验证。两处插入都是**幂等**的
+  （先 `grep -v` 清旧标记再插），重复构建镜像不会叠加条目。
+- **rcS 逐步追踪**：rcS 把每个 rc 脚本的输出全部丢进 `/dev/null`，卡住的启动和成功的
+  启动在日志里长得一模一样。现在每个 rc 前后各打一条 `IRIS-RC: begin/end` 到
+  `/dev/console`，能直接看出厂商链走到哪一步、卡在哪个脚本。
+  替换文本里的 `&` 必须写成 `\&`：sed 把裸 `&` 当作"整个匹配"，会把 `2>&1` 改写成
+  `2>sh $rc_file > /dev/null 2>&11`，症状是 rcS 报 `can't create sh` 而整条链不执行。
+- **`iris_net_fix` 加互斥锁**：兜底现在有两个入口（inittab 与 rcS 末尾），不加锁时两者
+  都会探测到 :80 为空并各拉起一个 goahead，落败的那个报 `Cannot bind to address *:80`。
+  锁用 `mkdir` 原子性实现，`/proc/<pid>` 不存在即视为上次启动的残留锁并清理。
+  两处边界：`/var/run` 缺失时 `mkdir -p` 先建父目录（锁本身仍用不带 `-p` 的 `mkdir`，
+  `-p` 会让两个竞争者都拿到成功）；锁目录**根本建不出来**（只读 `/var/run`）时按"非冲突"
+  处理继续执行——此时静默退让等于悄悄关掉唯一的兜底，且不留任何痕迹。
+- **baked 仿真镜像按脚本指纹打 tag**：`Dockerfile.baked` 把 `scripts/emulate/` COPY 进
+  镜像，因此镜像**就是**这些脚本的编译产物。原来固定打 `:latest` 且"存在即复用"，
+  于是每次改 shell 脚本都静默失效：运行照常成功，容器里跑的是上一版 `make_image.sh`
+  ——与"修复没生效"完全无法区分。tag 改为 `iris-emulate-baked:<12位 sha256>`
+  （覆盖 `Dockerfile.baked` + `scripts/emulate/*`），构建后清理其余旧 tag。
+
+### 改进（日志格式与流式进度，2026-10-02）
+
+- **全局统一为 `[info] / [warn] / [error]`**：structlog 的 `ConsoleRenderer` 会把级别名
+  补齐到固定列宽以做表格对齐，非彩色终端上就表现为 `[info     ]` 这样一串尾随空格；
+  而同进程内 uvicorn/FastAPI/root logger 走 stdlib `logging`，输出的是**完全没有级别标签**
+  的裸消息，两种形状混在同一次运行里。改用自写 `PlainRenderer`（structlog 侧）与
+  `PlainFormatter`（stdlib 侧）输出同一种形状，级别名归一化到封闭词表
+  （`warning`/`WARNING` → `warn`，`exception`/`critical` → `error`）。
+  `setup_logging` 加 `force=True`：CLI 在同一进程内重复进入时 `basicConfig` 是 no-op，
+  否则级别会静默停在第一次的取值。
+- **启动等待改为覆盖型进度行**：120 秒的轮询原本每 5 秒追加一行 `[16s] waiting...`，
+  把真正解释本次运行的十几行埋掉了。新增 `StatusLine`：终端下用 `\r` 原地重写，并按上次
+  宽度补空格（否则更短的新行会把长行的尾巴留在屏幕上）；**非终端降级为逐行输出**——
+  被重定向的日志里塞满 `\r` 既不可读也不可 grep。新增 `clear()`：进度行悬在屏幕中间
+  没有换行，此时打真实日志会把两者拼在同一行上，打日志前先擦除。
+- **`emulate run` 的成功/超时结论回到日志级别**：原先由进度行承载，管道下会被丢弃，
+  留下一堆 `waiting` 却没有结论。现在是 `[info] Web reachable at ... after 79s` /
+  `[warn] guest web still unreachable on :8080 after 100s`。
+
+### 新增（测试，2026-10-02）
+
+- `tests/test_log.py`：39 例，覆盖级别归一化、两个渲染器、`setup_logging` 幂等
+  （经真实 `logging` 调用而非直调 formatter）、`StatusLine` 的终端/非终端两条路径。
+- `tests/test_boot_hooks.py`：20 例，**真的执行** `inject_boot_hooks.sh`（宿主 POSIX
+  shell）并检查产出的 inittab/rcS——顺序、幂等、厂商条目保留、`2>&1` 未被 sed 破坏、
+  `bash -n` 语法校验。
+- `tests/test_guest_net_fix_lock.py`：7 例，source 真实脚本后直接驱动 `acquire_lock`：
+  首个抢占、第二个退让、死 pid 残留锁回收、无 pid 文件、锁目录建不出来。
+- `tests/test_baked_image.py`：15 例，覆盖指纹随脚本/Dockerfile/新增脚本变化、复用与重建
+  的决策、旧 tag 清理只删非当前 tag。测试由写文件触发真实 bug：`IRIS-RC-MARK` 守卫被检查
+  却从未写入，导致重复构建会把已追踪的行再包一层。
+
 ### 修复（rootfs tarball 缓存永不失效，2026-10-02）
 
 - **重新打包的判据从"文件在不在"改成"树有没有变新"**：`emulate_firmware` 原本用

@@ -7,8 +7,45 @@
 
 START=99
 
+# Overridable only so the lock can be exercised against a scratch directory; the
+# guest always takes the default.
+LOCK_DIR=${IRIS_NET_FIX_LOCK_DIR:-/var/run/.iris_net_fix.lock}
+
 log() {
     echo "IRIS-NETFIX: $*" > /dev/console 2>/dev/null
+}
+
+# Two channels can reach this script: inittab's ::sysinit: (which does not wait
+# for the vendor rcS chain) and the tail of rcS itself (which only runs if that
+# chain finished). mkdir is atomic on every filesystem this touches, so it is
+# enough to keep the loser out — without it both would probe :80, both would
+# find it empty, and two goahead processes would fight over the port.
+#
+# Returns 0 when the fixup may proceed, 1 when another instance holds the lock.
+# A lock dir that cannot be created at all (read-only /var/run) is *not* a
+# conflict: standing down there would silently disable the only fallback, which
+# is the failure this whole script exists to prevent.
+acquire_lock() {
+    # The parent is created with -p (some firmwares ship no /var/run) but the
+    # lock itself with a plain mkdir, which is the atomic part: -p on the lock
+    # itself would report success to both racers.
+    mkdir -p "$(dirname "${LOCK_DIR}")" 2>/dev/null
+    if mkdir "${LOCK_DIR}" 2>/dev/null; then
+        return 0
+    fi
+    if [ -d "${LOCK_DIR}" ]; then
+        # A lock left by a previous boot of the same writable volume is stale;
+        # the owner is only alive for the duration of this fixup.
+        owner=$(cat "${LOCK_DIR}/pid" 2>/dev/null)
+        if [ -n "${owner}" ] && [ ! -d "/proc/${owner}" ]; then
+            log "clearing stale lock from pid ${owner}"
+            rm -rf "${LOCK_DIR}" 2>/dev/null || true
+            mkdir "${LOCK_DIR}" 2>/dev/null && return 0
+        fi
+        return 1
+    fi
+    log "cannot create ${LOCK_DIR}, proceeding without a lock"
+    return 0
 }
 
 has_ip() {
@@ -33,6 +70,11 @@ port80_listening() {
 }
 
 fixup() {
+    if ! acquire_lock; then
+        log "another iris_net_fix instance holds the lock, standing down"
+        return 0
+    fi
+    echo $$ > "${LOCK_DIR}/pid" 2>/dev/null || true
     log "start: brief pause before taking over the network"
     # Short grace period: the vendor chain (configd) may configure itself. The IP
     # is the critical path for reachability, so fix it early and only wait longer

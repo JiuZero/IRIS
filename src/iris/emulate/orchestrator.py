@@ -12,6 +12,7 @@ Pipeline:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
@@ -21,7 +22,7 @@ from pathlib import Path
 
 from iris.emulate.qemu_config import get_config, supported_archs
 from iris.fsutil import safe_is_file, safe_present, safe_read_text, safe_stat_size
-from iris.log import get_logger
+from iris.log import StatusLine, get_logger
 
 logger = get_logger(__name__)
 
@@ -93,18 +94,67 @@ def _run(cmd: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, env=_env(), timeout=timeout, check=False)
 
 
+def _baked_sources(project_root: Path) -> list[Path]:
+    """Everything ``Dockerfile.baked`` bakes into the image, in a stable order."""
+    sources = [project_root / "docker" / "emulate" / "Dockerfile.baked"]
+    sources += sorted((project_root / "scripts" / "emulate").glob("*"))
+    return sources
+
+
+def _baked_scripts_fingerprint(project_root: Path | None = None) -> str:
+    """Short digest of everything ``Dockerfile.baked`` copies into the image.
+
+    The emulation shell scripts live inside the baked image, so editing one and
+    re-running must not be served the image built from the previous revision.
+    """
+    if project_root is None:
+        project_root = Path(__file__).parent.parent.parent.parent
+    digest = hashlib.sha256()
+    for path in _baked_sources(project_root):
+        if not path.is_file():
+            continue
+        digest.update(path.name.encode("utf-8", "replace"))
+        try:
+            digest.update(path.read_bytes())
+        except OSError:
+            # Unreadable source cannot be fingerprinted; the name still enters the
+            # digest so a rename is not mistaken for "nothing changed".
+            continue
+    return digest.hexdigest()[:12]
+
+
 def _build_baked_image() -> str:
-    image_name = "iris-emulate-baked:latest"
+    """Return the baked image tag for the current scripts, building it if needed.
+
+    ``scripts/emulate/*.sh`` is copied into the image by ``Dockerfile.baked``, so
+    the image *is* the compiled form of those scripts. Tagging it ``:latest`` and
+    reusing it whenever it exists made every script edit silently inert: the run
+    looked successful while the container executed the previous revision of
+    ``make_image.sh`` — which is indistinguishable from the fix not working.
+    The tag therefore carries a digest of the sources that go into it.
+    """
+    project_root = Path(__file__).parent.parent.parent.parent
+    dockerfile = project_root / "docker" / "emulate" / "Dockerfile.baked"
+    image_name = f"iris-emulate-baked:{_baked_scripts_fingerprint()}"
     result = _run(["docker", "image", "inspect", image_name])
     if result.returncode == 0:
         return image_name
-    logger.info("Building iris-emulate-baked Docker image...")
-    project_root = Path(__file__).parent.parent.parent.parent
-    dockerfile = project_root / "docker" / "emulate" / "Dockerfile.baked"
-    result = _run(["docker", "build", "-t", image_name, "-f", str(dockerfile), str(project_root)], timeout=300)
+    logger.info(f"Building baked emulation image {image_name} from current scripts...")
+    result = _run(["docker", "build", "-t", image_name, "-f", str(dockerfile), str(project_root)], timeout=600)
     if result.returncode != 0:
         raise RuntimeError(f"Docker build failed: {result.stderr}")
+    _drop_other_baked_tags(keep=image_name)
     return image_name
+
+
+def _drop_other_baked_tags(keep: str) -> None:
+    """Remove baked tags that no longer correspond to any script revision."""
+    listing = _run(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"])
+    for line in listing.stdout.splitlines():
+        name = line.strip()
+        if name.startswith("iris-emulate-baked:") and name != keep:
+            logger.info(f"Removing stale baked image {name}")
+            _run(["docker", "rmi", "-f", name], timeout=120)
 
 
 def _create_tarball(rootfs_dir: Path, tarball_path: Path) -> Path:
@@ -396,6 +446,7 @@ def emulate_firmware(
     boot_deadline = time.time() + timeout_sec
     guest_ip = "192.168.1.1"
     socat_updated = False
+    progress = StatusLine()
     while time.time() < boot_deadline:
         time.sleep(5)
         elapsed = int(time.time() - start_time)
@@ -415,7 +466,8 @@ def emulate_firmware(
                             ip = f"{(raw >> 24) & 0xFF}.{(raw >> 16) & 0xFF}.{(raw >> 8) & 0xFF}.{raw & 0xFF}"
                         if ip != guest_ip and not ip.startswith("127."):
                             guest_ip = ip
-                            logger.info(f"Detected guest IP: {guest_ip}")
+                            progress.clear()
+                            logger.info(f"Detected guest IP: {guest_ip}, forwarding :{host_port}...")
                             _run(["docker", "exec", container_name, "pkill", "-f", "socat.*TCP"], timeout=5)
                             _run(["docker", "exec", "-d", container_name, "socat",
                                   f"TCP-LISTEN:{host_port},reuseaddr,fork", f"TCP:{guest_ip}:80"], timeout=5)
@@ -432,9 +484,13 @@ def emulate_firmware(
             result.web_ok = True
             result.web_url = f"http://localhost:{host_port}"
             result.success = True
+            progress.close()
             logger.info(f"Web reachable at {result.web_url} (HTTP {http_code}) after {elapsed}s")
             break
-        logger.info(f"[{elapsed}s] waiting... (HTTP {http_code})")
+        progress.update(f"[{elapsed}s] waiting for guest web on :{host_port} (HTTP {http_code or '---'})")
+    else:
+        progress.clear()
+        logger.warning(f"guest web still unreachable on :{host_port} after {timeout_sec}s")
 
     log_result = _run(["docker", "cp", f"{container_name}:/work/scratch/{iid}/qemu.serial.log", str(work_dir / "qemu.serial.log")])
     if log_result.returncode == 0:
