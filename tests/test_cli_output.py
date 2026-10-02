@@ -263,3 +263,69 @@ def test_out_option_refuses_a_populated_directory(tmp_path):
     assert result.returncode == 2, result.stderr
     assert "refusing to overwrite non-empty" in result.stderr
     assert (populated / "keep.txt").exists(), "the guard must not delete first"
+
+class TestDbStatsCommand:
+    """`iris db stats` is the first thing anyone reads to judge coverage, so it has
+    one obligation above all others: never print a number that was not measured."""
+
+    def _run_against(self, tmp_path, populate):
+        db_path = tmp_path / "runs.db"
+        populate(db_path)
+        return run_cli(
+            "db", "stats",
+            env_extra={"IRIS_DATABASE_URL": f"sqlite:///{db_path.as_posix()}"},
+        )
+
+    def test_an_empty_database_does_not_report_zero_percent(self, tmp_path):
+        """0/0 rendered as "0.0% web reachable" is indistinguishable from a real
+        measurement of a firmware set where nothing booted. The empty case has to
+        read as empty, not as a discouraging result."""
+        result = self._run_against(tmp_path, lambda _db: None)
+
+        assert result.returncode == 0, result.stderr
+        text = "\n".join(body_lines(result.stdout))
+        assert "no emulation runs recorded yet" in text
+        assert "%" not in text, f"an unmeasured rate was printed: {text}"
+
+    def test_it_reports_the_recorded_runs(self, tmp_path):
+        from iris.db.engine import get_engine, init_db, make_session
+        from iris.db.runs import record_run
+        from iris.failures import Failure, FailureKind
+
+        def populate(db_path):
+            engine = get_engine(f"sqlite:///{db_path.as_posix()}")
+            init_db(engine)
+            with make_session(engine) as session:
+                record_run(session, iid=11, arch="mipsel", rootfs_dir=tmp_path / "a",
+                           success=True, web_ok=True, duration_sec=30.0)
+                record_run(session, iid=12, arch="mipsel", rootfs_dir=tmp_path / "b",
+                           success=False, web_ok=False, duration_sec=120.0,
+                           findings=[Failure(FailureKind.WEB_UNREACHABLE, "guest never answered")])
+                record_run(session, iid=13, arch="aarch64", rootfs_dir=tmp_path / "c",
+                           success=False, web_ok=False, duration_sec=90.0,
+                           findings=[Failure(FailureKind.REBOOT_LOOP, "28 reboots")])
+
+        result = self._run_against(tmp_path, populate)
+
+        assert result.returncode == 0, result.stderr
+        text = "\n".join(body_lines(result.stdout))
+        assert "3 recorded run(s)" in text
+        assert "1/3 (33.3%)" in text
+        assert "mipsel" in text and "aarch64" in text
+        assert "reboot-loop [boot]" in text
+        assert "web-unreachable [service]" in text
+
+    def test_the_numbers_come_from_the_table_not_from_the_process(self, tmp_path):
+        """A command that recomputed its own tally would agree with itself even
+        with the database unreadable. Put a file where the database's parent
+        directory must go: the command has to fail loudly instead of printing a
+        confident summary, or "no runs yet" becomes the permanent answer to a
+        broken install."""
+        blocker = tmp_path / "a-file"
+        blocker.write_text("not a directory", encoding="utf-8")
+        result = run_cli(
+            "db", "stats",
+            env_extra={"IRIS_DATABASE_URL": f"sqlite:///{(blocker / 'iris.db').as_posix()}"},
+        )
+        assert result.returncode != 0, result.stdout
+        assert "no emulation runs recorded yet" not in result.stdout

@@ -4,6 +4,91 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.7] - 2026-10-02
+
+### 新增（仿真结果落库，此前每张统计表都是手工填的）
+
+- **`src/iris/db/runs.py`**：`emulation_run` 与 `failure_profile` 此前只有表定义、
+  零写入路径（`grep -r EmulationRun src/` 只匹配到模型本身）。`docs/eval-log.md`
+  里每一个百分比都是人工填写、无法由代码验证的——这正是同一份文档能一边写
+  「4/5 启动成功」、一边列出五行全部 ✅ 的原因。现在每次仿真自动落库。
+- **`record_run()` 记 primary 失败 kind + 每个 finding 各一行**。一次起不来的固件
+  通常叠着多个原因（无网卡 / 无地址 / 无 web 服务），压成一个桶会让人看不出该先修
+  哪个。无法归属语料的运行 `image_id` 存 NULL 而不是硬塞最近的候选：错归属会静默
+  污染全部按固件统计的数字，缺归属是看得见的。
+- **`iris db stats`**：从表里读回总运行数、Web 达标率、按 arch 分解、失败直方图。
+  空表时明确说「尚未记录任何运行」而不是打印 `0.0%`——把 0/0 渲染成百分比，
+  和「全部固件都没起来」在读起来时完全一样。
+- **`src/iris/failures.py`**：闭合的失败分类法。`Stage` 7 类 / `FailureKind` 23 个，
+  每个 kind 都有唯一 stage 和一句可执行建议。
+
+### 修复（分类法与真实故障对齐）
+
+- **`Stage.NVRAM` 此前是死阶段**：DB 注释与 `docs/eval-log.md` 都宣称有 `nvram`
+  阶段，但没有任何 `FailureKind` 映射到它。真实故障 `nvram partition is destory`
+  → 28 次 reboot 恰恰是 nvram 问题，此前只被笼统归为 `REBOOT_LOOP`（stage=boot），
+  看直方图的人会被导向「等更久」或「删 reboot 二进制」。新增
+  `FailureKind.NVRAM_UNREADABLE`（stage=nvram），reboot trigger 命中 nvram 时
+  额外产出该 finding。
+- **`NETWORK_FALLBACK_OK` 曾被错标为 `WEB_UNREACHABLE`**：「IRIS network fallback ran」
+  是**正常信号**，当成失败会污染失败直方图。新增 `INFORMATIONAL_KINDS` 与
+  `Failure.is_failure`，`BootDiagnosis.primary` 与聚合统计均跳过它。
+- **`session.execute(select(Model))` 返回以实体为键的 Row 而非实体**，
+  `run.web_reachable` 会抛 `KeyError`。改用 `session.scalars(...)`。
+- **`init_db` 只 `create_all` 不 ALTER 已存在的表**：旧库的 `emulation_run` 缺
+  `image_id`/`arch` 时每次插入都失败，症状读起来像「落库坏了」。新增幂等
+  `ensure_columns()`。
+- **落库点移进薄包装层**：初版把 `_record_outcome` 放在 `emulate_firmware` 函数末尾，
+  所有 early return（arch 不支持 / tarball 失败 / 镜像构建失败）全部绕过落库——
+  而这些恰恰是手工表格最容易漏掉的运行。重构为 `emulate_firmware`（薄包装，负责
+  落库）+ `_emulate_firmware`（原实现）。
+- **删除残留的 `if record:` 调用**（`_emulate_firmware` 末尾）：薄包装重构时漏删，
+  主路径（成功/最终失败）会抛 `NameError`。由 `tests/test_run_recording.py` 抓到。
+- **`Failure` 的证据此前仍可事后改写**：`frozen=True` 只阻止属性重新绑定，
+  `evidence` 仍是可变 dict，且 `MappingProxyType` 直接包原 dict 也拦不住持有原引用的
+  构造方。现在 `__post_init__` 内拷贝后再包只读代理。
+- **直方图与按阶段统计曾用两套 stage 判定**：`failure_histogram()` 二次解析 kind，
+  对未知 kind 的历史行回退到 `infra`；而 `run_stats()` 回退到存储的 stage。同一行数据
+  会在两个视图里落在不同阶段。现在直方图直接读 `run_stats` 已解析的结果。
+
+### 测试修正
+
+- **`"make_image.sh" in cmd` 对 argv list 是成员判断而非子串匹配**：mock 从未生效，
+  落库用例实际走完了整个 120s 启动超时才到达断言点，即被测分支一次也没执行
+  （该文件单次运行从 124s 降到 3.5s）。
+
+### 变更（iid 外键语义修正）
+
+- **`emulation_run.iid` 去掉 FK，改普通 int；新增可空 `image_id`**：模型声明
+  `iid → image.id`（CASCADE），但所有调用方传的 `iid` 是 scratch 运行号
+  （`md5(rootfs) % 10000`），与语料 id（1~11）几乎无交集。把运行号写进一个声明为
+  语料 id 的列，是 schema 无法表达的谎。
+- **测试不再污染真实语料库**：`tests/conftest.py` 用 session 级 fixture 把
+  `IRIS_DATABASE_URL` 重定向到临时文件。`iris-home/iris.db` 是 11 个语料固件与
+  全部评估数字的唯一来源，测试往里写假运行等于把假固件混进被评测的集合。
+- **删除 `docs/eval-log.md` 中无代码路径的阶段** `wizard` / `verify`（见该文件文首）。
+- **更正「4/5 启动成功」**：按同文档上表应为 5/5（x86/64 一行是「—」，不在仿真范围）。
+
+### 已知口径差异（留待 P1-a 收口）
+
+- 语料登记名 `image.arch`（如 `aarch64`）与运行时名 `emulation_run.arch`（如 `arm64`）
+  目前不是同一套词表，`iris db stats` 的「by arch」按运行时名分组，暂不能与语料表
+  `arch` 列直接对齐比较。
+
+### 实测（TES7002 arm64 真实固件）
+
+| 步骤 | 结果 |
+|---|---|
+| `iris emulate run`（tarball 命中缓存） | 72s，Web 可达 |
+| 落库 | `emulation_run` 1 行：iid=9001, arch=arm64, web=1, image_id=11（自动归属） |
+| 失败路径落库 | 真实走通 `unsupported-arch`：`failure_profile` 写入 stage=arch + hint，探针行已删除 |
+| `iris db stats` | `1 recorded run(s)` / `web reachable 1/1 (100.0%)` |
+
+### 变异验证（5 项，全部如期变红并恢复）
+
+去掉包装层落库调用 / 让 informational finding 成为 primary / 删除 `_KIND_STAGE` 条目 /
+去掉 `Failure` 证据的只读包装 / 让直方图二次解析 stage。
+
 ## [0.3.6] - 2026-10-02
 
 ### 修复（`WEB_SERVER_RESTART` 此前必然救不回，2026-10-02）

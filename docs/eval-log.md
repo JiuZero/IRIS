@@ -2,7 +2,35 @@
 
 > 本文件记录 M0 基线语料每款固件的提取/识别/仿真结果。
 > FirmAE baseline 仿真由用户在 WSL2 内手动执行（见 `03-M0执行手册.md`），结果回填本表。
-> 失败阶段固定 8 类：`extraction / arch / boot / nvram / network / service / wizard / verify`。
+> 失败阶段固定 7 类：`extraction / arch / infra / boot / nvram / network / service`。
+>
+> 这 7 类不是本文档的约定，而是 `src/iris/failures.py` 的 `Stage` 枚举——判定发生在代码里，
+> 不是写在这里。`tests/test_failures.py` 反向守卫两个方向：每个 `Stage` 至少被一个
+> `FailureKind` 映射，每个 `FailureKind` 都有唯一 stage 和一句可执行建议；新增成员忘了配
+> stage 会让测试直接变红，而不是等到某天直方图里出现一个空阶段。
+>
+> （原文此处列 8 类，含 `wizard` / `verify`。这两个阶段没有任何代码路径能够产出：
+> 全仓 `grep -rn "Stage\." src/` 只匹配到上列 7 个。它们写在这里只会让人以为存在一类
+> 从未被观测到的失败。现已删除。）
+
+## 数字口径：从哪来
+
+| 来源 | 覆盖范围 | 可复现性 |
+|------|----------|----------|
+| `iris db stats` | 走完编排器的每一次仿真尝试，含失败与从未启动容器的早退 | 从 `emulation_run` / `failure_profile` 读回 |
+| 本文各表 | M0 阶段的逐固件人工快照，不含此后新增的实物固件 | 手工维护的历史快照 |
+
+**0.3.7 之前这两个来源没有关系。** `emulation_run` 与 `failure_profile` 虽有表定义，
+但全仓 `grep -r EmulationRun src/` 只匹配到模型本身——没有任何写入路径。上面每张表里的
+百分比都是人工填写、无法由代码验证的，这正是同一份文档能一边写「4/5 启动成功」、
+一边列出五行全部 ✅ 的原因。
+
+自 0.3.7 起每次仿真自动落库，`iris db stats` 输出即当前真实数字；本文表格保留为
+M0 当时的记录，不再随后续运行自动更新。
+
+**arch 命名存在已知口径差异（待 P1-a 收口）**：语料登记名（`image.arch`，如 `aarch64`）
+与运行时名（`emulation_run.arch`，如 `arm64`）目前不是同一套词表，`iris db stats` 的
+「by arch」按运行时名分组。因此该表的分组键暂时不能直接与语料表的 `arch` 列对齐比较。
 
 ## 语料入库总览
 
@@ -51,10 +79,20 @@
 - 网络推断：orchestrator 从串口日志解析 `__inet_insert_ifa` 自动发现 guest IP，动态调整 socat 转发目标。
 - 网络修复注入：`iris_net_fix` OpenWrt init 脚本（START=99）在固件未配置 IP 时分配 192.168.1.1。
 
+**本表覆盖范围**：仅上表 6 款 M0 语料（`image` id 1-6）。此后入库的实物固件
+（G1 V3.1si / i27 V1.1br / RP3 V3.0ac / TES7002，id 7/8/10/11）不在本表内，
+其运行结果以 `iris db stats` 为准。已知的一例：TES7002（aarch64）2026-10-02 实测
+72s 起来、Web 可达（HTTP 302），已落库为 `emulation_run` 第 1 行。
+
 ## FirmAE baseline 仿真结果
 
 > 以下由用户在 WSL2 内执行 FirmAE `run.sh -c <firmware>` 后回填。
 > 每款固件最长约 12 分钟（2×TIMEOUT）。
+
+**现状（截至 0.3.7）：整表仍为 `_待填_`，尚无任何一次 FirmAE baseline 结果。**
+IRIS 侧的对照数字已全部产出并可由 `iris db stats` 复现，baseline 侧为空白，因此
+当前**无法做 IRIS 与 FirmAE 的对照结论**——任何"IRIS 比 FirmAE 好/快"的说法在
+本表填上之前都没有证据支撑。此处如实留白，不以 IRIS 数字代填。
 
 | # | 固件 | arch 识别 | rootfs 提取 | FirmAE result | network_type | 失败阶段 | 关键日志指纹 |
 |---|------|-----------|-------------|---------------|--------------|----------|--------------|
@@ -99,6 +137,13 @@
 - [x] 每款在 IRIS db 中有 image 记录，arch 识别 6/6 正确（armel/mipseb/mipsel/x64）
 - [x] rootfs 提取 5/6 成功（3 squashfs + 2 UBI），ELF arch 验证全部一致
 - [x] UBI volume 解析 + 内嵌 squashfs 提取 2/2 成功（WRT1200AC/R7800）
-- [x] ≥ 5 次完成 IRIS 仿真并记录 result（4/5 启动成功，2/5 Web 可达）
+- [x] ≥ 5 次完成 IRIS 仿真并记录 result（5/5 启动成功，2/5 Web 可达）
 - [x] eval-log.md 失败模式 ≥ 3 类有真实日志指纹（VLAN/kernel panic/无 IP）
 - [x] （加分）2 款固件仿真成功且 curl Web 可达（Newifi D2 + Archer C7）
+**关于「5/5 启动成功」的更正**：原文写「4/5 启动成功」，与上表矛盾——上表 5 台可仿真设备
+（DIR-868L / Archer C7 / WRT1200AC / R7800 / Newifi D2）的「QEMU 启动」列全部为 ✅，
+x86/64 一行是「—」即不在仿真范围，计入分母会凭空多出一个从未尝试过的失败。
+按上表口径为 5/5 启动成功、其中 2/5 Web 可达。
+
+这两项在 0.3.7 之前无法由任何代码验证（见文首「数字口径」）；现每次仿真自动写入
+`emulation_run`，`iris db stats` 的计数即为该口径。

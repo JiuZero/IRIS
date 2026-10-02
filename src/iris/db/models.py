@@ -89,12 +89,23 @@ class Product(Base):
 
 
 class EmulationRun(Base):
+    """One attempt at booting a rootfs.
+
+    ``iid`` is the *run* number -- the same value the container is named after and
+    the scratch directory uses -- not a corpus image id. It was declared as a
+    foreign key to ``image.id`` while every caller passed
+    ``md5(rootfs) % 10000``, so the constraint described a relationship that did
+    not exist; ``image_id`` below carries the real, optional link.
+    """
+
     __tablename__ = "emulation_run"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    iid: Mapped[int] = mapped_column(
-        Integer, ForeignKey("image.id", ondelete="CASCADE"), nullable=False, index=True
+    iid: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    image_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("image.id", ondelete="SET NULL"), index=True
     )
+    arch: Mapped[str | None] = mapped_column(String, index=True)
     mode: Mapped[str] = mapped_column(String, default="check")  # check / run / analyze
     network_type: Mapped[str | None] = mapped_column(String)  # normal / reload / bridge / ...
     web_reachable: Mapped[bool | None] = mapped_column(Boolean)
@@ -103,20 +114,29 @@ class EmulationRun(Base):
     time_web: Mapped[int | None] = mapped_column(Integer)
     time_ping: Mapped[int | None] = mapped_column(Integer)
     result: Mapped[bool | None] = mapped_column(Boolean)
-    result_kind: Mapped[str | None] = mapped_column(String)  # structured failure category
+    #: The one failure that names the cause. Every other signal for the same run
+    #: is a `failure_profile` row -- see `FailureKind` for the closed vocabulary.
+    result_kind: Mapped[str | None] = mapped_column(String, index=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, default=datetime.utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
 class FailureProfile(Base):
+    """One signal behind a failed run.
+
+    A guest that never serves :80 usually has several stacked causes; giving each
+    its own row is what makes "fix the NIC first" answerable from the data.
+    ``stage`` is one of `iris.failures.Stage`.
+    """
+
     __tablename__ = "failure_profile"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     run_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("emulation_run.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    stage: Mapped[str] = mapped_column(String, nullable=False)  # extraction / arch / boot / nvram / network / service
-    signal: Mapped[str | None] = mapped_column(String)
+    stage: Mapped[str] = mapped_column(String, nullable=False)  # extraction / arch / boot / nvram / network / service / infra
+    signal: Mapped[str | None] = mapped_column(String, index=True)  # FailureKind value
     log_fingerprint: Mapped[str | None] = mapped_column(String)
     detail: Mapped[dict | None] = mapped_column(JSON)
 

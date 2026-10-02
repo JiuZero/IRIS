@@ -18,6 +18,7 @@ from iris.extract.firmware import (
     identify_format,
     parse_uimage,
 )
+from iris.failures import FailureKind
 
 
 def _make_uimage(arch_field: int = 5, name: str = "MIPS OpenWrt Linux-6.6") -> bytes:
@@ -273,7 +274,7 @@ class TestEncryptedFitFailureProfile:
         from iris.extract.rootfs_extract import classify_failure
 
         info = analyze_firmware(self._wrapper(4))
-        assert classify_failure(info).startswith("encrypted-fit")
+        assert classify_failure(info).kind is FailureKind.ENCRYPTED_FIT
 
     def test_classify_plain_fit_profile(self):
         from iris.extract.rootfs_extract import classify_failure
@@ -281,11 +282,11 @@ class TestEncryptedFitFailureProfile:
 
         assert classify_failure(
             FirmwareInfo(format="fit", fit=True)
-        ).startswith("fit-unsupported")
+        ).kind is FailureKind.FIT_UNSUPPORTED
         assert classify_failure(
             FirmwareInfo(
                 format="tendaw",
                 tendaw=TendaContainer(model="TDxxxx", version="1.0", zip_offset=128),
             )
-        ).startswith("tendaw-nojffs2")
-        assert classify_failure(FirmwareInfo(format="raw")).startswith("no-rootfs")
+        ).kind is FailureKind.TENDAW_NO_JFFS2
+        assert classify_failure(FirmwareInfo(format="raw")).kind is FailureKind.NO_ROOTFS

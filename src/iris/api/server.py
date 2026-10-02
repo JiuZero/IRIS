@@ -106,7 +106,7 @@ async def emulate(req: EmulateRequest) -> EmulateResponse:
 
     problem = await asyncio.to_thread(preflight_arch, rootfs, req.arch)
     if problem:
-        raise HTTPException(status_code=400, detail=f"preflight: {problem}")
+        raise HTTPException(status_code=400, detail=f"preflight: {problem.message}")
 
     iid = req.iid if req.iid > 0 else int(hashlib.md5(str(rootfs.resolve()).encode()).hexdigest(), 16) % 10000
 
@@ -248,7 +248,8 @@ async def pipeline(
             web_ok=False,
             web_url="-",
             duration_sec=0.0,
-            error=f"rootfs extraction failed: {ext.failure or 'no rootfs directory created'}",
+            error=f"rootfs extraction failed: "
+                   f"{ext.failure_reason or 'no rootfs directory created'}",
         )
 
     problem = await asyncio.to_thread(preflight_arch, rootfs_dir, detected_arch)
@@ -262,7 +263,7 @@ async def pipeline(
             web_ok=False,
             web_url="-",
             duration_sec=0.0,
-            error=f"preflight: {problem}",
+            error=f"preflight: {problem.message}",
         )
 
     result = await asyncio.to_thread(

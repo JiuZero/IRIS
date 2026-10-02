@@ -101,7 +101,7 @@ def prepare_from_firmware(
         return PreparedRootfs.from_error(f"extraction error: {e}")
 
     if result.rootfs_dir is None:
-        return PreparedRootfs.from_error(result.failure or "unknown extraction failure")
+        return PreparedRootfs.from_error(result.failure_reason or "unknown extraction failure")
 
     prepared = PreparedRootfs(
         rootfs_dir=result.rootfs_dir,

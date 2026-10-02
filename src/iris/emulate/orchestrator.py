@@ -18,9 +18,11 @@ import re
 import subprocess
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from iris.emulate.qemu_config import get_config, supported_archs
+from iris.failures import BootDiagnosis, Failure, FailureKind
 from iris.fsutil import safe_is_file, safe_present, safe_read_text, safe_stat_size
 from iris.log import StatusLine, get_logger
 
@@ -91,8 +93,102 @@ _REBOOT_TRIGGERS = (
     )),
 )
 
+#: The subset of triggers that mean the flash-backed config could not be read,
+#: as opposed to a vendor bug. Only these justify a separate `nvram` finding:
+#: "the guest rebooted" and "the guest rebooted because its nvram is gone" call
+#: for completely different work, and the reboot loop alone hides which.
+_NVRAM_TRIGGERS = frozenset({
+    "nvram partition is destory",
+    "envram_init: read flash error",
+    "Could not open mtd device",
+})
 
-def diagnose_boot_failure(serial_log: str, *, reboots: int = 0) -> str:
+
+def _boot_findings(serial_log: str, *, reboots: int) -> list[Failure]:
+    """One ``Failure`` per distinct way the guest failed, most specific first.
+
+    Ordered most-specific first: the earliest link in the chain to break is the
+    one worth reporting, because everything after it is downstream. Each probe
+    states what was checked, so a wrong guess shows up as a missing probe rather
+    than as a confident wrong answer.
+    """
+    findings: list[Failure] = []
+
+    if reboots >= REBOOT_LOOP_THRESHOLD:
+        cause = next((why for marker, why in _REBOOT_TRIGGERS if marker in serial_log), None)
+        findings.append(Failure(
+            FailureKind.REBOOT_LOOP,
+            f"guest requested a kernel reboot {reboots} times and never reached a "
+            f"usable userspace"
+            + (f", because {cause}" if cause else "for a reason the log does not name"),
+            evidence={"reboots": reboots, "trigger": cause or ""},
+        ))
+        marker = next((m for m, _ in _REBOOT_TRIGGERS if m in serial_log), "")
+        if marker in _NVRAM_TRIGGERS:
+            # The reboot loop is the symptom; this is the device that is missing.
+            # Reporting only the loop would send whoever reads the histogram after
+            # "wait longer" / "remove the reboot binary", neither of which can work.
+            # The detail names the log marker rather than repeating the cause, which
+            # the loop finding has already spelled out.
+            findings.append(Failure(
+                FailureKind.NVRAM_UNREADABLE,
+                f"the guest's flash-backed config could not be read (log: {marker!r}), "
+                "so it reboots on purpose instead of booting",
+                evidence={"log_marker": marker},
+            ))
+
+    netfix = serial_log.count("IRIS-NETFIX:")
+    if netfix == 0:
+        findings.append(Failure(
+            FailureKind.BOOT_HOOKS_MISSING,
+            "IRIS network fallback never logged a single line: the boot hooks did "
+            "not run (inittab/rcS not found where the image build looked)",
+            evidence={"netfix_lines": 0},
+        ))
+    else:
+        findings.append(Failure(
+            FailureKind.NETWORK_FALLBACK_OK,
+            f"IRIS network fallback ran ({netfix} log lines)",
+            evidence={"netfix_lines": netfix},
+        ))
+
+    if not _HAS_NON_LO_IP.search(serial_log):
+        findings.append(Failure(
+            FailureKind.NO_GUEST_IP,
+            "no non-loopback address was ever assigned in the guest: nothing "
+            "configured an IP, so the forwarded port had nothing to forward to",
+        ))
+
+    has_nic = any(hint in serial_log for hint in _NET_DRIVER_HINTS) \
+        or _NIC_PRESENT.search(serial_log)
+    if not has_nic:
+        findings.append(Failure(
+            FailureKind.NO_NETWORK_DRIVER,
+            "no network driver registered in the guest (no virtio/e1000/rtl8139 "
+            "activity and no eth* interface): the rehost has no NIC to forward to",
+        ))
+
+    running = [s for s in _KNOWN_WEB_SERVERS if re.search(rf"\b{s}\b", serial_log)]
+    if running:
+        binds = re.findall(r"inet_bind\[PID: \d+ \(([^)]+)\)\]: proto:SOCK_STREAM, port:(\d+)", serial_log)
+        detail = ", ".join(f"{proc or '?'}:{port}" for proc, port in dict.fromkeys(binds)) or "port unknown"
+        findings.append(Failure(
+            FailureKind.WEB_WRONG_PORT,
+            f"a web server did start ({', '.join(running)}) but bound {detail} — "
+            f"anything other than :80 is unreachable through the forward",
+            evidence={"servers": running,
+                      "binds": [f"{proc}:{port}" for proc, port in dict.fromkeys(binds)]},
+        ))
+    else:
+        findings.append(Failure(
+            FailureKind.WEB_NOT_STARTED,
+            "no known web server process ever started in the guest",
+        ))
+
+    return findings
+
+
+def diagnose_boot_failure(serial_log: str, *, reboots: int = 0) -> BootDiagnosis:
     """Name the most likely reason a guest never served :80, from its serial log.
 
     "HTTP 000" is a symptom; the operator is left to grep six thousand lines of
@@ -101,54 +197,13 @@ def diagnose_boot_failure(serial_log: str, *, reboots: int = 0) -> str:
     as a missing probe rather than as a confident wrong answer, and the next run
     of the same firmware produces the same diagnosis to diff against.
 
-    Ordered most-specific first: the earliest link in the chain to break is the
-    one worth reporting, because everything after it is downstream.
+    The return value is the same sentence callers have always received; the
+    ``.findings`` behind it are the machine-readable half, produced by the same
+    pass so the two cannot drift apart.
     """
-    findings: list[str] = []
-
-    if reboots >= REBOOT_LOOP_THRESHOLD:
-        cause = next((why for marker, why in _REBOOT_TRIGGERS if marker in serial_log), None)
-        findings.append(
-            f"guest requested a kernel reboot {reboots} times and never reached a "
-            f"usable userspace"
-            + (f", because {cause}" if cause else "for a reason the log does not name")
-        )
-
-    netfix = serial_log.count("IRIS-NETFIX:")
-    if netfix == 0:
-        findings.append(
-            "IRIS network fallback never logged a single line: the boot hooks did "
-            "not run (inittab/rcS not found where the image build looked)"
-        )
-    else:
-        findings.append(f"IRIS network fallback ran ({netfix} log lines)")
-
-    if not _HAS_NON_LO_IP.search(serial_log):
-        findings.append(
-            "no non-loopback address was ever assigned in the guest: nothing "
-            "configured an IP, so the forwarded port had nothing to forward to"
-        )
-
-    has_nic = any(hint in serial_log for hint in _NET_DRIVER_HINTS) \
-        or _NIC_PRESENT.search(serial_log)
-    if not has_nic:
-        findings.append(
-            "no network driver registered in the guest (no virtio/e1000/rtl8139 "
-            "activity and no eth* interface): the rehost has no NIC to forward to"
-        )
-
-    running = [s for s in _KNOWN_WEB_SERVERS if re.search(rf"\b{s}\b", serial_log)]
-    if running:
-        binds = re.findall(r"inet_bind\[PID: \d+ \(([^)]+)\)\]: proto:SOCK_STREAM, port:(\d+)", serial_log)
-        detail = ", ".join(f"{proc or '?'}:{port}" for proc, port in dict.fromkeys(binds)) or "port unknown"
-        findings.append(
-            f"a web server did start ({', '.join(running)}) but bound {detail} — "
-            f"anything other than :80 is unreachable through the forward"
-        )
-    else:
-        findings.append("no known web server process ever started in the guest")
-
-    return "emulation failed: " + "; ".join(findings) + "."
+    findings = _boot_findings(serial_log, reboots=reboots)
+    prose = "emulation failed: " + "; ".join(f.detail for f in findings) + "."
+    return BootDiagnosis(prose, tuple(findings))
 
 
 def _count_guest_reboots(container_name: str, iid: int) -> int:
@@ -169,17 +224,20 @@ def _count_guest_reboots(container_name: str, iid: int) -> int:
         return 0
 
 
-def _failure_diagnosis(container_name: str, iid: int, *, reboots: int = 0) -> str:
+def _failure_diagnosis(container_name: str, iid: int, *, reboots: int = 0) -> BootDiagnosis:
     """Pull the guest serial log out of the container and diagnose from it."""
     res = subprocess.run(
         ["docker", "exec", container_name, "cat", f"/work/scratch/{iid}/qemu.serial.log"],
         capture_output=True, text=True, env=_env(), timeout=30, check=False,
     )
     if res.returncode != 0:
-        return (
-            f"emulation failed: guest serial log unavailable "
-            f"({res.stderr.strip() or 'container gone'}); "
-            f"guest reboots: {reboots}"
+        reason = (res.stderr.strip() or "container gone")
+        return BootDiagnosis(
+            f"emulation failed: guest serial log unavailable ({reason}); "
+            f"guest reboots: {reboots}",
+            (Failure(FailureKind.SERIAL_LOG_UNAVAILABLE,
+                     f"guest serial log unavailable ({reason}); guest reboots: {reboots}",
+                     evidence={"reboots": reboots, "stderr": reason}),),
         )
     return diagnose_boot_failure(res.stdout, reboots=reboots)
 
@@ -192,18 +250,19 @@ _CENSUS_TO_RUNNABLE = {
 }
 
 
-def preflight_arch(rootfs_dir: Path, arch: str) -> str:
+def preflight_arch(rootfs_dir: Path, arch: str) -> Failure | None:
     """Validate the requested arch before spinning up docker.
 
-    Returns '' when the emulation may proceed, else a structured failure line:
-      unsupported-arch: requested arch has no QEMU config
-      arch-mismatch:    rootfs ELF census disagrees with the requested arch
+    Returns None when the emulation may proceed, else the structured failure:
+      UNSUPPORTED_ARCH: requested arch has no QEMU config
+      ARCH_MISMATCH:    rootfs ELF census disagrees with the requested arch
     """
     supported = supported_archs()
     if arch not in supported:
-        return (
-            f"unsupported-arch: '{arch}' has no QEMU config "
-            f"(supported: {', '.join(supported)})"
+        return Failure(
+            FailureKind.UNSUPPORTED_ARCH,
+            f"'{arch}' has no QEMU config (supported: {', '.join(supported)})",
+            evidence={"requested": arch, "supported": list(supported)},
         )
 
     from iris.extract.rootfs_extract import _census_elfs
@@ -211,16 +270,19 @@ def preflight_arch(rootfs_dir: Path, arch: str) -> str:
     _count, counter = _census_elfs(Path(rootfs_dir))
     known = {a: n for a, n in counter.items() if not a.startswith("unk(")}
     if not known:
-        return ""  # no ELF evidence (script-only rootfs etc.) — can't judge
+        return None  # no ELF evidence (script-only rootfs etc.) — can't judge
     dominant = max(known, key=known.get)
     runnable = _CENSUS_TO_RUNNABLE.get(dominant)
     if runnable and runnable != arch:
-        return (
-            f"arch-mismatch: rootfs is dominated by {dominant} ELFs "
+        return Failure(
+            FailureKind.ARCH_MISMATCH,
+            f"rootfs is dominated by {dominant} ELFs "
             f"({known[dominant]} samples), which cannot run under the '{arch}' kernel; "
-            f"use --arch {runnable}"
+            f"use --arch {runnable}",
+            evidence={"dominant": dominant, "samples": known[dominant],
+                      "requested": arch, "suggested": runnable},
         )
-    return ""
+    return None
 
 
 @dataclass
@@ -230,6 +292,10 @@ class EmulationResult:
     ``web_ok`` is the reachability verdict; there is no separate ping field
     because reachability is only ever decided by an HTTP probe against the
     forwarded port.
+
+    ``error`` stays the prose every caller prints, and ``failure`` is the
+    machine-readable half. They are written together by :meth:`fail` so the
+    message a human reads and the kind a dashboard counts cannot disagree.
     """
 
     rootfs_dir: Path
@@ -241,6 +307,27 @@ class EmulationResult:
     error: str = ""
     duration_sec: float = 0.0
     container_id: str = ""
+    #: The first failure that ended the run, plus every signal the boot diagnosis
+    #: found alongside it — one failed guest usually has several causes stacked.
+    failure: Failure | None = None
+    findings: tuple[Failure, ...] = ()
+
+    def fail(self, failure: Failure, message: str = "") -> None:
+        """Record a failure and the message that describes it."""
+        self.failure = failure
+        self.findings = (failure,)
+        self.error = message or failure.message
+
+    def fail_from_diagnosis(self, diagnosis: BootDiagnosis) -> None:
+        """Record a multi-signal boot diagnosis under its first (most specific) kind."""
+        self.findings = diagnosis.findings
+        self.failure = diagnosis.primary
+        self.error = str(diagnosis)
+
+    @property
+    def failures(self) -> tuple[Failure, ...]:
+        """Only the findings that are actually failures, informational ones dropped."""
+        return tuple(f for f in self.findings if f.is_failure)
 
 
 def _env() -> dict[str, str]:
@@ -502,13 +589,53 @@ def emulate_firmware(
     docker_image: str = "",
     parts_slices_dir: Path | None = None,
     partition_mounts: list[tuple[str, str]] | None = None,
+    record: bool = True,
+) -> EmulationResult:
+    """Boot ``rootfs_dir`` under QEMU and report whether its web plane answered.
+
+    Every outcome -- including the early returns before a container even exists --
+    is written to ``emulation_run``/``failure_profile``, because this is the one
+    function all entry points pass through and therefore the only place a run can
+    be counted without one of them being forgotten. Those early returns are also
+    the runs a hand-kept table drops, so the recording lives in this wrapper
+    rather than at the end of the pipeline: a `return` added mid-function would
+    otherwise skip it silently. Pass ``record=False`` to opt out.
+    """
+    started_at = datetime.now(UTC).replace(tzinfo=None)  # naive: the column is naive
+    result = _emulate_firmware(
+        rootfs_dir=rootfs_dir,
+        arch=arch,
+        iid=iid,
+        scratch_dir=scratch_dir,
+        host_port=host_port,
+        timeout_sec=timeout_sec,
+        docker_image=docker_image,
+        parts_slices_dir=parts_slices_dir,
+        partition_mounts=partition_mounts,
+    )
+    if record:
+        _record_outcome(result, iid=iid, started_at=started_at)
+    return result
+
+
+def _emulate_firmware(
+    rootfs_dir: Path,
+    arch: str,
+    iid: int,
+    scratch_dir: Path,
+    host_port: int = 8080,
+    timeout_sec: int = 120,
+    docker_image: str = "",
+    parts_slices_dir: Path | None = None,
+    partition_mounts: list[tuple[str, str]] | None = None,
 ) -> EmulationResult:
     start_time = time.time()
     result = EmulationResult(rootfs_dir=rootfs_dir, arch=arch)
 
     config = get_config(arch)
     if config is None:
-        result.error = f"Unsupported architecture: {arch}"
+        result.fail(Failure(FailureKind.UNSUPPORTED_ARCH, f"no QEMU configuration for '{arch}'"),
+                    f"Unsupported architecture: {arch}")
         return result
 
     work_dir = scratch_dir / f"emulate-{iid}"
@@ -536,7 +663,7 @@ def emulate_firmware(
             logger.info(f"Reusing up-to-date tarball {tarball_path.name} (rootfs unchanged since it was built)")
         logger.info(f"Tarball: {safe_stat_size(tarball_path)} bytes")
     except RuntimeError as e:
-        result.error = str(e)
+        result.fail(Failure(FailureKind.TARBALL_FAILED, str(e)))
         result.duration_sec = time.time() - start_time
         return result
 
@@ -555,13 +682,17 @@ def emulate_firmware(
     ]
     create_result = _run(create_cmd)
     if create_result.returncode != 0:
-        result.error = f"Container create failed: {create_result.stderr}"
+        result.fail(Failure(FailureKind.CONTAINER_CREATE_FAILED,
+                            f"docker refused to create the container: {create_result.stderr}"),
+                    f"Container create failed: {create_result.stderr}")
         result.duration_sec = time.time() - start_time
         return result
 
     start_result = _run(["docker", "start", container_name])
     if start_result.returncode != 0:
-        result.error = f"Container start failed: {start_result.stderr}"
+        result.fail(Failure(FailureKind.CONTAINER_START_FAILED,
+                            f"docker created but would not start it: {start_result.stderr}"),
+                    f"Container start failed: {start_result.stderr}")
         result.duration_sec = time.time() - start_time
         return result
     result.container_id = container_name
@@ -571,7 +702,9 @@ def emulate_firmware(
     _run(["docker", "exec", container_name, "mkdir", "-p", f"/work/scratch/{iid}"])
     cp_result = _run(["docker", "cp", str(tarball_path), f"{container_name}:{cp_target}"], timeout=60)
     if cp_result.returncode != 0:
-        result.error = f"docker cp tarball failed: {cp_result.stderr}"
+        result.fail(Failure(FailureKind.COPY_TARBALL_FAILED,
+                            f"the rootfs tarball never reached the container: {cp_result.stderr}"),
+                    f"docker cp tarball failed: {cp_result.stderr}")
         result.duration_sec = time.time() - start_time
         _run(["docker", "rm", "-f", container_name])
         return result
@@ -582,7 +715,9 @@ def emulate_firmware(
         timeout=180,
     )
     if make_result.returncode != 0:
-        result.error = f"Image build failed: {make_result.stderr[-500:]}"
+        result.fail(Failure(FailureKind.IMAGE_BUILD_FAILED,
+                            f"make_image.sh failed: {make_result.stderr[-500:]}"),
+                    f"Image build failed: {make_result.stderr[-500:]}")
         result.duration_sec = time.time() - start_time
         _run(["docker", "rm", "-f", container_name])
         return result
@@ -594,7 +729,9 @@ def emulate_firmware(
         timeout=15,
     )
     if qemu_result.returncode != 0:
-        result.error = f"QEMU start failed: {qemu_result.stderr}"
+        result.fail(Failure(FailureKind.QEMU_START_FAILED,
+                            f"run_qemu.sh refused to start: {qemu_result.stderr}"),
+                    f"QEMU start failed: {qemu_result.stderr}")
         result.duration_sec = time.time() - start_time
         _run(["docker", "rm", "-f", container_name])
         return result
@@ -614,7 +751,8 @@ def emulate_firmware(
             # not slow to boot, it is looping, and every further second of waiting
             # produces the same verdict with less information attached.
             progress.clear()
-            result.error = _failure_diagnosis(container_name, iid, reboots=reboots)
+            diagnosis = _failure_diagnosis(container_name, iid, reboots=reboots)
+            result.fail_from_diagnosis(diagnosis)
             logger.error(result.error)
             break
 
@@ -659,7 +797,7 @@ def emulate_firmware(
         progress.clear()
         logger.warning(f"guest web still unreachable on :{host_port} after {timeout_sec}s")
         if not result.error:
-            result.error = _failure_diagnosis(container_name, iid)
+            result.fail_from_diagnosis(_failure_diagnosis(container_name, iid))
             logger.error(result.error)
 
     log_result = _run(["docker", "cp", f"{container_name}:/work/scratch/{iid}/qemu.serial.log", str(work_dir / "qemu.serial.log")])
@@ -669,7 +807,38 @@ def emulate_firmware(
             result.serial_log = serial_path.read_text(errors="replace")[-2000:]
 
     result.duration_sec = time.time() - start_time
+
     return result
+
+
+def _record_outcome(result: EmulationResult, *, iid: int, started_at: datetime) -> None:
+    """Persist the run. Never allowed to change or delay the caller's verdict.
+
+    A metrics write that can fail an emulation would make the measurement part of
+    the system under test; a database that is missing, locked or corrupt must
+    cost exactly one log line.
+    """
+    try:
+        from iris.config import get_settings
+        from iris.db.engine import get_engine, init_db, make_session
+        from iris.db.runs import record_run
+
+        engine = get_engine(get_settings().database_url)
+        init_db(engine)
+        with make_session(engine) as session:
+            record_run(
+                session,
+                iid=iid,
+                arch=result.arch,
+                rootfs_dir=result.rootfs_dir,
+                success=result.success,
+                web_ok=result.web_ok,
+                findings=result.findings,
+                duration_sec=result.duration_sec,
+                started_at=started_at,
+            )
+    except Exception as exc:  # noqa: BLE001 - a metric must never fail a run
+        logger.warning(f"run {iid} was not recorded to the metadata database: {exc}")
 
 
 def stop_emulation(iid: int) -> bool:

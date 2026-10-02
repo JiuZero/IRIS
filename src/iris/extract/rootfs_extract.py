@@ -21,6 +21,7 @@ from pathlib import Path
 
 from iris.extract.firmware import FirmwareInfo, analyze_firmware
 from iris.extract.ubi import extract_squashfs_from_ubi
+from iris.failures import Failure, FailureKind
 from iris.fsutil import safe_exists, safe_is_dir, safe_present, safe_rmtree
 
 
@@ -33,26 +34,40 @@ class RootfsExtraction:
     elf_archs: Counter = None  # type: ignore[assignment]
     arch_verified: str = ""
     extraction_method: str = ""
-    failure: str = ""  # structured failure profile when rootfs_dir is None
+    #: Set when ``rootfs_dir`` is None. A ``Failure``, not a string: the kind is
+    #: what gets aggregated, and a prose-only field is exactly what made the
+    #: failure taxonomy uncountable before.
+    failure: Failure | None = None
 
     def __post_init__(self) -> None:
         if self.elf_archs is None:
             self.elf_archs = Counter()
 
+    @property
+    def failure_reason(self) -> str:
+        """The prose form, for display. Empty when extraction succeeded."""
+        return self.failure.message if self.failure else ""
 
-def classify_failure(fw_info: FirmwareInfo) -> str:
+
+def classify_failure(fw_info: FirmwareInfo) -> Failure:
     """Attribute an extraction failure to a concrete format-level cause."""
     if fw_info.fit and fw_info.segmented_offsets:
-        return (
-            f"encrypted-fit: image wraps a FIT containing {len(fw_info.segmented_offsets)} "
+        return Failure(
+            FailureKind.ENCRYPTED_FIT,
+            f"image wraps a FIT containing {len(fw_info.segmented_offsets)} "
             "YZTenda-encrypted segments; rootfs is not extractable without the vendor "
-            "decryption key"
+            "decryption key",
+            evidence={"segments": len(fw_info.segmented_offsets)},
         )
     if fw_info.fit:
-        return "fit-unsupported: FIT image recognized, rootfs blob unpacking not implemented"
+        return Failure(FailureKind.FIT_UNSUPPORTED,
+                       "FIT image recognized, rootfs blob unpacking not implemented")
     if fw_info.tendaw is not None:
-        return "tendaw-nojffs2: TendaW container parsed but no mountable JFFS2 partition"
-    return "no-rootfs: no squashfs/UBI/TendaW structure found in image"
+        return Failure(FailureKind.TENDAW_NO_JFFS2,
+                       "TendaW container parsed but no mountable JFFS2 partition",
+                       evidence={"partitions": len(fw_info.tendaw.partitions)})
+    return Failure(FailureKind.NO_ROOTFS,
+                   "no squashfs/UBI/TendaW structure found in image")
 
 
 def _slice_squashfs(data: bytes, offset: int, dest: Path) -> Path:
@@ -396,7 +411,11 @@ def extract_rootfs(
     if fw_info.ubi_offset is not None:
         sqfs_data = extract_squashfs_from_ubi(data, fw_info.ubi_offset)
         if sqfs_data is None:
-            result.failure = "ubi-no-squashfs: UBI container present but no squashfs volume extracted"
+            result.failure = Failure(
+                FailureKind.UBI_NO_SQUASHFS,
+                "UBI container present but no squashfs volume extracted",
+                evidence={"ubi_offset": fw_info.ubi_offset},
+            )
             return result
         sqfs_path.parent.mkdir(parents=True, exist_ok=True)
         sqfs_path.write_bytes(sqfs_data)

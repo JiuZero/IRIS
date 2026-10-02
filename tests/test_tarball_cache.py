@@ -16,6 +16,7 @@ import pytest
 
 from iris.emulate import orchestrator
 from iris.emulate.orchestrator import _newest_mtime, _tarball_is_stale
+from iris.failures import FailureKind
 
 
 @pytest.fixture()
@@ -130,7 +131,7 @@ class TestEmulateRebuildsStalePack:
         return build
 
     def _run_emulation(self, rootfs: Path, tmp_path: Path):
-        return orchestrator.emulate_firmware(rootfs, "mipsel", 1, tmp_path / "scratch")
+        return orchestrator.emulate_firmware(rootfs, "mipsel", 1, tmp_path / "scratch", record=False)
 
     def test_stale_pack_is_recreated(self, tree_and_pack, stop_after_pack, tmp_path):
         """The exact regression: a rule renames ``bin/diag`` and the guest must see it."""
@@ -139,8 +140,9 @@ class TestEmulateRebuildsStalePack:
         (rootfs / "firmadyne" / "iris_rules.sh").write_text("#!/bin/sh\n", encoding="utf-8")
         scratch = pack.parent.parent
 
-        result = orchestrator.emulate_firmware(rootfs, "mipsel", 1, scratch)
-        assert result.error == "SENTINEL: pack rebuilt"
+        result = orchestrator.emulate_firmware(rootfs, "mipsel", 1, scratch, record=False)
+        assert result.error == "tarball-failed: SENTINEL: pack rebuilt"
+        assert result.failure.kind is FailureKind.TARBALL_FAILED
         assert (scratch / "emulate-1" / "1.tar.gz").read_bytes() == b"fresh"
 
     def test_fresh_pack_is_reused(self, tree_and_pack, stop_after_pack, monkeypatch):
@@ -152,5 +154,5 @@ class TestEmulateRebuildsStalePack:
 
         monkeypatch.setattr(orchestrator, "_create_tarball", explode)
         # Nothing downstream is mocked on purpose: repacking would raise here.
-        result = orchestrator.emulate_firmware(rootfs, "mipsel", 1, scratch)
+        result = orchestrator.emulate_firmware(rootfs, "mipsel", 1, scratch, record=False)
         assert "repacked an unchanged tree" not in (result.error or "")

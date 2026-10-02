@@ -9,6 +9,7 @@ import typer
 
 from iris.config import get_settings
 from iris.db.engine import get_engine, init_db, make_session
+from iris.failures import Failure, FailureKind
 from iris.fsutil import safe_is_file, safe_present, safe_stat_size
 from iris.log import LEVEL_COLORS, get_error_logger, get_stream_logger, setup_logging
 
@@ -80,6 +81,46 @@ def db_check() -> None:
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))
     out.info("database connection OK")
+
+
+@db_app.command("stats")
+def db_stats() -> None:
+    """Summarise recorded emulation runs: reach rate per arch and failure histogram.
+
+    Every figure here is read back from ``emulation_run``/``failure_profile``, so
+    it describes runs that actually happened -- including the ones that left no
+    evidence. When the tables are empty this says so instead of printing zeros
+    that look like measurements.
+    """
+    from iris.db.runs import failure_histogram, run_stats
+
+    settings = get_settings()
+    engine = get_engine(settings.database_url)
+    init_db(engine)
+    with make_session(engine) as session:
+        stats = run_stats(session)
+        histogram = failure_histogram(session)
+
+    if stats.total == 0:
+        out.warning("no emulation runs recorded yet; run `iris emulate run <firmware>` first")
+        return
+
+    out.block("info", f"{stats.total} recorded run(s)", _rows([
+        ("web reachable", f"{stats.web_ok}/{stats.total} ({stats.web_rate:.1%})"),
+    ]))
+
+    if stats.by_arch:
+        pairs = []
+        for arch in sorted(stats.by_arch):
+            runs, ok = stats.by_arch[arch]
+            pairs.append((arch, f"{ok}/{runs} web ({ok / runs:.0%})" if runs else "-"))
+        out.block("info", "by arch", _rows(pairs))
+
+    if histogram:
+        out.block("info", "failure histogram",
+                  _rows([(f"{kind} [{stage}]", str(count)) for stage, kind, count in histogram]))
+    else:
+        out.info("no failure profiles recorded")
 
 
 @extract_app.command("inspect")
@@ -276,7 +317,7 @@ def extract_rootfs(
         ("rootfs offset", str(fi.rootfs_offset) if fi.rootfs_offset is not None else "<not found>"),
     ]
     if result.rootfs_dir is None:
-        reason = result.failure or "no rootfs structure found"
+        reason = result.failure_reason or "no rootfs structure found"
         out.block("error", f"extraction failed for {firmware.name}", _rows(pairs))
         err.error(f"extraction failed: {reason}")
         raise typer.Exit(code=2)
@@ -450,7 +491,7 @@ def emulate_run(
         # Map ELF census names to QEMU kernel labels
         arch_map = {"mipsel": "mipsel", "mipseb": "mipseb", "armel": "armel", "aarch64": "arm64"}
         checked_arch = arch_map.get(inferred_arch, inferred_arch)
-        problem = preflight_arch(rootfs, checked_arch) if not force else ""
+        problem = preflight_arch(rootfs, checked_arch) if not force else None
         if problem:
             err.error(f"preflight: {problem}")
             err.warning("(override with --force)")
@@ -465,8 +506,12 @@ def emulate_run(
     # If still auto after all inference attempts, show error
     if selected_arch == "auto":
         supported = supported_archs()
-        err.error("unable to determine architecture from ELF census; available:")
-        err.error(f"  Supported architectures: {', '.join(supported)}")
+        err.error(Failure(
+            FailureKind.ARCH_UNDETERMINED,
+            f"the ELF census named no architecture this host can run; pass one explicitly "
+            f"(supported: {', '.join(supported)})",
+            evidence={"supported": list(supported)},
+        ).message)
         err.error(f"  Usage: iris emulate run <rootfs|bin> --arch {'|'.join(supported)}")
         raise typer.Exit(code=3)
 
