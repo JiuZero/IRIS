@@ -448,21 +448,75 @@ class AIHealthMonitor:
         code = out.strip().splitlines()[-1].strip() if out.strip() else ""
         return ok and code != "" and code != "000"
 
+    def _read_launch_arch(self) -> str:
+        """The arch ``make_image.sh`` recorded next to the image, or "" if absent.
+
+        The container's PID 1 is ``sleep 3600`` and QEMU is launched afterwards
+        with ``docker exec -d``, so the arch is recorded nowhere else -- without
+        this marker a restart cannot re-run QEMU at all.
+        """
+        ok, out = self._docker(
+            ["exec", f"{CONTAINER_PREFIX}{self.iid}", "cat", f"/work/scratch/{self.iid}/arch"],
+            timeout=15,
+        )
+        if not ok:
+            return ""
+        lines = out.strip().splitlines()
+        return lines[-1].strip() if lines else ""
+
     def _restart_container(self, verify_port: int | None, verify_seconds: int) -> bool:
-        """Restart the QEMU container, then require the web port to come back.
+        """Restart the emulation, then require the web port to come back.
+
+        ``docker restart`` on its own brings back only the container: PID 1 is
+        ``sleep 3600`` and QEMU was launched separately, so a plain restart
+        leaves no emulation running and the probe can only ever time out. The
+        image built by ``make_image.sh`` does survive in the container's
+        writable layer, so relaunching QEMU is the only missing step -- and
+        ``run_qemu.sh`` clears any TAP/bridge left behind before recreating it.
 
         A restart that is not followed by a serving port is not a repair; the
         verification window gives the guest time to boot (the orchestration
         path itself allows minutes, so a short window here can only over-report
         failure, never success).
         """
-        ok, out = self._docker(["restart", "-t", "10", f"{CONTAINER_PREFIX}{self.iid}"],
-                               timeout=60)
+        name = f"{CONTAINER_PREFIX}{self.iid}"
+
+
+        # Both preconditions are settled *before* the restart: it kills whatever
+        # QEMU is running, so discovering afterwards that the relaunch cannot be
+        # attempted would trade a guest that is alive but not serving for no
+        # emulation at all -- strictly harder to diagnose than what we were called
+        # on. Refusing up front leaves the evidence in place.
+        arch = self._read_launch_arch()
+        if not arch:
+            logger.error(
+                f"container {self.iid}: no arch recorded at /work/scratch/{self.iid}/arch, "
+                "so run_qemu.sh cannot be re-run; leaving the container untouched"
+            )
+            return False
+        if not verify_port:
+            logger.error(
+                f"container {self.iid}: no probe port configured, so run_qemu.sh has no host "
+                "port to forward; leaving the container untouched"
+            )
+            return False
+
+        ok, out = self._docker(["restart", "-t", "10", name], timeout=60)
         if not ok:
             logger.error(f"container {self.iid}: restart failed: {out}")
             return False
-        if not verify_port:
-            return True
+
+        ok, out = self._docker(
+            ["exec", "-d", name, "bash", "/work/scripts/run_qemu.sh",
+             str(self.iid), arch, str(verify_port)],
+            timeout=15,
+        )
+        if not ok:
+            logger.error(f"container {self.iid}: relaunching QEMU (arch={arch}) failed: {out}")
+            return False
+        logger.info(
+            f"container {self.iid}: relaunched QEMU with arch={arch} port={verify_port}"
+        )
 
         deadline = time.time() + verify_seconds
         while True:

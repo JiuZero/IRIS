@@ -528,8 +528,42 @@ class TestHttpProbe:
         assert fake.exec_call[:3] == ["docker", "exec", "iris-qemu-1"]
 
 
+class _RestartDocker:
+    """Fake ``docker`` for the restart path, answering the arch probe on its own.
+
+    ``FakeExec`` hands every command the same stdout, so the ``cat .../arch``
+    lookup would answer with the probe's ``200``: the relaunch would then be
+    "verified" while carrying a bogus arch and the test could not tell the
+    difference between a real recovery and a container that merely came back.
+    """
+
+    def __init__(self, arch: str = "armel", probe: str = "200\n", returncode: int = 0):
+        self.arch = arch
+        self.probe = probe
+        self.returncode = returncode
+        self.calls: list[list[str]] = []
+
+    def __call__(self, cmd, **kwargs):
+        self.calls.append(list(cmd))
+        out = ""
+        if isinstance(cmd, list):
+            if "cat" in cmd and cmd[-1].endswith("/arch"):
+                out = f"{self.arch}\n" if self.arch else ""
+            elif "curl" in cmd:
+                out = self.probe
+        return subprocess.CompletedProcess(cmd, self.returncode, out, "")
+
+    def qemu_calls(self) -> list[list[str]]:
+        # ``in`` on a list is exact-membership, not substring: the script path is
+        # one element of the argv, so the whole command has to be joined first.
+        return [c for c in self.calls if "run_qemu.sh" in " ".join(c)]
+
+    def restart_calls(self) -> list[list[str]]:
+        return [c for c in self.calls if "restart" in c]
+
+
 class TestWebServerRestart:
-    """The container-level restart: the only repair that reaches a running guest."""
+    """Restarting the emulation: the only repair that reaches a running guest."""
 
     @pytest.fixture
     def restart_monitor(self, tmp_path):
@@ -550,45 +584,80 @@ class TestWebServerRestart:
         assert m.recommend_recovery_action() == ACTION_WEB_RESTART
 
     def test_successful_restart_is_verified_by_probe(self, restart_monitor, monkeypatch):
-        calls: list[list[str]] = []
-
-        def fake_run(cmd, **kwargs):
-            calls.append(list(cmd))
-            if "restart" in cmd:
-                return subprocess.CompletedProcess(cmd, 0, "", "")
-            if "curl" in cmd:
-                return subprocess.CompletedProcess(cmd, 0, "200\n", "")
-            return subprocess.CompletedProcess(cmd, 0, "", "")
-
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        fake = _RestartDocker()
+        monkeypatch.setattr(subprocess, "run", fake)
         assert restart_monitor.execute_recovery(ACTION_WEB_RESTART) is True
-        assert any("restart" in c for c in calls)
-        assert any("curl" in c for c in calls)
+        assert any("restart" in c for c in fake.calls)
+        assert any("curl" in c for c in fake.calls)
         assert restart_monitor.status.actions_taken[-1].startswith(ACTION_WEB_RESTART)
+
+    def test_restart_relaunches_qemu_with_the_recorded_arch(self, restart_monitor,
+                                                            monkeypatch):
+        """A container that merely came back is not a repaired emulation.
+
+        PID 1 is ``sleep 3600`` and QEMU was started with ``docker exec -d``,
+        so nothing re-runs it on restart. This is the assertion the previous
+        version of this test lacked, which is why the whole path could be
+        green while leaving no emulation running at all.
+        """
+        fake = _RestartDocker(arch="armel")
+        monkeypatch.setattr(subprocess, "run", fake)
+
+        assert restart_monitor.execute_recovery(ACTION_WEB_RESTART) is True
+
+        assert fake.qemu_calls(), "restart must re-run run_qemu.sh, not just the container"
+        qemu = fake.qemu_calls()[0]
+        assert qemu[-3:] == ["1", "armel", "8080"]
+
+    def test_restart_without_arch_marker_does_not_disturb_the_container(self, restart_monitor,
+                                                                        monkeypatch):
+        """The restart is destructive, so an unusable precondition must be found
+        before it runs: killing a guest that is alive but not serving leaves less
+        to diagnose than what the action was called on."""
+        fake = _RestartDocker(arch="")
+        monkeypatch.setattr(subprocess, "run", fake)
+
+        assert restart_monitor.execute_recovery(ACTION_WEB_RESTART) is False
+        assert not fake.qemu_calls(), "must not relaunch QEMU with an unknown arch"
+        assert not fake.restart_calls(), "must not restart a container it cannot refill"
+        assert restart_monitor.status.actions_taken == []
+
+    def test_restart_without_probe_port_refuses_to_relaunch_blind(self, tmp_path,
+                                                                 monkeypatch):
+        (tmp_path / "1").mkdir()
+        (tmp_path / "1" / "qemu.serial.log").write_text(
+            "IRIS-NETFIX: web server is already running on :80\n", encoding="utf-8")
+        m = AIHealthMonitor(iid=1, scratch_dir=tmp_path, http_probe_port=0,
+                            restart_verify_seconds=1)
+        fake = _RestartDocker()
+        monkeypatch.setattr(subprocess, "run", fake)
+
+        assert m.execute_recovery(ACTION_WEB_RESTART) is False
+        assert not fake.qemu_calls(), "run_qemu.sh needs a host port to forward"
+        assert not fake.restart_calls()
+        assert m.status.actions_taken == []
 
     def test_restart_without_web_returning_is_a_failure(self, restart_monitor, monkeypatch):
         """Restarted but never serving again must not be recorded as a repair."""
-        monkeypatch.setattr(subprocess, "run",
-                            FakeExec(stdout="000\n"))  # restart ok, probe dead
+        monkeypatch.setattr(subprocess, "run", _RestartDocker(probe="000\n"))
         monkeypatch.setattr("iris.monitor.ai_guardian.time.sleep", lambda _: None)
         assert restart_monitor.execute_recovery(ACTION_WEB_RESTART) is False
         assert restart_monitor.status.actions_taken == []
         assert restart_monitor.recovery_history[-1]["success"] is False
 
     def test_failed_restart_command_is_a_failure(self, restart_monitor, monkeypatch):
-        monkeypatch.setattr(subprocess, "run", FakeExec(returncode=1))
+        monkeypatch.setattr(subprocess, "run", _RestartDocker(returncode=1))
         assert restart_monitor.execute_recovery(ACTION_WEB_RESTART) is False
 
     def test_cooldown_blocks_immediate_second_restart(self, restart_monitor, monkeypatch):
-        monkeypatch.setattr(subprocess, "run",
-                            FakeExec(stdout="200\n"))
+        monkeypatch.setattr(subprocess, "run", _RestartDocker())
         assert restart_monitor.execute_recovery(ACTION_WEB_RESTART) is True
         # second attempt right after: cooldown must veto it
         assert restart_monitor.execute_recovery(ACTION_WEB_RESTART) is False
         assert len(restart_monitor.status.actions_taken) == 1
 
     def test_expired_cooldown_allows_restart_again(self, restart_monitor, monkeypatch):
-        monkeypatch.setattr(subprocess, "run", FakeExec(stdout="200\n"))
+        monkeypatch.setattr(subprocess, "run", _RestartDocker())
         restart_monitor.execute_recovery(ACTION_WEB_RESTART)
         restart_monitor._last_web_restart = (
             (datetime.now(UTC) - timedelta(seconds=601)).strftime("%Y%m%d%H%M%S"))

@@ -4,6 +4,49 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.6] - 2026-10-02
+
+### 修复（`WEB_SERVER_RESTART` 此前必然救不回，2026-10-02）
+
+- **重启容器不等于重启仿真**：容器的 PID 1 是 `sleep 3600`，QEMU 由
+  `docker exec -d` 另起，两个 Dockerfile 都没有 `ENTRYPOINT`/`CMD`，所以
+  `docker restart` 只把 `sleep` 拉回来，`run_qemu.sh` 一次都不会重跑——原动作
+  必然在 120s 探活窗口内超时，再被 600s 冷却挡住。原测试把 `subprocess.run`
+  整个 mock 掉，因此这条路径从未被真正验证过。现在重启后会重新
+  `exec /work/scripts/run_qemu.sh <iid> <arch> <port>`。
+- **arch 有了落点**：`make_image.sh` 在 `image.raw` 旁写下 `arch` 文件。容器里
+  没有别处记录过 QEMU 是用什么架构起的，而这个文件在容器的可写层里，
+  `docker restart` 不丢（实测重启前后均在，mtime 不变）。
+- **两个前置条件挪到重启之前检查**：重启会杀掉正在跑的 QEMU，事后才发现无法
+  重新拉起，等于把"活着但不服务"降级成"什么都没跑"，比调用前更难排查。读不到
+  arch 或没有探活端口时，现在直接拒绝且**不碰容器**。
+- **读不到 arch 时不再假装成功**：`_read_launch_arch()` 返回空串即视为无法重启，
+  记 error 并返回 `False`。
+
+### 新增（launch arch 标记的双端静态守卫）
+
+- **`tests/test_launch_arch_marker.py`**：`make_image.sh` 写的路径与
+  `ai_guardian.py` 读的路径是同一件事的两份副本，两边不一致时单测（mock 掉
+  docker）、guardian（只记一行 error）、用户（看到一个静默无效的修复）都不会
+  察觉。守卫从脚本自身推导写入路径、并从 `run_qemu.sh` 推导位置参数顺序，
+  而不是把结论抄一遍——任一端改名或改顺序即测试变红。
+- **`tests/test_version_sync.py`**：`pyproject.toml` 与 `iris.__version__` 此前
+  已经漂移到 0.3.5 / 0.3.3，两个数字都不能当作"当前版本"。现在两者相等、纯
+  SemVer、且 CHANGELOG 必须有对应版本节。
+
+### 实测（TES7002 arm64 真实固件，容器 `iris-qemu-9001`）
+
+| 步骤 | 结果 |
+|---|---|
+| 起仿真 | 76s 后 HTTP 302，容器内 `arch` = `arm64` |
+| 容器内 kill qemu + socat | HTTP 000 |
+| `analyze_health()` | `degraded` / `started_but_stopped`，建议 `WEB_SERVER_RESTART` |
+| `execute_recovery()` | 77s 返回 `True`，Web 恢复 302，`image.raw` mtime 未变 |
+| 负向对照：只 `docker restart` | qemu 进程数 0，87s 后仍 HTTP 000 |
+
+四次守卫变异验证（删除标记写入 / 改名标记 / 交换重连参数顺序 / 把重启提前到前置
+检查之前）均如期变红，恢复后全绿。
+
 ## [0.3.5] - 2026-10-02
 
 ### 新增（`iris extract rootfs` 可指定输出目录，2026-10-02）

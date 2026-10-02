@@ -9,6 +9,14 @@ IMAGE_DIR=${WORK_DIR}/image
 TARBALL=/work/scratch/${IID}/${IID}.tar.gz
 BINARIES=/work/binaries
 
+# Record the launch arch next to the image. A guardian that restarts the
+# container has no other way to learn it: the container's entrypoint is
+# `sleep 3600`, so nothing inside the container records what QEMU was
+# started with. Without this marker a WEB_SERVER_RESTART can only bring the
+# container back, never the emulation.
+mkdir -p "${WORK_DIR}"
+printf '%s\n' "${ARCH}" > "${WORK_DIR}/arch"
+
 # Use /tmp for loop mount operations (overlay2 doesn't support loop devices)
 TMP_BUILD=/tmp/build-${IID}
 rm -rf "${TMP_BUILD}"

@@ -241,13 +241,31 @@ Actions Taken: None
 | `RESOURCE_CLEANUP` | soft lockup 事件 | guest 内脚本 |
 | `DIAGNOSTIC_DISABLEMENT` | diag 崩溃循环 | guest 内脚本 |
 | `WEB_SERVER_DIAGNOSIS` | web 不可达 | 只排查不修复，结论记 `diagnoses` |
-| `WEB_SERVER_RESTART` | web 启动后意外退出 | **容器层** `docker restart` + 探活复验 |
+| `WEB_SERVER_RESTART` | web 启动后意外退出 | **容器层** `docker restart` + 重启 QEMU + 探活复验 |
 
 `WEB_SERVER_RESTART` 的关键约束：
+- **`docker restart` 单独做不了这件事**：容器 PID 1 是 `sleep 3600`，QEMU 由
+  `docker exec -d` 另起，重启只把 `sleep` 拉回来，仿真进程一个都不剩。因此重启后
+  必须再 `exec /work/scripts/run_qemu.sh <iid> <arch> <port>` 把 guest 重新拉起；
+- **arch 来自 `make_image.sh` 写下的标记** `image.raw` 同目录的 `arch` 文件。
+  容器里没有任何其他地方记录过 QEMU 是用什么架构起的（实测：重启前后该文件均在，
+  `docker restart` 不丢容器可写层），读不到就**拒绝重启**而不是空转；
+- **两个前置条件在重启之前检查**：重启会杀掉正在跑的 QEMU，事后才发现无法重新
+  拉起，等于把"活着但不服务"变成"什么都没跑"，比调用前更难排查；
 - 重启后必须在 `--restart-verify`（默认 120s）内探活成功才算修复，"重启了但 Web
   没回来"记失败；
 - 两次重启之间有冷却期（默认 600s），无法救活的 guest 不会被无间隔地反复重启；
 - 修复是否成功以 docker 命令退出码 + 探活双重确认，不做"跑过了就算"。
+
+实测（TES7002 arm64 真实固件，容器 `iris-qemu-9001`）：
+
+| 步骤 | 结果 |
+|---|---|
+| 起仿真 | 76s 后 HTTP 302 |
+| 容器内 kill qemu + socat | HTTP 000 |
+| `analyze_health()` | `degraded` / `started_but_stopped` → 建议 `WEB_SERVER_RESTART` |
+| `execute_recovery()` | 77s 后返回 `True`，Web 恢复 302 |
+| 负向对照：只 `docker restart` | qemu 进程数 0，87s 后仍 HTTP 000（`image.raw` 与 `arch` 均存活） |
 
 每次成功执行会追加到 `actions_taken` 与 `recovery_history`，带时间戳以便审计；
 所有动作与诊断同时落**动作账本**（SQLite，见 4.9）。
@@ -365,7 +383,8 @@ docker exec iris-qemu-<iid> strace -f /opt/goahead/goahead 2>&1 \
 2. **Web 探活**：~~在串口日志分析之外增加 HTTP 可达性检查~~ 已落地（`--probe-port`，
    探活失败覆盖串口乐观结论）；
 3. **Web 重启闭环**：~~Web 意外退出后自动恢复服务~~ 已落地容器级
-   `WEB_SERVER_RESTART`（重启 + 探活复验 + 冷却期）；
+   `WEB_SERVER_RESTART`（重启 + 重新拉起 QEMU + 探活复验 + 冷却期，2026-10-02 在真实
+   固件上验证：故障注入后 77s 恢复 302；修复前只重启容器必然救不回，已做负向对照）；
 4. **动作账本**：已落地（`guardian-log` 可查）；
 5. **预测性告警**：在 `reboot_count > 0` 之前预测崩溃（待做）；
 6. **健康度可视化**：容器健康状态随时间变化的仪表盘（待做）；
