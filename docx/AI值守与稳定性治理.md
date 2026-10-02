@@ -465,7 +465,85 @@ initramfs 三个设置 Python 侧连字段都没有，而 `-cpu max` 直接决�
 
 ---
 
-## 8 相关文档
+## 7 自愈动作的真实性
+
+前面几条讲的是「怎么发现固件坏了」。这一条讲相反的方向：**IRIS 自己的修复动作，怎么确认
+它真的生效了**。0.3.9 之前，这个方向上有一整类缺陷，而且它们有一个共同形状。
+
+### 7.1 三种「声称成功」
+
+在 Tenda TES7002 上追一个 7002 端口的排查过程里，同一个缺陷换了三张脸：
+
+| 版本 | 日志说 | 实际 |
+|---|---|---|
+| 最初 | `starting telnetd on port 7002` | 二进制都没查，telnetd 从未绑定 |
+| 改为函数后 | `fallback shell is listening on :7002 (after 0s)` | 绝对路径查找修对了，telnetd 真的绑定了，但绑的是 IPv6-only，IPv4 一律 refused |
+| 改为双信号后 | `no command channel` + 五路证据 | 诚实报告，并指出这是固件限制 |
+
+第二行是最危险的一行：它**比第一行更可信**——它经过了探活、有返回码、有轮询。正因如此，
+它能骗过所有只看日志不看连接的人。
+
+### 7.2 结论必须与证据同源
+
+`ensure_command_channel` 的返回码和日志行由**同一个分支**产生，测试对四组 outcome 参数化
+断言二者严格配对。理由不是洁癖：一个恒返回 0 的函数可以满足任何只看文本的测试。
+
+反过来也一样——**报告里不能出现由失败探针推导出的结论**。本轮一度用 `process_running`
+判定「daemon: gone」，而同时 netstat 显示该 daemon 正在 LISTEN；进程死了 socket 不会留在
+LISTEN，所以两者不可能同真，有一个探针是坏的。最终改成把 `pidof` 的原话放进报告
+（`pidof said: [466]`）——事实进日志，判断留给读日志的人。这条正是本轮唯一一次**自己
+引入的谎报**，值得单列。
+
+### 7.3 探针要报告它看见了什么
+
+失败报告现在是一行五路证据：`pidof` 原话、`netstat -lan` 原文、客户端原话、`bindv6only`
+当前值、`/proc/net` 原文。这些不是日志噪音——正是它们把「telnetd 坏了」一步步逼到
+「BusyBox 1.22.1 绑 IPv6-only、QEMU 用户态网络不转发 IPv6、BusyBox nc 连 `::1` 都做不到」
+这个只能靠实测得出的结论。任何布尔值都无法替代它们。
+
+### 7.4 一个端口在表里，不等于它在监听
+
+`/proc/net/tcp{,6}` 里有该端口，可能是 LISTEN（`0A`），也可能是 TIME_WAIT（`06`）。
+按端口号匹配会把后者报成「daemon 活着但拒绝我们」——与谎报成功同型、方向相反的错误。
+`port_listening_in_proc` 因此匹配状态位而不只是端口。
+
+### 7.5 探测手段本身要先验证
+
+本轮踩到的三个坑，都是「探针错了，被当成结论」：
+
+- **`nc -w 2` / `nc -6`**：该固件的 BusyBox 1.22.1 只接受 `nc [IPADDR PORT]`，
+  两个 flag 都报 `invalid option`，返回码与「连接被拒」完全一样。
+  **修法落在测试上**：nc 替身现在复现真实 BusyBox 的拒绝行为。**一个会忽略自身参数的
+  替身会让整类探测 bug 溜过去。**
+- **`/proc/net/tcp6` 探针的两个盲区**：host 上存在 `timeout` 使脚本永远走被包裹的分支，
+  无 `timeout` 的 guest 从未被覆盖；断言写成「数启动行个数」，把条件改成永假照样通过。
+  两处都由变异验证暴露——**静态守卫必须做变异验证，否则它守的东西可能已经不在了**。
+
+### 7.6 guest 侧 shell 脚本必须保持 LF
+
+本轮两次栽在同一个坑：编辑工具在 Windows 上把整个 `.sh` 写成 CRLF。host 上完全隐形
+（`bash -n` 通过，`.gitattributes` 的 `*.sh text eol=lf` 只管 checkout 路径），guest BusyBox
+ash 直接崩，报 `/etc/init.d/iris_net_fix: line 7: : not found`。`tests/test_guest_shell_scripts_are_lf.py`
+是为此存在，改完任何 shell 脚本必跑。
+
+---
+
+## 8 尚未修复（0.3.9 记录在案）
+
+- **`src/iris/monitor/ai_guardian.py` 的两处无条件成功标记**：`_WATCHDOG_SCRIPT`
+  （619-633 行）与 `_CLEANUP_SCRIPT`（648-655 行）在容器里遍历 `/bin/monitor` 等厂商二进制
+  （容器里永远不存在），脚本末尾却无条件 `echo ...-APPLIED; exit 0`，两个自愈动作因此永远
+  返回 `True`。这与 7.1 是同一类缺陷，只是还没修。
+- **`_exec_in_guest` 名不副实**：函数名与 docstring 说 "inside the running container"，
+  实际执行 `docker exec -i <container> /bin/sh -s`——进的是**容器**，而 guest 根文件系统在
+  `image.raw` 里。它自己的注释（689-692 行）承认了这一点。
+- **通道路线需要另一条设计**：telnetd 在该固件上只服务一次连接即退出（`TIME_WAIT` 证据），
+  且 BusyBox nc 无 `-e`、telnetd 无 `-b`，无法让它绑到 guest 的 eth0。可行方向是 guest 内
+  第二串口 + `inittab` respawn，或 QMP。
+
+---
+
+## 9 相关文档
 
 | 文档 | 内容 |
 |---|---|

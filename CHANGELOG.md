@@ -4,6 +4,70 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.9] - 2026-10-02
+
+`iris_net_fix.sh` 每次启动都往串口日志里写「正在 7002 端口启动 telnetd」，而该端口从未被
+绑定过。上一轮把这个日志行改成了带返回码的函数，发现按绝对路径查找后 telnetd **确实绑定了**
+——然后容器侧 `socat` 仍然三次全部 `Connection refused`。于是有了本轮：一串「声称成功、
+实测失败」，以及最终把谎报换成证据的过程。
+
+### 修复
+
+- **自愈动作谎报成功**。`_WATCHDOG_SCRIPT` / `_CLEANUP_SCRIPT` 无条件
+  `echo ...-APPLIED; exit 0`（同批发现的 `ai_guardian` 问题，见下）。本轮修的是同一类缺陷在
+  guest shell 侧的那一份：`ensure_command_channel` 现在返回码与日志行由**同一分支**产生，
+  rc=0 当且仅当出现「listening on :7002」，rc=1 当且仅当出现「no command channel」。
+- **`command -v telnetd` → 绝对路径候选表**。guest 的 PATH 是厂商 init 留下的样子：telnetd
+  在 `/sbin` 而 PATH 里没有 `/sbin` 的固件，有 shell，却被 PATH 判定为「没有命令通道」。
+  `IRIS_TELNETD_CANDIDATES` 可覆盖，报告里列出搜索过的路径，使这类固件在串口日志里可见。
+- **nc 探测**（新增）。原来只有 netstat 文本匹配，现在追加真实连接尝试
+  （`IRIS_NC_CANDIDATES`，同样绝对路径查找）。无客户端的固件降级为只信 netstat 并**明说降级**。
+- **`bindv6only` 放开**。启动 telnetd 前 `echo 0 > /proc/sys/net/ipv6/bindv6only`，
+  因为 OpenWrt 衍生固件默认 `bindv6only=1`，而 busybox telnetd 绑 IPv6 通配地址。
+- **`setsid` 脱离**。telnetd 是几秒后就要退出的 boot hook 的子进程。
+- **`/proc/net/tcp{,6}` 作为内核权威证据**。区分「端口在监听（0A）」与「端口曾经在表里
+  （如 TIME_WAIT 06）」，这是文本匹配做不到的。
+
+### 诊断（本轮的主要产出）
+
+失败报告不再是一句结论，而是五路证据同在一行：`pidof` 原话、`netstat -lan` 原文、
+客户端原话、`bindv6only` 当前值、`/proc/net` 原文。正是这些证据把问题定位成
+「telnetd 只绑了 IPv6 且 QEMU 用户态网络不转发 IPv6」，而不是任何一个布尔值能说明的。
+
+### 实测结论（TES7002，arm64，BusyBox 1.22.1）
+
+**通道路线在该固件上不可用，这是固件限制而非脚本缺陷**，已如实报告而非掩盖：
+
+- telnetd 绑定成功但**只服务一次连接**：实测 `/proc/net/tcp6` 留下
+  `::ffff:127.0.0.1:1B5A ... TIME_WAIT`、netstat 同步显示
+  `::ffff:127.0.0.1:7002 ::ffff:127.0.0.1:32978 TIME_WAIT`——连接**建起来过**，
+  但 socket 之后不再 LISTEN。
+- 由此得到两条**已知局限**（下一轮处理）：nc 的退出码不表示连接成功（成功也可返回非 0），
+  且 nc 探测本身**会消耗掉一次 inetd 风格会话**，使后续轮询失去对象。
+- `bindv6only` sysctl 对本固件无效：BusyBox 1.22.1 的 telnetd 在 socket 层显式设置
+  `IPV6_V6ONLY`，socket 级标志优先于 sysctl。该行保留——不设 V6ONLY 的固件仍需要它。
+- BusyBox 1.22.1 的 `nc` 只接受 `nc [IPADDR PORT]`，`-w` / `-6` 均报 `invalid option`，
+  且在返回码上与「端口拒绝连接」无法区分。测试替身现在复现这一行为。
+
+### 测试
+
+- `tests/test_guest_shell_channel.py`（51 项）：用 `add_func` source 技巧驱动真实脚本，
+  nc / telnetd 替身是真实可执行文件。替身**复现真实 BusyBox 的拒绝行为**——一个会忽略
+  自身参数的替身会让整类探测 bug 溜过去。
+- `tests/test_guest_shell_scripts_are_lf.py`（12 项）：本轮两次栽在 CRLF 上——Edit 工具在
+  Windows 上把整个 `.sh` 写成 CRLF，host 上 `bash -n` 通过、Git 的 `*.sh text eol=lf` 管不到，
+  guest BusyBox ash 直接崩（`line 7: : not found`）。该守卫在改完任何 shell 脚本后必跑。
+- **11 项变异验证全部如期变红**，其中两项先变绿、暴露了真实盲区后补齐测试：
+  - 变体「给 nc 加回 `-w`」最初测不出来——host 上存在 `/usr/bin/timeout`，使脚本永远走
+    带包裹的分支，无 `timeout` 的 guest 从未被覆盖。
+  - 变体「把 `setsid` 条件改成永假」测不出来——原断言是数启动行个数，改成正则匹配条件本身。
+
+### 遗留（未修复，已记录）
+
+- `src/iris/monitor/ai_guardian.py` 的两处无条件成功标记（`_WATCHDOG_SCRIPT` /
+  `_CLEANUP_SCRIPT`）与 `_exec_in_guest` 实为容器 exec 而非 guest exec，**尚未修复**。
+- 通道路线需要另一条设计（guest 内第二串口 `inittab` respawn、或 QMP），见下轮。
+
 ## [0.3.8] - 2026-10-02
 
 新增架构此前要改八处，而且已经改乱了：`cli.py` 里两份逐字相同的内联 dict、
