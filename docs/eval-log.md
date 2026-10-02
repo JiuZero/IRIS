@@ -1,7 +1,9 @@
 # IRIS M0 评测日志
 
 > 本文件记录 M0 基线语料每款固件的提取/识别/仿真结果。
-> FirmAE baseline 仿真由用户在 WSL2 内手动执行（见 `03-M0执行手册.md`），结果回填本表。
+> FirmAE baseline 已于 2026-10-03 在 WSL2 内源码构建后实测回填（见下文该节）。
+> **两侧的逐台对比、失败机制、耗时口径与偏离声明见 `08-与FirmAE对比.md`**；
+> 本文除该节外仍为 M0 阶段的人工快照，不随后续运行自动更新。
 > 失败阶段固定 7 类：`extraction / arch / infra / boot / nvram / network / service`。
 >
 > 这 7 类不是本文档的约定，而是 `src/iris/failures.py` 的 `Stage` 枚举——判定发生在代码里，
@@ -86,22 +88,32 @@ M0 当时的记录，不再随后续运行自动更新。
 
 ## FirmAE baseline 仿真结果
 
-> 以下由用户在 WSL2 内执行 FirmAE `run.sh -c <firmware>` 后回填。
-> 每款固件最长约 12 分钟（2×TIMEOUT）。
+> 本表于 **2026-10-03** 首次回填：用户在 WSL2 `FirmAudit2-Ubuntu` 内源码构建
+> FirmAE（master），串行执行 `run.sh -c <firmware>`，逐台读回 `scratch/<n>/` 下的
+> `result` / `ping` / `web` / `architecture` / `ip` 与 `time_*` 产物。
+> 逐台结论、失败机制与全部偏离声明见 **`08-与FirmAE对比.md`**。
 
-**现状（截至 0.3.7）：整表仍为 `_待填_`，尚无任何一次 FirmAE baseline 结果。**
-IRIS 侧的对照数字已全部产出并可由 `iris db stats` 复现，baseline 侧为空白，因此
-当前**无法做 IRIS 与 FirmAE 的对照结论**——任何"IRIS 比 FirmAE 好/快"的说法在
-本表填上之前都没有证据支撑。此处如实留白，不以 IRIS 数字代填。
+**与 IRIS 侧同口径重跑的对照、耗时口径、以及两侧各自的偏离声明，都在
+`08-与FirmAE对比.md`。本表只保留 FirmAE 单侧的事实，不做跨项目结论。**
 
-| # | 固件 | arch 识别 | rootfs 提取 | FirmAE result | network_type | 失败阶段 | 关键日志指纹 |
+**表头口径**：前两列（`arch 识别` / `rootfs 提取`）是 **IRIS 侧**取值，与本文上半部分
+的语料表同源；`FirmAE result` 起是 **FirmAE 侧**本次实测取值。`network_type` 列在本表
+填的是 FirmAE 自己推断出的网络形态，仅供对照，不代表 IRIS 的判定。
+
+| # | 固件 | arch 识别<br>(IRIS) | rootfs 提取<br>(IRIS) | FirmAE result | network_type<br>(FirmAE) | 失败阶段 | 关键日志指纹 |
 |---|------|-----------|-------------|---------------|--------------|----------|--------------|
-| 1 | DIR-868L revB | armel ✓ | ✅ | _待填_ | _待填_ | _待填_ | _待填_ |
-| 2 | Archer C7 v2 | mipseb ✓ | ✅ | _待填_ | _待填_ | _待填_ | _待填_ |
-| 3 | WRT1200AC | armel ✓ | ✅ | _待填_ | _待填_ | _待填_ | _待填_ |
-| 4 | R7800 | armel ✓ | ✅ | _待填_ | _待填_ | _待填_ | _待填_ |
-| 5 | x86/64 | x64 | — | _待填_ | _待填_ | _待填_ | _待填_ |
-| 6 | Newifi D2 | mipsel ✓ | ✅ | _待填_ | _待填_ | _待填_ | _待填_ |
+| 1 | DIR-868L revB | armel ✓ | ✅ | true | br0 / eth0.1 | —（成功） | `makeNetwork.log`: `networkInfo: [('192.168.0.1','eth0',1,None,'br0')]`（正确带 VLAN tag=1）；`ip`=192.168.0.1，wall 479s |
+| 2 | Archer C7 v2 | mipseb ✓ | ✅ | true | eth0 | —（成功） | `ping`=true，`web`=true，`ip`=192.168.1.1，wall 1229s |
+| 3 | WRT1200AC | armel ✓ | ✅ | —（未能进入仿真） | — | extraction | `UBIFS Fatal: Super block error: Wrong node type.`（binwalk 插件 `ubireader_extract_files` 路径失败；UBI EC header @ `0x600000`），wall 12s |
+| 4 | R7800 | armel ✓ | ✅ | —（未能进入仿真） | — | extraction | 同 #3，wall 11s |
+| 5 | x86/64 | x64 | —（ext4 非 squashfs） | —（**架构级不支持，未实跑**） | — | — | `firmae.config` 的 `check_arch = ("armel" "mipseb" "mipsel")` 无 x64 |
+| 6 | Newifi D2 | mipsel ✓ | ✅ | false | br0 / eth0 | network | `ping`=true 但无 web；串口 `inet_bind[PID:1300 uhttpd] port:80` @42.7s；`makeNetwork.log`: `Interfaces: []` / `ports: []` / `networkInfo: []` → 退到 default network 并假设 `192.168.0.1`（设备实际 LAN 为 192.168.1.1），wall 1555s |
+
+**#3/#4 的失败性质**：`extractor.py` 内无任何 UBI 处理代码，完全依赖 binwalk 的
+`^ubi erase count header:ubi:ubireader_extract_files` 插件。`ubireader_extract_images`
+能取出 volume（`file` 判定为 Squashfs 4.0 xz, 3,608,158 bytes），但 FirmAE 没有走这条路，
+也没有 fallback 到按 magic 切 squashfs。准确说法是「所依赖的插件路径对该固件形态失败」，
+不是「不支持 UBI」。
 
 ## 未入库条目（pending，M0 不要求）
 

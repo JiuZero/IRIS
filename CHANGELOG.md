@@ -4,6 +4,59 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.11] - 2026-10-03
+
+为了把 IRIS 与 FirmAE 放在同一份实测数据上对比，本轮先在 WSL2 里源码构建了 FirmAE
+并跑完 5 台同语料固件，再把 IRIS 侧在同一份语料上重跑——因为 `emulation_run` 表里
+M0 语料一条记录都没有，`docs/eval-log.md` 那张 IRIS 表是人工快照，与实测不同源。
+结果暴露出一个**一直存在、此前无人发现的启动链回归**：IRIS 自己的兜底注入会顶掉
+OpenWrt 的整条厂商启动链。
+
+### 修复
+
+- **procd 固件上不再注入 sysinit 条目**。`procd_inittab_run()` 遍历 action 列表，
+  命中即 `break`（`sysinit`/`shutdown` handler 没有 `multi` 标记），而 `runrc()`
+  要求 `<process> <S|K> <param>` 三段齐全。注入的两段式
+  `::sysinit:/etc/init.d/iris_net_fix_bg` 因此成为唯一的 sysinit action，
+  `runrc` 报错 return——**IRIS 自己的兜底没跑，厂商的 rcS 也因 `break` 永远不执行**。
+  症状是 guest 干净启动、无 netifd 无 uhttpd，串口只有一行
+  `procd: valid format is rcS <S|K> <param>`。
+  `inject_boot_hooks.sh` 现在按 procd 自己的要求读回 inittab（`sysinit`/`shutdown`
+  行是否带 `<S|K> <param>` 尾参）判定 init 家族；是 procd 就改挂 `/etc/rc.d/S99iris_net_fix`
+  ——那是 procd 唯一会走的通道，它没有 rcS 文件可追加。
+- **`ln -s` 失败不再中断整个注入**。此前 `set -e` 下链接建不出来就让脚本非 0 退出，
+  后面的 rcS tracing 与 tail hook 全部不执行。现在只打印明确警告（宿主不能建符号链接
+  → guest 将拿不到兜底），既不伪装成功也不吞掉后续步骤。
+- **陈旧注入行会被清理**。同一份 rootfs 若在「被当作 BusyBox」期间被注入过，
+  识别为 procd 后必须把那两行撤掉，否则一条永远跑不了的死条目留在 inittab 里。
+
+### 验证
+
+- `tests/test_boot_hooks.py::TestProcdInittab` 新增 10 项，全部跑真实脚本
+  （合成 `/etc`，读回 inittab）。
+- 5 项变异验证如期变红：`seen>=4`（8 红）、只认 sysinit 不认 shutdown（1 红）、
+  去掉 action 过滤（8 红）、链接目标改成 bg 版（2 红）、去掉陈旧条目清理（1 红）。
+- 真机回归：Newifi D2 `emulation success`，`HTTP 200 after 75s`，串口出现
+  `IRIS-NETFIX: final: eth0 up with IP`——兜底经 rc.d 通道生效。baked image 指纹
+  `9358dc207ef7` → `b2112090961b`，旧 tag 由构建流程自动清理。
+
+### 文档
+
+- 新增 `docs/08-与FirmAE对比.md`：两侧环境、架构支持矩阵、逐台对比、
+  失败分类、反向结论（FirmAE 在 DIR-868L 赢、IRIS 在 Newifi D2 与两台 UBI 提取上赢）、
+  耗时不可比的说明、全部偏离声明。
+- `docs/eval-log.md` 的 FirmAE baseline 表由整表 `_待填_` 回填为实测值，
+  并标注前两列是 IRIS 侧取值、后几列是 FirmAE 侧取值。
+
+### 已知缺口（本轮只记录，未修）
+
+- 无 `/etc/inittab` 的固件（如 DIR-868L）上兜底退化为单一通道，而那唯一通道被放在
+  rcS 末尾、被 `/etc/init0.d/rcS` 饿死——`IRIS-NETFIX` 0 行。这违反了本项目自己
+  早已写下的「兜底不得以厂商 rcS 完成为门控」。
+- `iris_net_fix.sh` 的 `has_ip()` 硬编码 `grep "inet addr"`，busybox ≥1.20 的
+  `ifconfig` 输出是 `inet 192.168.1.1`（无 `addr`），在 Alpine 与 OpenWrt 上都误判。
+- WRT1200AC / R7800 在 IRIS 侧仿真的失败根因未完全定位，详见对比文档 §3.1b。
+
 ## [0.3.10] - 2026-10-02
 
 上一轮在 `iris_net_fix.sh` 里修掉了「声称成功、实测失败」，同一类缺陷在 `ai_guardian`

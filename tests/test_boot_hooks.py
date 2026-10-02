@@ -43,6 +43,15 @@ done
 touch /var/run/.start_up_run_file
 """
 
+# OpenWrt (Newifi D2), the one firmware in the corpus that boots under procd.
+# The `<S|K> <param>` tail on both rcS lines is what procd's own inittab parser
+# requires, and it is the only thing here that separates procd from BusyBox init.
+PROCD_INITTAB = """\
+::sysinit:/etc/init.d/rcS S boot
+::shutdown:/etc/init.d/rcS K shutdown
+::askconsole:/usr/libexec/login.sh
+"""
+
 ENTRY = "::sysinit:/etc/init.d/iris_net_fix_bg"
 
 
@@ -78,7 +87,14 @@ def sh() -> list[str]:
 def run_hooks(sh, tmp_path: Path):
     """Build a synthetic guest /etc, run the real injection, hand back the paths."""
 
-    def build(inittab: str | None = TES7002_INITTAB, rcs: str | None = TES7002_RCS, with_bg: bool = True):
+    def build(
+        inittab: str | None = TES7002_INITTAB,
+        rcs: str | None = TES7002_RCS,
+        with_bg: bool = True,
+        with_rcd: bool = False,
+        pre_existing_link: bool = False,
+        fake_ln: bool = False,
+    ):
         root = tmp_path / "image"
         (root / "etc" / "init.d").mkdir(parents=True)
         if inittab is not None:
@@ -91,10 +107,66 @@ def run_hooks(sh, tmp_path: Path):
             (root / "etc" / "init.d" / "iris_net_fix_bg").write_text(
                 (SCRIPTS / "iris_net_fix_bg.sh").read_text(encoding="utf-8"), encoding="utf-8"
             )
-        proc = _run_sh([*sh, str(INJECT), str(root), str(SCRIPTS)])
+        if with_rcd:
+            (root / "etc" / "rc.d").mkdir()
+        if pre_existing_link:
+            (root / "etc" / "rc.d").mkdir(exist_ok=True)
+            (root / "etc" / "rc.d" / "S99iris_net_fix").write_text(
+                "#!/bin/sh\n", encoding="utf-8"
+            )
+        if fake_ln:
+            proc = _run_sh(_with_fake_ln(sh, tmp_path, [str(INJECT), str(root), str(SCRIPTS)]))
+        else:
+            proc = _run_sh([*sh, str(INJECT), str(root), str(SCRIPTS)])
         return root, proc
 
     return build
+
+
+def _ln_log(tmp_path: Path) -> list[str]:
+    log = tmp_path / "ln.log"
+    return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+
+def _posix(path: Path | str) -> str:
+    """POSIX form of a host path: `/bin/sh -c` execs its words verbatim, so a
+    backslash-separated Windows path never resolves for the shell it hands them to."""
+    return str(path).replace("\\", "/")
+
+
+def _quoted(path: Path | str) -> str:
+    """One shell word. `C:/Program Files/...` splits into two without quotes."""
+    return "'" + _posix(path).replace("'", "'\\''") + "'"
+
+
+def _with_fake_ln(sh: list[str], tmp_path: Path, argv: list[str]) -> list[str]:
+    """Run the script with `ln` shadowed by a recording shell function.
+
+    Windows Git Bash cannot create symlinks here at all — `ln -s` fails outright,
+    and where MSYS does fall back to a shortcut, Python cannot stat it (`exists()`
+    and `lexists()` both report it missing). The one thing this script now does on
+    procd firmwares would be invisible to any assertion in that environment, and
+    the link would fail the run under `set -e` besides.
+
+    Shadowing is done with a function and `.` (source) rather than a stub binary on
+    PATH: MSYS rewrites a `PATH=...:$PATH` assignment whose value looks like a
+    Windows path list, so a prepended directory silently loses to `/usr/bin`. A
+    function needs no PATH round-trip and still records the exact argv, and it
+    leaves a plain file where the link would be, so the script's own idempotence
+    check (`[ -e ]`) has something to find. The real symlink is exercised by the
+    Linux container build and by the firmware regression, not by this host.
+    """
+    command = "\n".join(
+        [
+            (
+                "ln() { printf '%s\\n' \"$*\" >> \"${IRIS_TEST_LN_LOG}\";"
+                " printf '%s\\n' \"${2}\" > \"${3}\"; }"
+            ),
+            f"IRIS_TEST_LN_LOG={_quoted(tmp_path / 'ln.log')}",
+            ". " + " ".join(_quoted(a) for a in argv),
+        ]
+    )
+    return [*sh, "-c", command]
 
 
 def _inittab_lines(root: Path) -> list[str]:
@@ -347,6 +419,88 @@ class TestEtcRoLayout:
         assert "::sysinit:/etc/init.d/iris_net_fix_bg" in (
             root / "etc" / "inittab"
         ).read_text(encoding="utf-8")
+
+class TestProcdInittab:
+    """OpenWrt, where the sysinit hook cannot be injected at all.
+
+    procd_inittab_run() walks the action list and ``break``s after the first match
+    unless the handler is flagged ``multi`` — ``sysinit`` and ``shutdown`` are not
+    — so an injected entry does not run ahead of the vendor rcS entry, it takes
+    its place. runrc() then refuses that entry for carrying no ``<S|K> <param>``
+    tail and only logs "valid format is rcS <S|K> <param>".
+
+    The result is a guest that boots cleanly and reaches nothing: no netifd, no
+    uhttpd, and IRIS's own fallback rejected alongside the vendor chain. Measured
+    on Newifi D2, and removing the injected entry from the same image made uhttpd
+    bind port 80 at 37s. procd also has no rcS file to tail-hook — it walks
+    /etc/rc.d/S* itself — so that is where the fallback has to go instead.
+    """
+
+    def _procd_hooks(self, run_hooks, **kwargs):
+        kwargs.setdefault("rcs", None)
+        kwargs.setdefault("inittab", PROCD_INITTAB)
+        return run_hooks(**kwargs)
+
+    def test_sysinit_entry_is_not_injected(self, run_hooks):
+        root, proc = self._procd_hooks(run_hooks)
+        assert proc.returncode == 0, proc.stderr
+        lines = (root / "etc" / "inittab").read_text(encoding="utf-8").splitlines()
+        assert not any("iris_net_fix" in line for line in lines)
+
+    def test_the_vendor_sysinit_entry_stays_first(self, run_hooks):
+        """The break means position is not the question here — presence is."""
+        root, _ = self._procd_hooks(run_hooks)
+        lines = [ln for ln in (root / "etc" / "inittab").read_text(
+            encoding="utf-8").splitlines() if ln.strip()]
+        assert lines == PROCD_INITTAB.strip().splitlines()
+
+    def test_the_family_and_its_reason_are_reported(self, run_hooks):
+        _, proc = self._procd_hooks(run_hooks)
+        assert "is procd's" in proc.stdout
+        assert "sysinit hook skipped" in proc.stdout
+
+    def test_fallback_is_linked_onto_the_channel_procd_drives(self, run_hooks):
+        root, _ = self._procd_hooks(run_hooks, with_rcd=True, fake_ln=True)
+        assert _ln_log(root.parent) == [
+            f"-s ../init.d/iris_net_fix {root.as_posix()}/etc/rc.d/S99iris_net_fix"
+        ]
+
+    def test_rc_d_is_created_when_the_vendor_ships_none(self, run_hooks):
+        """OpenWrt always ships rc.d, but the link is what matters, not the dir."""
+        root, _ = self._procd_hooks(run_hooks, fake_ln=True)
+        assert _ln_log(root.parent) == [
+            f"-s ../init.d/iris_net_fix {root.as_posix()}/etc/rc.d/S99iris_net_fix"
+        ]
+
+    def test_an_existing_link_is_not_created_twice(self, run_hooks):
+        """make_image.sh already installs one; a second would run the fixup twice."""
+        _, proc = self._procd_hooks(
+            run_hooks, with_rcd=True, pre_existing_link=True, fake_ln=True
+        )
+        assert "already present" in proc.stdout
+
+    def test_a_stale_busybox_entry_is_removed(self, run_hooks):
+        """A rootfs hooked before it was recognised as procd must lose that entry."""
+        hooked = f"#IRIS-NETFIX-SYSINIT\n{ENTRY}\n" + PROCD_INITTAB
+        root, _ = self._procd_hooks(run_hooks, inittab=hooked, fake_ln=True)
+        lines = (root / "etc" / "inittab").read_text(encoding="utf-8").splitlines()
+        assert not any("iris_net_fix" in ln or "IRIS-NETFIX" in ln for ln in lines)
+
+    def test_leaves_no_temp_files_behind(self, run_hooks):
+        root, _ = self._procd_hooks(run_hooks)
+        assert [p.name for p in (root / "etc").iterdir() if p.name.startswith("inittab.")] == []
+
+    def test_a_long_respawn_line_is_not_read_as_procd(self, run_hooks):
+        """`respawn` lines carry many fields on either init; only rcS lines count."""
+        inittab = "ttyS0::respawn:/sbin/getty -L 0 115200 ttyS0 vt100\n::askconsole:/bin/sh\n"
+        root, proc = run_hooks(inittab=inittab, rcs=None, fake_ln=True)
+        assert "is procd's" not in proc.stdout
+        assert ENTRY in (root / "etc" / "inittab").read_text(encoding="utf-8").splitlines()
+
+    def test_a_shutdown_line_alone_still_identifies_procd(self, run_hooks):
+        _, proc = run_hooks(inittab="::shutdown:/etc/init.d/rcS K shutdown\n", rcs=None)
+        assert "is procd's" in proc.stdout
+
 
 class TestBackgroundLauncher:
     """The launcher's only job is finding the fixup in whatever tree it landed in.

@@ -15,6 +15,7 @@
 #     BusyBox execs the process field verbatim — it does not interpret shell
 #     metacharacters — so a trailing `&` here would be a literal argument rather
 #     than a background job; iris_net_fix_bg does the backgrounding itself.
+#     procd cannot take this hook at all; see the init-family branch below.
 #
 #  2. a marker around each rc script in rcS, because rcS redirects every rc
 #     script to /dev/null: a boot that stalls looks identical to a boot that
@@ -53,17 +54,85 @@ RCS="${HOST_ETC}/init.d/rcS"
 MARKER='#IRIS-NETFIX-SYSINIT'
 ENTRY="::sysinit:${GUEST_ETC}/init.d/iris_net_fix_bg"
 
+# ------------------------------------------------------------------ init family
+# procd and BusyBox init read the same file, but procd's sysinit channel cannot
+# take a second entry, and injecting one there does not merely lose the race — it
+# destroys the vendor boot chain:
+#
+#   * procd_inittab_run() walks the action list and `break`s after the first match
+#     unless the handler is flagged `multi`. sysinit and shutdown are not, so an
+#     injected entry *replaces* the vendor rcS entry rather than preceding it.
+#   * the handler is runrc(), which refuses a line without the `<S|K> <param>`
+#     tail and only then logs "valid format is rcS <S|K> <param>".
+#
+# Together those mean a bare `::sysinit:<script>` entry runs neither IRIS's
+# fallback nor the vendor chain: on OpenWrt the guest comes up with no netifd and
+# no uhttpd, and the only symptom is that one procd line in the serial log.
+#
+# The 3-field test is procd's own requirement read back from its source, not a
+# firmware sniff: procd only ever writes `<process> <S|K> <param>` into sysinit /
+# shutdown lines, and BusyBox init never execs an extra argument there. Matching
+# on `respawn` lines instead would misfire — those legitimately carry many fields
+# on either init.
+IS_PROCD=""
+if [ -f "${INITTAB}" ]; then
+    IS_PROCD="$(awk '
+        /^[[:space:]]*#/ { next }
+        {
+            if ($0 !~ /^[^:]*:[^:]*:(sysinit|shutdown):/) next
+            rest = $0
+            sub(/^[^:]*:[^:]*:[^:]*:/, "", rest)
+            n = split(rest, f, /[ \t]+/)
+            seen = 0
+            for (i = 1; i <= n; i++) if (f[i] != "") seen++
+            if (seen >= 3) { print "yes"; exit }
+        }
+    ' "${INITTAB}")"
+fi
+
 # ---------------------------------------------------------------- sysinit hook
-if [ ! -f "${BG_SCRIPT}" ]; then
-    echo "iris_net_fix_bg missing at ${BG_SCRIPT}, sysinit hook skipped"
-elif [ ! -f "${INITTAB}" ]; then
-    echo "no ${INITTAB}, sysinit hook skipped"
-else
-    # Strip any previous injection first so re-running the build (same rootfs,
-    # new image) is idempotent instead of stacking duplicates.
+# Strip any previous injection first so re-running the build (same rootfs, new
+# image) is idempotent instead of stacking duplicates — and so a tree that was
+# hooked while it was treated as BusyBox does not keep a dead entry once it is
+# recognised as procd.
+CLEAN=""
+if [ -f "${INITTAB}" ]; then
     CLEAN="$(mktemp "${IMAGE_DIR}/inittab.XXXXXX")"
     grep -v 'IRIS-NETFIX-SYSINIT\|iris_net_fix_bg' "${INITTAB}" > "${CLEAN}" || true
+fi
 
+if [ -n "${IS_PROCD}" ]; then
+    if [ -n "${CLEAN}" ]; then
+        mv "${CLEAN}" "${INITTAB}"
+    fi
+    echo "inittab is procd's (sysinit carries <S|K> <param>): sysinit hook skipped"
+    echo "  procd runs only the first ::sysinit: entry, so injecting one would"
+    echo "  replace the vendor rcS and starve the whole boot chain"
+    # procd has no rcS script to tail-hook either: it walks /etc/rc.d/S* itself,
+    # so that directory is the only channel it offers. The link make_image.sh
+    # installs is the fallback's entry point; ensure it here too so the guarantee
+    # does not depend on that call order, and because a procd firmware whose
+    # vendor set ships no rc.d still gets a working channel.
+    RCD="${HOST_ETC}/rc.d"
+    mkdir -p "${RCD}"
+    if [ ! -e "${RCD}/S99iris_net_fix" ]; then
+        # A failed link must not abort the rest of the injection, and must not be
+        # reported as success: without it the guest has no fallback at all.
+        if ln -s ../init.d/iris_net_fix "${RCD}/S99iris_net_fix" 2>/dev/null; then
+            echo "  fallback linked into ${GUEST_ETC}/rc.d as S99iris_net_fix"
+        else
+            echo "  WARNING: could not link the fallback into ${GUEST_ETC}/rc.d"
+            echo "  (host cannot create symlinks?) — guest will get no network/web fallback"
+        fi
+    else
+        echo "  ${GUEST_ETC}/rc.d/S99iris_net_fix already present"
+    fi
+elif [ -z "${CLEAN}" ]; then
+    echo "no ${INITTAB}, sysinit hook skipped"
+elif [ ! -f "${BG_SCRIPT}" ]; then
+    rm -f "${CLEAN}"
+    echo "iris_net_fix_bg missing at ${BG_SCRIPT}, sysinit hook skipped"
+else
     if awk -v entry="${ENTRY}" '
             /^::sysinit:/ && !inserted { print "'"${MARKER}"'"; print entry; inserted = 1 }
             { print }
@@ -104,7 +173,8 @@ fi
 # ::sysinit: entry at all (this script then only prepends, which works) or an init
 # can ignore inittab and run rcS directly. Appending here costs nothing — the
 # script stands down on its lock if the sysinit hook already won the race — and
-# covers those firmwares.
+# covers those firmwares. On procd there is no rcS file to append to, and the
+# branch above already put the fallback on the channel procd does drive.
 if [ ! -f "${RCS}" ]; then
     echo "no ${RCS}, rcS fallback hook skipped"
 elif [ ! -f "${BG_SCRIPT}" ]; then
