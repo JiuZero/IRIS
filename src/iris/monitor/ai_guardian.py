@@ -87,7 +87,14 @@ class SerialLogAnalyzer:
     PATTERNS: ClassVar[dict[str, str]] = {
         'watchdog_reboot': r'Monitor:\s*process\s+\w+\s+is\s+die',
         'sysrq_reset': r'sysrq:\s*Resetting|echo.*b.*proc/sysrq-trigger',
-        'reboot_attempt': r'reboot:\s*not found|reboot triggered',
+        # Three ways a reboot reaches the log, and the original pattern matched
+        # none of them on the firmware that actually reboots: `rm /sbin/reboot`
+        # only removes the symlink, so a vendor daemon calling reboot(2) still
+        # reaches the kernel, and the FirmAE kernel's own printk is the only
+        # evidence left. Missing that line is what let a 28-deep reboot loop run
+        # to the full boot timeout undiagnosed.
+        'reboot_attempt': r'reboot:\s*not found|reboot triggered|'
+                           r'firmadyne:\s*sys_reboot|Sent SIGTERM to all processes',
         'diag_crash': r'diag:\s*.*signal\s+11|SIGSEGV',
         'soft_lockup': r'watchdog:\s*BUG:\s*soft lockup.*CPU#?\d+',
         'web_server_start': r'(goahead|boa|lighttpd|uhttpd|thttpd|httpd)[:\s].*'

@@ -58,10 +58,21 @@ def bash() -> str:
 
 
 def _acquire(bash: str, lock_dir: Path, seed_owner: str | None = None) -> str:
+    # POSIX form: the script strips the parent out of this path with parameter
+    # expansion, which only knows "/" — the guest's own paths are all absolute
+    # and slash-separated, so a Windows path here would test a case that cannot
+    # occur and quietly pass for the wrong reason.
+    posix = str(lock_dir).replace("\\", "/")
     proc = subprocess.run(
-        [bash, "-c", _SOURCE, "_", str(lock_dir), str(NET_FIX), seed_owner or ""],
+        [bash, "-c", _SOURCE, "_", posix, str(NET_FIX).replace("\\", "/"), seed_owner or ""],
         capture_output=True,
         text=True,
+        # errors="replace": shell diagnostics from the script are bytes in the
+        # host's console encoding (GBK on Windows), and a decoding error inside
+        # subprocess's reader thread surfaces as an unraisable pytest warning
+        # rather than as a failure of the assertion below.
+        encoding="utf-8",
+        errors="replace",
         timeout=60,
         check=False,
     )

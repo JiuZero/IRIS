@@ -1,4 +1,4 @@
-"""One output shape for the whole tool: ``[info] message``.
+"""One output shape for the whole tool: ``2026-10-02T02:11:00 [info] message``.
 
 Two channels feed the terminal and they used to disagree. ``structlog`` rendered
 through ``ConsoleRenderer``, which pads the level name to a fixed width
@@ -6,14 +6,21 @@ through ``ConsoleRenderer``, which pads the level name to a fixed width
 table, and on a non-color terminal it is just a run of trailing spaces. Every
 other library in the process (uvicorn, FastAPI, the ``logging`` root logger)
 printed the bare message with no level at all. So a single run mixed ``[info   ]``
-lines with unlabelled ones.
+lines with unlabelled ones, and nothing carried a time at all — for a tool whose
+runs take two minutes and print every step, "which of these two lines came first"
+was unanswerable after the fact.
 
-The level is now rendered as a fixed ``[info]`` / ``[warn]`` / ``[error]`` tag by
-both channels, so a line can be identified by eye and grepped by pattern
-regardless of which library emitted it. ``structlog`` also spells the level
-``warning``; it is normalized to ``warn`` so the vocabulary is closed.
+Every line now carries an ISO-like local timestamp, a level tag normalized to a
+closed vocabulary, and a color when the destination can show one. Both channels
+(``structlog`` and stdlib ``logging``) render through the same ``format_line``,
+so the two shapes cannot drift apart again.
 
-``status()`` covers the third kind of output: a single line that is rewritten in
+Color follows the usual terminal conventions — dim timestamp, cyan ``debug``,
+green ``info``, yellow ``warn``, red ``error`` — and is dropped entirely when the
+stream is not a terminal, when ``NO_COLOR`` is set, or when ``TERM=dumb``. A
+redirected log therefore stays free of escape sequences.
+
+``StatusLine`` covers the third kind of output: a single line that is rewritten in
 place while a long operation is in flight, instead of appending a new line every
 few seconds. It degrades to plain line output when stdout is not a terminal, so
 a redirected log never ends up full of carriage returns.
@@ -22,8 +29,12 @@ a redirected log never ends up full of carriage returns.
 from __future__ import annotations
 
 import logging
+import os
+import re
 import sys
 import traceback
+from collections.abc import Sequence
+from datetime import datetime
 from typing import TextIO
 
 import structlog
@@ -42,21 +53,97 @@ LEVEL_TAGS = {
     "success": "info",
 }
 
+#: Tag -> SGR code. Kept beside LEVEL_TAGS so a new level cannot be added to the
+#: vocabulary without also being given a color.
+LEVEL_COLORS = {
+    "debug": "\033[36m",  # cyan
+    "info": "\033[32m",   # green
+    "warn": "\033[33m",   # yellow
+    "error": "\033[31m",  # red
+}
+
+TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S"
+
+_DIM = "\033[2m"
+_RESET = "\033[0m"
+
 
 def level_tag(level: str) -> str:
     """Normalized bracketed tag for a level name, e.g. ``warning`` -> ``warn``."""
     return LEVEL_TAGS.get(str(level).lower(), str(level).lower())
 
 
+def use_color(stream: TextIO | None) -> bool:
+    """Whether *stream* can show SGR sequences.
+
+    ``NO_COLOR`` is checked first so a user can force plain output from a real
+    terminal; ``FORCE_COLOR`` does the opposite for a pipe that should still be
+    colored. A non-tty stream is the default answer because a log file full of
+    escape bytes is worse than a colorless one.
+    """
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("FORCE_COLOR"):
+        return True
+    if os.environ.get("TERM") == "dumb":
+        return False
+    return bool(getattr(stream, "isatty", lambda: False)())
+
+
+#: SGR sequences occupy bytes in a buffer but no cells on a screen. Anything that
+#: has to line up with what a terminal shows has to measure without them.
+_SGR_RE = re.compile(r"\033\[[0-9;]*m")
+
+
+def _visible_width(text: str) -> int:
+    """How many terminal columns *text* occupies once SGR sequences are ignored."""
+    return len(_SGR_RE.sub("", text))
+
+
+def _stamp() -> str:
+    """The current local wall clock, e.g. ``2026-10-02T02:11:00``.
+
+    Local, not UTC, and stated as a wall clock with no offset: an operator reading
+    a boot log wants to know whether "02:11" is the minute the guest died, and
+    that is the clock on their wall. ``astimezone()`` attaches the zone so the
+    value is unambiguous internally, while the rendering stays a bare local time
+    because that is the shape every other line of a terminal log uses.
+    """
+    return datetime.now().astimezone().strftime(TIMESTAMP_FORMAT)
+
+
+def format_line(tag: str, message: str, color: bool) -> str:
+    """Render one output line: the single shape both logging channels share.
+
+    An unknown tag gets no color rather than a fallback one: a level outside
+    :data:`LEVEL_COLORS` is a level nobody designed a color for, and guessing one
+    would make it look like a severity it does not have.
+    """
+    stamp = _stamp()
+    tint = LEVEL_COLORS.get(tag, "") if color else ""
+    if not tint:
+        # A tag with no color of its own also gets no reset: emitting RESET alone
+        # would leave a stray escape byte in a stream that is otherwise plain,
+        # which is exactly what "this line is untinted on purpose" must not do.
+        return f"{stamp} [{tag}] {message}"
+    return f"{_DIM}{stamp}{_RESET} {tint}[{tag}]{_RESET} {message}"
+
+
 class PlainFormatter(logging.Formatter):
     """Format stdlib records the same way structlog ones are rendered."""
 
+    def __init__(self, stream: TextIO | None = None, color: bool | None = None) -> None:
+        super().__init__()
+        self._stream = stream
+        self._color = color
+
     def format(self, record: logging.LogRecord) -> str:
-        return f"[{level_tag(record.levelname)}] {record.getMessage()}"
+        color = use_color(self._stream or sys.stdout) if self._color is None else self._color
+        return format_line(level_tag(record.levelname), record.getMessage(), color)
 
 
 class PlainRenderer:
-    """``structlog`` processor emitting ``[level] event`` with no padding.
+    """``structlog`` processor emitting ``timestamp [level] event`` with no padding.
 
     Replaces ``ConsoleRenderer``, whose column-aligned output was the reason the
     level tag appeared as ``[info     ]``. Exceptions are kept as a trailing
@@ -64,17 +151,19 @@ class PlainRenderer:
     read by scrolling, not by parsing.
     """
 
+    def __init__(self, stream: TextIO | None = None, color: bool | None = None) -> None:
+        self._stream = stream
+        self._color = color
+
     def __call__(self, _logger, _name, event_dict) -> str:
-        level = level_tag(event_dict.pop("level", "info"))
+        color = use_color(self._stream or sys.stdout) if self._color is None else self._color
+        tag = level_tag(event_dict.pop("level", "info"))
         event = event_dict.pop("event", "")
         exc_info = event_dict.pop("exc_info", None)
         # StackInfoRenderer() records a rendered traceback under this key; it is
         # already text, so it is appended rather than re-formatted.
         stack = event_dict.pop("stack_info", None)
-        extras = " ".join(f"{k}={v}" for k, v in event_dict.items())
-        line = f"[{level}] {event}"
-        if extras:
-            line = f"{line} {extras}"
+        line = format_line(tag, _join(event, event_dict), color)
         traceback_text = stack or self._format_exc(exc_info)
         if traceback_text:
             line = f"{line}\n{traceback_text.rstrip()}"
@@ -93,6 +182,109 @@ class PlainRenderer:
         return "".join(traceback.format_exception(*exc_info))
 
 
+def _join(event: str, event_dict: dict) -> str:
+    """Append remaining key/value context to the message, or use it alone."""
+    extras = " ".join(f"{k}={v}" for k, v in event_dict.items())
+    if not extras:
+        return event
+    return f"{event} {extras}".rstrip()
+
+
+class StreamLogger:
+    """A structlog-shaped logger pinned to one stream.
+
+    ``structlog`` renders into the global processor chain, which
+    :func:`setup_logging` points at stdout. A CLI also needs two things structlog
+    cannot give it: failures on stderr (``iris rules apply ... 2>/dev/null`` must
+    not print them) and multi-line aligned reports (``inspect`` prints a column of
+    ``label : value`` pairs, and a timestamp on every row would push each one right
+    by a different amount and destroy the alignment). This class covers both over
+    the same :func:`format_line`, so a message looks identical on either stream.
+
+    The stream is resolved on every write rather than captured in ``__init__``.
+    A module-level ``log = get_logger()`` is otherwise bound to whatever
+    ``sys.stdout`` happened to be at import time, which in a test runner is a
+    capture buffer the assertions cannot see.
+    """
+
+    #: Continuation lines of a block are indented under the header so a reader
+    #: (and a grep for the header) still sees them as one record.
+    INDENT = "  "
+
+    def __init__(self, stream: TextIO | None = None, *, use_stderr: bool = False) -> None:
+        self._stream = stream
+        self._use_stderr = use_stderr
+
+    @property
+    def stream(self) -> TextIO:
+        if self._stream is not None:
+            return self._stream
+        return sys.stderr if self._use_stderr else sys.stdout
+
+    def info(self, event: str, **fields: object) -> None:
+        self._emit("info", event, fields)
+
+    def warning(self, event: str, **fields: object) -> None:
+        self._emit("warn", event, fields)
+
+    def error(self, event: str, **fields: object) -> None:
+        self._emit("error", event, fields)
+
+    def block(
+        self,
+        level: str,
+        header: str,
+        rows: Sequence[str],
+        row_color: str | Sequence[str | None] | None = None,
+        **fields: object,
+    ) -> None:
+        """One record made of a logged header plus indented, column-aligned rows.
+
+        Prefixing every row with a timestamp would shift each row right by a
+        different amount — the tag is a fixed width but the value is not — and
+        the columns would no longer line up. Emitting a single record instead
+        keeps one timestamp for the whole report and leaves the rows free to
+        align against each other.
+
+        ``row_color`` tints rows without tinting the header, which is what a
+        table needs: the header states the level, the rows state a per-row
+        verdict. Pass one SGR code to tint them all, or one per row to let each
+        row carry its own.
+
+        A tint count that does not match the row count raises: a silent mismatch
+        would leave trailing rows untinted, and nobody would know the table was
+        half-colored because of a typo at the call site. The check happens even
+        when color is off, so a redirected run and a terminal run cannot disagree
+        about whether the caller got its row counts right.
+        """
+        tints = self._row_tints(row_color, len(rows))
+        body = [
+            f"{self.INDENT}{tint}{row}{_RESET if tint else ''}"
+            for row, tint in zip(rows, tints, strict=True)
+        ]
+        self._emit(level, _join("\n".join([_join(header, fields), *body]), {}), {})
+
+    def _row_tints(self, row_color: str | Sequence[str | None] | None, count: int) -> list[str]:
+        if row_color is None:
+            return [""] * count
+        if isinstance(row_color, str):
+            tints: list[str | None] = [row_color] * count
+        else:
+            tints = list(row_color)
+            if len(tints) != count:
+                raise ValueError(f"row_color has {len(tints)} entries but the block has {count} rows")
+        return ["" for _ in tints] if not self._color else tints
+
+    @property
+    def _color(self) -> bool:
+        return use_color(self.stream)
+
+    def _emit(self, level: str, event: str, fields: dict[str, object]) -> None:
+        stream = self.stream
+        line = format_line(level_tag(level), _join(event, fields), use_color(stream))
+        print(line, file=stream, flush=True)
+
+
 def setup_logging(level: str = "INFO") -> None:
     # force=True because the CLI may be re-entered in one process (tests, the
     # debug entry point); basicConfig is a no-op the second time otherwise and
@@ -103,14 +295,14 @@ def setup_logging(level: str = "INFO") -> None:
         level=level,
         force=True,
     )
-    logging.getLogger().handlers[0].setFormatter(PlainFormatter())
+    logging.getLogger().handlers[0].setFormatter(PlainFormatter(stream=sys.stdout))
 
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.StackInfoRenderer(),
-            PlainRenderer(),
+            PlainRenderer(stream=sys.stdout),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(
             getattr(logging, level.upper(), logging.INFO)
@@ -123,6 +315,16 @@ def get_logger(name: str):
     return structlog.get_logger(name)
 
 
+def get_stream_logger(stream: TextIO | None = None, *, use_stderr: bool = False) -> StreamLogger:
+    """A logger for CLI output, pinned to *stream* or resolved per write."""
+    return StreamLogger(stream, use_stderr=use_stderr)
+
+
+def get_error_logger() -> StreamLogger:
+    """A logger pinned to stderr, for messages that must survive ``2>/dev/null``."""
+    return StreamLogger(use_stderr=True)
+
+
 class StatusLine:
     """A progress line rewritten in place, or appended when stdout is a file.
 
@@ -131,23 +333,49 @@ class StatusLine:
     one line keeps the transcript readable; when the output is not a terminal the
     same calls fall back to ordinary lines, because a log file full of ``\\r``
     is unreadable and ungreppable.
+
+    The rendered line is the same shape as every other one, tag ``[wait]`` — so
+    grepping a redirected log for a level still finds the progress updates. The
+    ``\\r`` only ever prefixes a full line, never wraps one, so a terminal's own
+    line wrapping cannot desynchronize the erase.
     """
+
+    #: Progress is not a log level; it gets its own tag in the same vocabulary
+    #: position so the timestamp/tag prefix stays uniform.
+    TAG = "wait"
+    #: ``wait`` is neither an error nor a success; yellow is what reads as
+    #: "in progress" without claiming a severity the state does not have.
+    COLOR = LEVEL_COLORS["warn"]
 
     def __init__(self, stream: TextIO = sys.stdout) -> None:
         self._stream = stream
         self._width = 0
         self._open = False
+        self._color = use_color(stream)
 
     def update(self, text: str) -> None:
+        line = self._render(text)
         if not self._is_tty():
-            print(f"[wait] {text}", file=self._stream, flush=True)
+            print(line, file=self._stream, flush=True)
             return
         # Pad to the previous width: a shorter line would otherwise leave the
-        # tail of the longer one behind.
-        padding = " " * max(0, self._width - len(text))
-        print(f"\r{text}{padding}", end="", file=self._stream, flush=True)
-        self._width = len(text)
+        # tail of the longer one behind. Both measurements are *visible* widths.
+        # A terminal erases cells, not bytes: the timestamp-and-tag prefix is 27
+        # columns and the SGR sequences around it are zero, so measuring the raw
+        # string would leave the prefix on screen after every clear() and pad
+        # every short update with 17 columns of nothing. Visible width also keeps
+        # the erase identical whether or not color is on, so a run does not erase
+        # a different amount of screen depending on the terminal it ran under.
+        visible = _visible_width(line)
+        padding = " " * max(0, self._width - visible)
+        print(f"\r{line}{padding}", end="", file=self._stream, flush=True)
+        self._width = visible
         self._open = True
+
+    def _render(self, text: str) -> str:
+        if not self._color:
+            return f"{_stamp()} [{self.TAG}] {text}"
+        return f"{_DIM}{_stamp()}{_RESET} {self.COLOR}[{self.TAG}]{_RESET} {text}"
 
     def clear(self) -> None:
         """Abandon an in-place line so a real log record can be printed.

@@ -26,6 +26,163 @@ from iris.log import StatusLine, get_logger
 
 logger = get_logger(__name__)
 
+#: How many kernel reboot requests a guest may make before IRIS stops waiting.
+#:
+#: Some firmware never finishes booting at all: AC15's cfmd segfaults within
+#: seconds of every start, its own SIGSEGV handler reboots the guest, and the
+#: re-entered init never reaches a shell — 28 reboot calls inside two seconds.
+#: Nothing about that improves with more waiting, so the loop is treated as the
+#: failure it is instead of spending the whole boot timeout to report "HTTP 000".
+REBOOT_LOOP_THRESHOLD = 3
+
+#: Web servers IRIS knows how to recognise in a serial log. Kept in step with the
+#: guest-side list in iris_net_fix.sh's web_running(); a server this module
+#: cannot name is one it cannot report as "running but on the wrong port".
+_KNOWN_WEB_SERVERS = ("goahead", "boa", "lighttpd", "uhttpd", "thttpd", "nginx", "httpd")
+
+#: Driver names whose registration means the guest really has a network device.
+#: Absence of these plus absence of any eth* mention is what separates "the NIC
+#: never appeared" from "the NIC is fine and nobody gave it an address".
+_NET_DRIVER_HINTS = ("virtio_net", "e1000", "rtl8139", "pcnet32", "ne2k", "8139cp", "tulip")
+
+#: An eth* name on its own proves nothing: firmwares print ``nvram_set: wan_ifname
+#: = "eth0"`` while their config is being read, long before any interface exists.
+#: Only a mention that reports something *about* the interface counts.
+_NIC_PRESENT = re.compile(
+    r"^\s*(?:\[[\d.]+\]\s+)?eth\d+:"      # kernel probe: "eth0: link becomes ready"
+    r"|eth\d+:\s+Link encap"               # ifconfig
+    r"|\bdev eth\d+\b"                     # addrconf / "ip addr add"
+    r"|IRIS-NETFIX:.*\beth\d",             # the guest-side fallback saw it
+    re.MULTILINE,
+)
+
+#: Any of these means some interface other than loopback holds an IP address.
+#: ``inet_insert_ifa`` is a kernel printk that busybox-platform firmwares rarely
+#: emit at all, so relying on it alone would report "nobody assigned an address"
+#: even for a guest whose network came up fine — checked instead for the two
+#: signals that do show up: the guest-side fallback's own report, and ifconfig.
+_HAS_NON_LO_IP = re.compile(
+    r"inet_insert_ifa:\s*dev\s+(?!lo\b)"
+    r"|IRIS-NETFIX:\s*final:\s+(?!lo\b)\S+\s+up with IP"
+    r"|inet addr:(?!127\.0\.0\.1)\d"
+)
+
+
+#: (log fragment, cause) for the reboot triggers seen in the wild. A guest that
+#: reboots in a loop is not broken in one way: the AC15 detects its own nvram
+#: partition as destroyed and reboots on purpose, while a different firmware
+#: reboots because a daemon segfaulted into a reboot call. Only the first is a
+#: missing device; the second is a vendor bug and rm /sbin/reboot does not stop
+#: either, because both go through reboot(2).
+_REBOOT_TRIGGERS = (
+    ("nvram partition is destory", (
+        "the guest found its nvram partition unreadable and reboots on purpose: its flash "
+        "partitions are not being emulated"
+    )),
+    ("envram_init: read flash error", (
+        "reading the emulated flash failed, so the guest restores nvram from defaults and reboots"
+    )),
+    ("Could not open mtd device", (
+        "an mtd device the guest needs is absent, so its flash-backed config cannot be read"
+    )),
+    ("recv segv signals and reboot", (
+        "a vendor daemon segfaulted into a reboot call: its own bug, and no amount of removing "
+        "the reboot binary reaches it"
+    )),
+)
+
+
+def diagnose_boot_failure(serial_log: str, *, reboots: int = 0) -> str:
+    """Name the most likely reason a guest never served :80, from its serial log.
+
+    "HTTP 000" is a symptom; the operator is left to grep six thousand lines of
+    boot output by hand to find the cause. Every probe below maps to one distinct
+    way this fails, and each states what was checked — so a wrong guess shows up
+    as a missing probe rather than as a confident wrong answer, and the next run
+    of the same firmware produces the same diagnosis to diff against.
+
+    Ordered most-specific first: the earliest link in the chain to break is the
+    one worth reporting, because everything after it is downstream.
+    """
+    findings: list[str] = []
+
+    if reboots >= REBOOT_LOOP_THRESHOLD:
+        cause = next((why for marker, why in _REBOOT_TRIGGERS if marker in serial_log), None)
+        findings.append(
+            f"guest requested a kernel reboot {reboots} times and never reached a "
+            f"usable userspace"
+            + (f", because {cause}" if cause else "for a reason the log does not name")
+        )
+
+    netfix = serial_log.count("IRIS-NETFIX:")
+    if netfix == 0:
+        findings.append(
+            "IRIS network fallback never logged a single line: the boot hooks did "
+            "not run (inittab/rcS not found where the image build looked)"
+        )
+    else:
+        findings.append(f"IRIS network fallback ran ({netfix} log lines)")
+
+    if not _HAS_NON_LO_IP.search(serial_log):
+        findings.append(
+            "no non-loopback address was ever assigned in the guest: nothing "
+            "configured an IP, so the forwarded port had nothing to forward to"
+        )
+
+    has_nic = any(hint in serial_log for hint in _NET_DRIVER_HINTS) \
+        or _NIC_PRESENT.search(serial_log)
+    if not has_nic:
+        findings.append(
+            "no network driver registered in the guest (no virtio/e1000/rtl8139 "
+            "activity and no eth* interface): the rehost has no NIC to forward to"
+        )
+
+    running = [s for s in _KNOWN_WEB_SERVERS if re.search(rf"\b{s}\b", serial_log)]
+    if running:
+        binds = re.findall(r"inet_bind\[PID: \d+ \(([^)]+)\)\]: proto:SOCK_STREAM, port:(\d+)", serial_log)
+        detail = ", ".join(f"{proc or '?'}:{port}" for proc, port in dict.fromkeys(binds)) or "port unknown"
+        findings.append(
+            f"a web server did start ({', '.join(running)}) but bound {detail} — "
+            f"anything other than :80 is unreachable through the forward"
+        )
+    else:
+        findings.append("no known web server process ever started in the guest")
+
+    return "emulation failed: " + "; ".join(findings) + "."
+
+
+def _count_guest_reboots(container_name: str, iid: int) -> int:
+    """How many times the guest has asked the kernel to reboot so far.
+
+    `grep -c` exits 1 on zero matches, so the count is read from stdout and any
+    parse failure is reported as zero: a diagnostic that cannot run must not be
+    mistaken for a detected reboot loop.
+    """
+    res = subprocess.run(
+        ["docker", "exec", container_name, "grep", "-ac", "firmadyne: sys_reboot",
+         f"/work/scratch/{iid}/qemu.serial.log"],
+        capture_output=True, text=True, env=_env(), timeout=10, check=False,
+    )
+    try:
+        return int(res.stdout.strip() or 0)
+    except ValueError:
+        return 0
+
+
+def _failure_diagnosis(container_name: str, iid: int, *, reboots: int = 0) -> str:
+    """Pull the guest serial log out of the container and diagnose from it."""
+    res = subprocess.run(
+        ["docker", "exec", container_name, "cat", f"/work/scratch/{iid}/qemu.serial.log"],
+        capture_output=True, text=True, env=_env(), timeout=30, check=False,
+    )
+    if res.returncode != 0:
+        return (
+            f"emulation failed: guest serial log unavailable "
+            f"({res.stderr.strip() or 'container gone'}); "
+            f"guest reboots: {reboots}"
+        )
+    return diagnose_boot_failure(res.stdout, reboots=reboots)
+
 # maps an ELF-census arch label (L1 vocabulary) to the emulation arch that can run it
 _CENSUS_TO_RUNNABLE = {
     "mipsel": "mipsel",
@@ -451,6 +608,16 @@ def emulate_firmware(
         time.sleep(5)
         elapsed = int(time.time() - start_time)
 
+        reboots = _count_guest_reboots(container_name, iid)
+        if reboots >= REBOOT_LOOP_THRESHOLD:
+            # Stop here rather than burning the rest of the timeout: the guest is
+            # not slow to boot, it is looping, and every further second of waiting
+            # produces the same verdict with less information attached.
+            progress.clear()
+            result.error = _failure_diagnosis(container_name, iid, reboots=reboots)
+            logger.error(result.error)
+            break
+
         if not socat_updated:
             log_cmd = ["docker", "exec", container_name, "grep", "-a", "inet_insert_ifa",
                        f"/work/scratch/{iid}/qemu.serial.log"]
@@ -491,6 +658,9 @@ def emulate_firmware(
     else:
         progress.clear()
         logger.warning(f"guest web still unreachable on :{host_port} after {timeout_sec}s")
+        if not result.error:
+            result.error = _failure_diagnosis(container_name, iid)
+            logger.error(result.error)
 
     log_result = _run(["docker", "cp", f"{container_name}:/work/scratch/{iid}/qemu.serial.log", str(work_dir / "qemu.serial.log")])
     if log_result.returncode == 0:

@@ -14,6 +14,8 @@ from iris.rules.engine import (
     VERIFY_LOG_PATH,
     Rule,
     _can_judge_executable,
+    _resolve_etc_layout,
+    _scope_globs,
     _verify_lines,
     apply_rules,
     load_rules,
@@ -518,3 +520,65 @@ class TestUnresolvableSymlinks:
         (tmp_path / "config").mkdir()
         reports = apply_rules(tmp_path, load_rules(PROJECT_RULES), dry_run=True)
         assert reports
+
+
+class TestEtcLayoutFallback:
+    """A firmware may keep its real config under etc_ro/ with /etc a symlink to
+    a writable overlay that is emptied at boot (the AC15 layout)."""
+
+    @staticmethod
+    def _etc_ro_rootfs(tmp_path: Path) -> Path:
+        (tmp_path / "etc_ro" / "init.d").mkdir(parents=True)
+        (tmp_path / "etc_ro" / "inittab").write_text("::sysinit:/etc_ro/init.d/rcS\n", encoding="utf-8")
+        (tmp_path / "etc_ro" / "init.d" / "rcS").write_text(_RCS, encoding="utf-8")
+        (tmp_path / "var" / "etc").mkdir(parents=True)
+        (tmp_path / "etc").symlink_to("/var/etc", target_is_directory=True)
+        return tmp_path
+
+    def test_resolve_prefers_etc_ro_when_etc_is_absent(self, tmp_path):
+        root = self._etc_ro_rootfs(tmp_path)
+        assert _resolve_etc_layout(root, "etc/inittab") == "etc_ro/inittab"
+        assert _resolve_etc_layout(root, "etc/init.d/rcS") == "etc_ro/init.d/rcS"
+
+    def test_resolve_leaves_a_real_etc_alone(self, tmp_path):
+        (tmp_path / "etc_ro").mkdir()
+        (tmp_path / "etc_ro" / "inittab").write_text("x", encoding="utf-8")
+        (tmp_path / "etc").mkdir()
+        (tmp_path / "etc" / "inittab").write_text("y", encoding="utf-8")
+        assert _resolve_etc_layout(tmp_path, "etc/inittab") == "etc/inittab"
+
+    def test_resolve_ignores_paths_outside_etc(self, tmp_path):
+        self._etc_ro_rootfs(tmp_path)
+        assert _resolve_etc_layout(tmp_path, "bin/busybox") == "bin/busybox"
+
+    def test_resolve_keeps_the_original_when_neither_tree_has_it(self, tmp_path):
+        self._etc_ro_rootfs(tmp_path)
+        assert _resolve_etc_layout(tmp_path, "etc/passwd") == "etc/passwd"
+
+    def test_scope_globs_offer_both_trees_for_a_pattern(self, tmp_path):
+        self._etc_ro_rootfs(tmp_path)
+        assert _scope_globs(tmp_path, "etc/init.d/*") == ["etc/init.d/*", "etc_ro/init.d/*"]
+
+    def test_scope_globs_collapse_a_literal_path(self, tmp_path):
+        self._etc_ro_rootfs(tmp_path)
+        assert _scope_globs(tmp_path, "etc/inittab") == ["etc_ro/inittab"]
+
+    def test_scope_globs_leave_non_etc_patterns_alone(self, tmp_path):
+        self._etc_ro_rootfs(tmp_path)
+        assert _scope_globs(tmp_path, "opt/goahead/*") == ["opt/goahead/*"]
+
+    def test_path_exists_detect_finds_etc_ro_inittab(self, tmp_path):
+        root = self._etc_ro_rootfs(tmp_path)
+        rules = load_rules(PROJECT_RULES)
+        watchdog = next(r for r in rules if r.id == "vendor-watchdog-monitor")
+        (root / "bin").mkdir()
+        (root / "bin" / "monitor").write_bytes(b"\x7fELF" + b"\x00" * 60)
+        reports = {r.rule_id: r for r in apply_rules(root, [watchdog], dry_run=True)}
+        assert reports[watchdog.id].matched is True
+
+    def test_file_glob_detect_spans_both_trees(self, tmp_path):
+        root = self._etc_ro_rootfs(tmp_path)
+        rule = Rule(id="r", description="", stage="service",
+                    detect=[{"file_glob": "*.sh", "within": "etc/init.d"}],
+                    actions=[{"write": {"path": "tmp/x", "text": "hi"}}])
+        assert apply_rules(root, [rule], dry_run=True)[0].matched is True

@@ -111,7 +111,16 @@ echo "Starting QEMU: ${QEMU} ${QEMU_MACHINE} kernel=${KERNEL}"
 echo "Disk: ${IMAGE}"
 echo "Network: TAP ${TAP_IFACE} -> bridge ${BR_IFACE} (${HOST_IP}/24)"
 
-${QEMU} -m ${MEMORY} -M ${QEMU_MACHINE} ${QEMU_CPU} -kernel ${KERNEL} ${QEMU_INITRD} \
+# The virt machine's virtio-mmio bus defaults to force-legacy=true, which pins
+# every device on it to the legacy transport. zImage.armel has virtio_net built in
+# but its virtio-mmio driver only ever offered the virtio-0.9/1.0 split that QEMU
+# 6.2's modern-only virtio-blk-device happens to satisfy, so the disk came up while
+# the NIC silently produced nothing: no eth0, no ARP reply, HTTP 000 after the full
+# timeout. Forcing the bus onto the modern transport is what makes the net device
+# reachable; it is a no-op for the mips machines, which use PCI e1000.
+${QEMU} -m ${MEMORY} -M ${QEMU_MACHINE} ${QEMU_CPU} \
+    -global virtio-mmio.force-legacy=false \
+    -kernel ${KERNEL} ${QEMU_INITRD} \
     ${QEMU_DISK} \
     -append "${APPEND}" \
     -serial file:${WORK_DIR}/qemu.serial.log \

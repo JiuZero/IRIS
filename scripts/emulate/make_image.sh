@@ -66,33 +66,40 @@ touch "${TMP_IMAGE_DIR}/firmadyne/debug.sh"
 chmod +x "${TMP_IMAGE_DIR}/firmadyne/debug.sh"
 
 echo "----Injecting IRIS Network Fix----"
-if [ -d "${TMP_IMAGE_DIR}/etc/init.d" ]; then
-    cp /work/scripts/iris_net_fix.sh "${TMP_IMAGE_DIR}/etc/init.d/iris_net_fix"
-    chmod +x "${TMP_IMAGE_DIR}/etc/init.d/iris_net_fix"
-    cp /work/scripts/iris_net_fix_bg.sh "${TMP_IMAGE_DIR}/etc/init.d/iris_net_fix_bg"
-    chmod +x "${TMP_IMAGE_DIR}/etc/init.d/iris_net_fix_bg"
-    mkdir -p "${TMP_IMAGE_DIR}/etc/rc.d"
-    ln -sf "../init.d/iris_net_fix" "${TMP_IMAGE_DIR}/etc/rc.d/S99iris_net_fix"
+# /etc is not always /etc: Tenda AC15 points it at a writable overlay (`etc ->
+# /var/etc`, empty on disk) and keeps the real tree in /etc_ro, which its inittab
+# references directly. Probe for the one that actually holds init.d, or the
+# scripts land in a tree that `cp -rf /etc_ro/* /etc/` overwrites at boot and the
+# fallback never runs.
+IRIS_ETC="${TMP_IMAGE_DIR}/etc"
+if [ ! -d "${IRIS_ETC}/init.d" ] && [ -d "${TMP_IMAGE_DIR}/etc_ro/init.d" ]; then
+    IRIS_ETC="${TMP_IMAGE_DIR}/etc_ro"
+fi
+if [ -d "${IRIS_ETC}/init.d" ]; then
+    echo "init.d found under ${IRIS_ETC}"
+    cp /work/scripts/iris_net_fix.sh "${IRIS_ETC}/init.d/iris_net_fix"
+    chmod +x "${IRIS_ETC}/init.d/iris_net_fix"
+    cp /work/scripts/iris_net_fix_bg.sh "${IRIS_ETC}/init.d/iris_net_fix_bg"
+    chmod +x "${IRIS_ETC}/init.d/iris_net_fix_bg"
+    mkdir -p "${IRIS_ETC}/rc.d"
+    ln -sf "../init.d/iris_net_fix" "${IRIS_ETC}/rc.d/S99iris_net_fix"
+else
+    echo "WARNING: no init.d under /etc or /etc_ro; guest will get no network/web fallback"
+fi
+
+# Hooks the guest boot. Architecture-independent on purpose: the sysinit hook, the
+# rcS tracing and the rcS tail hook all key off whichever tree the firmware's own
+# inittab names, and the reasoning behind their ordering lives in
+# inject_boot_hooks.sh. Leaving this inside the arm64 block is what starved every
+# other architecture of the fallback.
+if ! /work/scripts/inject_boot_hooks.sh "${TMP_IMAGE_DIR}" /work/scripts; then
+    echo "WARNING: boot hook injection failed; the guest may get no network/web fallback"
 fi
 
 echo "----Arm64 Generic-Kernel Channel----"
 if [ "${ARCH}" = "arm64" ]; then
     # Alpine busybox: the x86_64 one copied above cannot run inside an aarch64 guest
     [ -e "${BINARIES}/busybox.arm64" ] && cp "${BINARIES}/busybox.arm64" "${TMP_IMAGE_DIR}/firmadyne/busybox.arm64"
-
-    # Hooks the guest boot: iris_net_fix_bg on inittab ::sysinit: and rcS tracing.
-    # Extracted so it can be exercised against a synthetic /etc directly; the
-    # reasoning behind the ordering lives in inject_boot_hooks.sh.
-    if ! /work/scripts/inject_boot_hooks.sh "${TMP_IMAGE_DIR}" /work/scripts; then
-        echo "WARNING: boot hook injection failed; the guest may get no network/web fallback"
-    fi
-
-    # OpenWrt-style rc.d is never executed by vendor busybox init; hook rcS too.
-    # Second line of defence only — the inittab hook above is the one that runs
-    # even when the vendor rcS chain blocks.
-    if [ -f "${TMP_IMAGE_DIR}/etc/init.d/rcS" ] && ! grep -q iris_net_fix "${TMP_IMAGE_DIR}/etc/init.d/rcS"; then
-        printf '\n/bin/sh /etc/init.d/iris_net_fix &\n' >> "${TMP_IMAGE_DIR}/etc/init.d/rcS"
-    fi
 
     # NTFS/dev-mode-less hosts silently drop symlinks when the rootfs is staged
     # on the Windows side; vendor /sbin -> /bin is what makes /sbin/init exist.

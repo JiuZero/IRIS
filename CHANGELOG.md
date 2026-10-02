@@ -4,7 +4,99 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [未发布]
+## [0.3.4] - 2026-10-02
+
+### 变更（所有输出统一带时间戳与色彩，2026-10-02）
+
+- **每条输出都是 `2026-10-02T02:11:00 [info] 消息`**：此前 `emulate` 的进度行带
+  `[info]` 前缀而 `extracting rootfs from` / `L3 rules matched` 是裸文本，同一屏里
+  两种格式并存。现在时间戳（本地墙钟，ISO 8601 基础形式）与等级标签由
+  `iris.log.format_line` 统一渲染，stdlib 与 structlog 两条通道输出同形。
+- **等级带颜色**：`debug` 青、`info` 绿、`warn` 黄、`error` 红。是否着色遵循
+  `NO_COLOR` > `FORCE_COLOR` > `TERM=dumb` > `isatty()` 的优先级；**不满足条件时
+  一个转义序列都不输出**（此前存在无色路径下仍漏出一个孤立 RESET 的情况）。
+- **`out.block()` 表格输出**：一条记录 = 一个带时间戳的表头 + 缩进的数据行，
+  支持整表单色或逐行着色（`emulate list`、`guardian log`）。逐行着色数量与行数
+  不一致时抛 `ValueError`（无色时同样校验），避免颜色与数据错位而不自知。
+- **`StatusLine` 的擦除宽度改按可见列宽计算**：SGR 转义字节宽度为 0，按文本长度
+  算会擦不干净 27 字符的等级前缀，按含转义的字节数算又会多擦 17 列——两处都曾是
+  真 bug，表现为进度行残留或吃掉正常输出。
+- **错误信息只走 stderr**：结果块与失败原因改用 `get_error_logger()`，
+  `... > out.json` 不再混进诊断文本。
+- **唯一的裸 stdout 例外**：`rules apply` 的 JSON 报告用
+  `sys.stdout.write(...)` 直接输出，因为 `| jq` 管道必须保持可解析；已在代码注释
+  与 `tests/test_cli_output.py` 中作为**显式守卫**固定下来。
+
+### 修复（输出层的裸打印全部归零，2026-10-02）
+
+- **`cli.py` 与 `corpus/manifest.py` 共 113 处 `typer.echo`/`secho` 改造为 logger**：
+  裸输出绕过等级、颜色与 stderr 分流，`--json` 之类的机器可读输出因此被进度信息
+  污染。`tests/test_cli_output.py` 同时做静态守卫（不允许再出现
+  `typer.echo|secho` 或裸 `print(`）与真实 subprocess 执行（`rules list` /
+  `corpus list` / `emulate run` / `rules apply`）。
+
+### 修复（armel 固件的仿真兜底完全没执行，2026-10-02）
+
+针对 `US_AC15V1.0BR_V15.03.05.18_multi_TD01.bin`（arch=armel）：120 秒后 HTTP 000，
+串口日志反复出现 `Sent SIGTERM to all processes`。定位到四个独立原因：
+
+- **`/etc` 不在 `/etc`**：该固件的 `/etc` 是指向空目录 `/var/etc` 的绝对符号链接，
+  真实配置在只读的 `/etc_ro/`，而 `etc_ro/init.d/rcS` 会 `cp -rf /etc_ro/* /etc/`
+  把镜像里写进 `/etc` 的东西在运行时丢掉。`inject_boot_hooks.sh` 现在**先探测
+  启动配置在哪棵树**（`etc/inittab` 不存在且 `etc_ro/inittab` 存在即切到 `etc_ro`），
+  inittab 条目与 rcS 尾钩都随之指向真实位置。
+  规则引擎同步适配：`_resolve_etc_layout` 让 `path_exists`/`dir_nonempty` 在
+  `/etc` 下确实没有该路径时回退到 `etc_ro/`，`_scope_globs` 让 `etc/init.d/*`
+  这类 glob 同时匹配两棵树——`vendor-watchdog-monitor` 与
+  `tenda-web-server-forced-start` 两条规则因此重新命中。
+- **兜底注入被关在 arm64 分支里**：`inject_boot_hooks.sh` 的调用原本在
+  `make_image.sh` 的 `if [ "${ARCH}" = "arm64" ]` 块内，等于**除 arm64 外所有架构
+  都没有兜底**。调用已移出该块并注明理由。
+- **`iris_net_fix_bg` 找不到自己的邻居**：它硬编码 `/etc/init.d/iris_net_fix`，
+  而自己被装在 `/etc_ro/init.d/`，且 inittab 通道运行时 `/etc/init.d` 还不存在
+  （要等 rcS 的 `cp`），于是 sysinit 钩子——**唯一不等厂商链的早启动通道**——直接
+  报 `can't open '/etc/init.d/iris_net_fix'`。改为从 `$0` 推导目录。
+  顺带发现该 busybox **没有 `dirname` applet**（`dirname: applet not found` 会让
+  `$0` 的目录塌成空串，转而在 `/iris_net_fix` 找），`acquire_lock` 里同样的
+  `dirname` 依赖也一并换成纯参数展开 `${VAR%/*}`。
+- **厂商 Web 服务器不在 80 上**：该固件的 `nginx.conf` 写死 `listen 8180;`，
+  靠一个 `cfmd` 进程把 80 转发过去，而 `cfmd` 在启动后约 2 秒即 SIGSEGV
+  （`cfmd recv segv signals and reboot the system`）——`rm /sbin/reboot` 拦不住
+  `reboot(2)`。兜底新增 `vendor_web_port`（只取未注释的 `listen` 指令，避开
+  配置里 8000/443/somename 三个注释示例）与 `redirect_to_port80`（优先 iptables
+  DNAT，不可用时改写配置并 HUP nginx）。
+
+### 新增（仿真失败的结构化诊断与 reboot 看门狗，2026-10-02）
+
+- **`diagnose_boot_failure`**：HTTP 000 原本要求人工在六千行串口日志里翻找根因。
+  现在按链路顺序产出五条 finding（reboot 循环及其**具体触发源**、兜底是否执行、
+  非 loopback 地址、网卡驱动、web 进程实际 bind 的端口），每条都说明检查了什么，
+  判断错了会表现为"某条探针没命中"而不是自信的错误结论。
+  触发源区分 `nvram partition is destory`（flash 分区未被仿真，厂商**主动** reboot）、
+  `envram_init: read flash error`、`Could not open mtd device` 与
+  `recv segv signals and reboot`（厂商自身 bug），因为它们需要的修复完全不同。
+- **reboot 看门狗**：轮询期间统计 guest 的 `firmadyne: sys_reboot` 次数，
+  达到 3 次立即判定失败。实测该固件的失败反馈从 120 秒缩短到 **11 秒**。
+
+### 修复（QEMU virtio-mmio 传输层，2026-10-02）
+
+- **`virt` machine 的 virtio-mmio 总线默认 `force-legacy=true`**，把所有设备钉在
+  legacy 传输上。`zImage.armel` 内建 `CONFIG_VIRTIO_NET`（已在 vmlinux 中确认
+  `virtio_net.c` 的 `__FILE__` 与模块参数字符串），但磁盘能挂载、网卡静默消失：
+  没有 `eth0`、ARP 无人应答、120 秒后 HTTP 000。命令行补
+  `-global virtio-mmio.force-legacy=false`；对使用 PCI e1000 的 mips machine 无影响。
+  注：原判断"armel 内核缺 virtio_net 驱动"是错的，仓库里的 3 份
+  `virtio_net.ko` 全是 AARCH64，与 armel 无关。
+
+### 修复（`redirect_to_port80` 会写出非法 nginx 配置，2026-10-02）
+
+- 改写 `listen` 的 sed 替换文本是 `\1listen       80;`，而捕获组 `\1` 本身已经
+  包含了 `  listen  ` 前缀，展开后得到 `listen listen 80;`——nginx 会拒绝启动，
+  于是"修复"本身变成了"唯一的 Web 服务器消失"。改为 `\1 80;`，
+  并加断言确保改写后的行仍然只有一个 `listen` 关键字。
+
+
+## [0.3.3] - 2026-10-02
 
 ### 修复（arm64 固件的 Web 兜底从未执行，2026-10-02）
 
@@ -71,6 +163,8 @@
   的决策、旧 tag 清理只删非当前 tag。测试由写文件触发真实 bug：`IRIS-RC-MARK` 守卫被检查
   却从未写入，导致重复构建会把已追踪的行再包一层。
 
+## [0.3.2] - 2026-10-02
+
 ### 修复（rootfs tarball 缓存永不失效，2026-10-02）
 
 - **重新打包的判据从"文件在不在"改成"树有没有变新"**：`emulate_firmware` 原本用
@@ -88,6 +182,8 @@
   比它更晚的时间戳。无法 `stat` 的条目按"不可信"处理（`os.walk` 会静默跳过它们），pack
   本身 `stat` 不了就当作陈旧——年龄不可知就无法证明它是最新的。
 - **复用与重建都进日志**：命中缓存时打印 `Reusing up-to-date tarball ...`，不再静默。
+
+## [0.3.1] - 2026-10-02
 
 ### 修复（Windows 宿主上不可解析的固件符号链接，2026-10-02）
 
@@ -122,6 +218,8 @@
   `cli` 的 `emulate run` 入口与 `emulate status` 的体积统计、`api` 的
   `list_firmware`/`emulate`/`pipeline`（`extract_rootfs` 的 `RuntimeError`/`OSError`
   现在转成正常的失败响应，不再是裸 500）。
+
+## [0.3.0] - 2026-10-02
 
 ### 新增（值守观测与自愈闭环，2026-10-02）
 

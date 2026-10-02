@@ -12,6 +12,7 @@ the package. These tests pin the two guarantees that keep that harmless:
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -21,6 +22,11 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ENTRY = REPO_ROOT / "iris.py"
 SRC = REPO_ROOT / "src"
+
+#: Every log line starts with the wall clock. Two processes cannot produce the
+#: same one, so comparing their output byte for byte would fail on any run that
+#: straddles a second — which says nothing about whether the entry points agree.
+TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2} ", re.MULTILINE)
 
 
 def _run(*argv: str) -> subprocess.CompletedProcess:
@@ -37,6 +43,10 @@ def _run(*argv: str) -> subprocess.CompletedProcess:
     )
 
 
+def _without_timestamps(text: str) -> str:
+    return TIMESTAMP_RE.sub("", text)
+
+
 class TestRunsAsScript:
     def test_help_lists_every_command_group(self):
         proc = _run(str(ENTRY), "--help")
@@ -49,7 +59,11 @@ class TestRunsAsScript:
         script = _run(str(ENTRY), "rules", "list")
         module = _run("-m", "iris.cli", "rules", "list")
         assert script.returncode == module.returncode == 0, module.stderr
-        assert script.stdout == module.stdout
+        assert _without_timestamps(script.stdout) == _without_timestamps(module.stdout)
+        # The timestamps are the only thing allowed to differ, and they are the
+        # part that proves each process really rendered its own log line.
+        assert TIMESTAMP_RE.search(script.stdout)
+        assert TIMESTAMP_RE.search(module.stdout)
 
 
 class TestImpersonatesThePackage:

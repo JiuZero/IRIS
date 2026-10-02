@@ -6,10 +6,13 @@ import urllib.request
 from pathlib import Path
 from typing import Literal
 
-import typer
 from pydantic import BaseModel, Field
 
+from iris.log import get_logger
+
 GITHUB_PREFIX = "https://github.com/"
+
+log = get_logger(__name__)
 
 
 class FirmwareEntry(BaseModel):
@@ -66,13 +69,13 @@ def download_entry(entry: FirmwareEntry, dest_dir: Path, mirror: str = "", timeo
     dest = dest_dir / name
     if dest.exists():
         if entry.sha256 and sha256_file(dest) != entry.sha256:
-            typer.secho(f"corrupt cache (sha mismatch), re-downloading: {dest.name}", fg=typer.colors.YELLOW)
+            log.warning(f"corrupt cache (sha mismatch), re-downloading: {dest.name}")
             dest.unlink()
         else:
-            typer.echo(f"skip (exists): {dest.name}")
+            log.info(f"skip (exists): {dest.name}")
             return dest
     url = rewrite_with_mirror(entry.url, mirror)
-    typer.echo(f"downloading [{entry.status}] {entry.name} <- {url}")
+    log.info(f"downloading [{entry.status}] {entry.name} <- {url}")
     req = urllib.request.Request(url, headers={"User-Agent": "IRIS-corpus/0.1"})
     tmp = dest.with_name(dest.name + ".part")
     try:
@@ -86,7 +89,7 @@ def download_entry(entry: FirmwareEntry, dest_dir: Path, mirror: str = "", timeo
             actual = sha256_file(tmp)
             if actual != entry.sha256:
                 raise ValueError(f"sha256 mismatch for {entry.name}: {actual}")
-            typer.echo(f"sha256 OK: {actual[:16]}")
+            log.info(f"sha256 OK: {actual[:16]}")
         os.replace(tmp, dest)
     except BaseException:
         tmp.unlink(missing_ok=True)

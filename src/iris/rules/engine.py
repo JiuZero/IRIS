@@ -237,6 +237,45 @@ def _match_glob(rel: str, pattern: str) -> bool:
     return fnmatch(rel, pattern) or fnmatch(Path(rel).name, pattern)
 
 
+#: Directories that may hold the boot configuration instead of /etc.
+#:
+#: Tenda AC15 points /etc at a writable overlay (``etc -> /var/etc``, empty on
+#: disk) and keeps the real tree read-only in /etc_ro, which its inittab names
+#: directly. A rule that says ``etc/inittab`` there describes a file that does not
+#: exist, so the rule silently never fires — which is how a vendor watchdog rule
+#: sat unmatched through a 28-deep reboot loop.
+_ETC_FALLBACK_DIRS = ("etc_ro",)
+
+
+def _resolve_etc_layout(rootfs: Path, rel: str) -> str:
+    """Point an ``etc/...`` path at ``etc_ro/...`` when that is where it lives.
+
+    Applied only when the path under /etc is genuinely absent, so a firmware with
+    a real /etc is unaffected and a rule naming a file that exists in neither
+    place still fails to match instead of quietly matching a different file.
+    """
+    if not rel.startswith("etc/") or _exists(rootfs / rel):
+        return rel
+    for alt in _ETC_FALLBACK_DIRS:
+        candidate = f"{alt}/{rel[len('etc/'):]}"
+        if _exists(rootfs / candidate):
+            return candidate
+    return rel
+
+
+def _scope_globs(rootfs: Path, pattern: str) -> list[str]:
+    """The globs to match a rule's ``within``/``file_glob`` pattern against.
+
+    A literal path can be resolved to the one real location, but a pattern cannot:
+    ``etc/init.d/*`` has no existence to test, so both spellings are offered and
+    the union is matched. That is safe because a firmware cannot have the same
+    file under both trees with different content — /etc is the overlay copy.
+    """
+    if not pattern.startswith("etc/") or not any(ch in pattern for ch in "*?["):
+        return [_resolve_etc_layout(rootfs, pattern)]
+    return [pattern, *(f"{alt}/{pattern[len('etc/'):]}" for alt in _ETC_FALLBACK_DIRS)]
+
+
 def _scope_union(scopes: list[list[Path]]) -> list[Path]:
     out: list[Path] = []
     seen: set[Path] = set()
@@ -288,7 +327,7 @@ def _evaluate(rootfs: Path, cond: dict, files: list[Path]) -> tuple[bool, list[P
         return True, _scope_union(satisfied)
 
     if "path_exists" in cond:
-        rel = str(cond["path_exists"]).lstrip("/")
+        rel = _resolve_etc_layout(rootfs, str(cond["path_exists"]).lstrip("/"))
         if not rel or ".." in Path(rel).parts:
             return False, []
         target = rootfs / rel
@@ -305,7 +344,7 @@ def _evaluate(rootfs: Path, cond: dict, files: list[Path]) -> tuple[bool, list[P
         return True, [f for f in files if _under(f, rootfs, rel)]
 
     if "dir_nonempty" in cond:
-        rel = str(cond["dir_nonempty"]).lstrip("/")
+        rel = _resolve_etc_layout(rootfs, str(cond["dir_nonempty"]).lstrip("/"))
         if not rel or ".." in Path(rel).parts:
             return False, []
         d = rootfs / rel
@@ -317,14 +356,18 @@ def _evaluate(rootfs: Path, cond: dict, files: list[Path]) -> tuple[bool, list[P
         return True, [f for f in files if _under(f, rootfs, rel)]
 
     if "file_glob" in cond:
-        pattern = str(cond["file_glob"])
-        return True, [f for f in files if _match_glob(f.relative_to(rootfs).as_posix(), pattern)]
+        globs = _scope_globs(rootfs, str(cond["file_glob"]))
+        return True, [
+            f for f in files
+            if any(_match_glob(f.relative_to(rootfs).as_posix(), g) for g in globs)
+        ]
 
     if "file_regex" in cond:
-        scope_glob = str(cond.get("within", "*"))
+        scope_globs = _scope_globs(rootfs, str(cond.get("within", "*")))
         hits: list[Path] = []
         for f in files:
-            if not _match_glob(f.relative_to(rootfs).as_posix(), scope_glob):
+            rel_of_f = f.relative_to(rootfs).as_posix()
+            if not any(_match_glob(rel_of_f, g) for g in scope_globs):
                 continue
             try:
                 text = _read_text(f)

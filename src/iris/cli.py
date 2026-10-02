@@ -1,6 +1,8 @@
 import hashlib
 import json
 import subprocess
+import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 import typer
@@ -8,7 +10,7 @@ import typer
 from iris.config import get_settings
 from iris.db.engine import get_engine, init_db, make_session
 from iris.fsutil import safe_is_file, safe_present, safe_stat_size
-from iris.log import get_logger, setup_logging
+from iris.log import LEVEL_COLORS, get_error_logger, get_stream_logger, setup_logging
 
 app = typer.Typer(help="IRIS - IoT Rehosting & Interconnection Simulator", no_args_is_help=True)
 db_app = typer.Typer(help="metadata database operations")
@@ -24,7 +26,25 @@ app.add_typer(emulate_app, name="emulate")
 app.add_typer(rules_app, name="rules")
 app.add_typer(serve_app, name="serve")
 
-log = get_logger(__name__)
+#: Progress, results and reports go to stdout; failures go to stderr so that
+#: `iris ... 2>/dev/null` still shows what went wrong. Both render through the
+#: same line shape, so a run reads as one stream when a terminal shows both.
+#:
+#: These are stream loggers rather than structlog loggers because the CLI needs
+#: stderr and multi-line aligned blocks, neither of which structlog can express
+#: (see iris.log.StreamLogger).
+out = get_stream_logger()
+err = get_error_logger()
+
+
+def _rows(pairs: Sequence[tuple[str, str]], width: int = 16) -> list[str]:
+    """Render ``label : value`` pairs as one aligned column.
+
+    Aligned inside a single log record rather than logged row by row: a timestamp
+    on every row would shift each one right, and the value column would no longer
+    start at the same place on every line.
+    """
+    return [f"{label + ' ':<{width}}: {value}" for label, value in pairs]
 
 
 def _reject_zip(path: Path) -> None:
@@ -34,11 +54,9 @@ def _reject_zip(path: Path) -> None:
         with path.open("rb") as f:
             is_zip = f.read(4) == b"PK\x03\x04"
     if is_zip:
-        typer.secho(
+        err.error(
             f"refusing zip container: {path.name} — unpack the upgrade package locally "
-            "and pass the firmware .bin file",
-            fg=typer.colors.RED,
-            err=True,
+            "and pass the firmware .bin file"
         )
         raise typer.Exit(code=2)
 
@@ -49,7 +67,7 @@ def db_init() -> None:
     settings = get_settings()
     engine = get_engine(settings.database_url)
     init_db(engine)
-    typer.echo(f"database initialized: {settings.database_url}")
+    out.info(f"database initialized: {settings.database_url}")
 
 
 @db_app.command("check")
@@ -61,7 +79,7 @@ def db_check() -> None:
     engine = get_engine(settings.database_url)
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))
-    typer.echo("database connection OK")
+    out.info("database connection OK")
 
 
 @extract_app.command("inspect")
@@ -76,7 +94,7 @@ def extract_inspect(
     from iris.extract.rootfs import find_rootfs_in_archive
 
     if not archive.exists():
-        typer.secho(f"archive not found: {archive}", fg=typer.colors.RED, err=True)
+        err.error(f"archive not found: {archive}")
         raise typer.Exit(code=1)
     _reject_zip(archive)
 
@@ -84,48 +102,60 @@ def extract_inspect(
         cand = find_rootfs_in_archive(archive)
         arch_counter = identify_tar_members(archive)
         if cand is None:
-            typer.secho("no rootfs candidate found", fg=typer.colors.RED)
+            err.error("no rootfs candidate found")
             raise typer.Exit(code=3)
-        typer.echo("format          : tar archive")
-        typer.echo(f"rootfs prefix   : {cand.prefix or '<root>'}")
-        typer.echo(f"unix dir hits   : {cand.unix_hits} (threshold {4})")
-        typer.echo(f"busybox         : {cand.has_busybox}")
-        typer.echo(f"/etc/init.d     : {cand.has_initd}")
-        typer.echo(f"score           : {cand.score}")
-        typer.echo(f"is_rootfs       : {cand.is_rootfs}")
-        typer.echo(f"arch census     : {dict(arch_counter) or '<no ELF found>'}")
+        out.block("info", "inspect result (tar archive)", _rows([
+            ("format", "tar archive"),
+            ("rootfs prefix", cand.prefix or "<root>"),
+            ("unix dir hits", f"{cand.unix_hits} (threshold 4)"),
+            ("busybox", str(cand.has_busybox)),
+            ("/etc/init.d", str(cand.has_initd)),
+            ("score", str(cand.score)),
+            ("is_rootfs", str(cand.is_rootfs)),
+            ("arch census", str(dict(arch_counter) or "<no ELF found>")),
+        ]))
         return
 
     from iris.extract.firmware import analyze_firmware
 
     data = archive.read_bytes()
     info = analyze_firmware(data, arch_hint=arch_hint)
-    typer.echo(f"format          : {info.format}")
-    typer.echo(f"arch            : {info.arch or '<unknown>'}")
-    typer.echo(f"rootfs offset   : {info.rootfs_offset if info.rootfs_offset is not None else '<not found>'}")
+    pairs = [
+        ("format", str(info.format)),
+        ("arch", info.arch or "<unknown>"),
+        ("rootfs offset", str(info.rootfs_offset) if info.rootfs_offset is not None else "<not found>"),
+    ]
     if info.uimage:
-        typer.echo(f"uImage name     : {info.uimage.name}")
-        typer.echo(f"uImage arch     : field={info.uimage.arch_field} inferred={info.uimage.arch_name}")
-        typer.echo(f"uImage comp     : {info.uimage.comp}")
-        typer.echo(f"uImage load/ep  : 0x{info.uimage.load:08x} / 0x{info.uimage.ep:08x}")
-    if info.squashfs:
-        for sq in info.squashfs:
-            typer.echo(f"squashfs        : offset=0x{sq.offset:x} endian={sq.endian} comp={sq.comp}")
+        pairs.extend([
+            ("uImage name", str(info.uimage.name)),
+            ("uImage arch", f"field={info.uimage.arch_field} inferred={info.uimage.arch_name}"),
+            ("uImage comp", str(info.uimage.comp)),
+            ("uImage load/ep", f"0x{info.uimage.load:08x} / 0x{info.uimage.ep:08x}"),
+        ])
+    for sq in info.squashfs or []:
+        pairs.append(("squashfs", f"offset=0x{sq.offset:x} endian={sq.endian} comp={sq.comp}"))
     if info.tendaw:
         tw = info.tendaw
-        typer.echo(f"tendaw          : model={tw.model} version={tw.version} zip@0x{tw.zip_offset:x}")
+        pairs.append(("tendaw", f"model={tw.model} version={tw.version} zip@0x{tw.zip_offset:x}"))
         for p in tw.partitions:
-            typer.echo(f"  part            : {p.name:<8} {p.payload_type:<8} size={p.size} mount={p.mount_point or '-'}")
+            pairs.append((
+                f"  part {p.name}",
+                f"{p.payload_type:<8} size={p.size} mount={p.mount_point or '-'}",
+            ))
         if tw.scripts:
-            typer.echo(f"  scripts         : {tw.scripts}")
+            pairs.append(("  scripts", str(tw.scripts)))
         if tw.unreadable:
-            typer.echo(f"  unreadable      : {tw.unreadable}")
+            pairs.append(("  unreadable", str(tw.unreadable)))
     if info.fit:
-        typer.echo("fit             : True (Flattened Image Tree inner image)")
+        pairs.append(("fit", "True (Flattened Image Tree inner image)"))
     if info.segmented_offsets:
-        typer.echo(f"encrypted segs  : {len(info.segmented_offsets)} (first 0x{info.segmented_offsets[0]:x})")
+        pairs.append((
+            "encrypted segs",
+            f"{len(info.segmented_offsets)} (first 0x{info.segmented_offsets[0]:x})",
+        ))
     if info.elf_archs:
-        typer.echo(f"ELF census      : {dict(info.elf_archs)}")
+        pairs.append(("ELF census", str(dict(info.elf_archs))))
+    out.block("info", f"inspect result ({archive.name})", _rows(pairs))
 
 
 @extract_app.command("add")
@@ -142,7 +172,7 @@ def extract_add(
     from iris.db.models import Brand, Image
 
     if not archive.exists():
-        typer.secho(f"firmware not found: {archive}", fg=typer.colors.RED, err=True)
+        err.error(f"firmware not found: {archive}")
         raise typer.Exit(code=1)
     _reject_zip(archive)
     settings = get_settings()
@@ -157,7 +187,7 @@ def extract_add(
             session.flush()
         existing = session.query(Image).filter_by(hash=md5).one_or_none()
         if existing is not None:
-            typer.echo(f"already registered: image id={existing.id}")
+            out.info(f"already registered: image id={existing.id}")
             raise typer.Exit()
         arch = ""
         rootfs_ok = False
@@ -178,10 +208,7 @@ def extract_add(
             fw_info = analyze_firmware(data, arch_hint=arch_hint)
             arch = fw_info.arch
             rootfs_ok = fw_info.rootfs_offset is not None or fw_info.tendaw is not None
-            typer.secho(
-                f"  (raw firmware {fw_info.format}; arch={arch or '?'} rootfs={rootfs_ok})",
-                fg=typer.colors.YELLOW,
-            )
+            out.info(f"raw firmware {fw_info.format}; arch={arch or '?'} rootfs={rootfs_ok}")
             if verify and rootfs_ok:
                 from iris.extract.rootfs_extract import extract_rootfs as do_extract
 
@@ -189,12 +216,9 @@ def extract_add(
                     ext = do_extract(archive, settings.scratch_dir, arch_hint=arch_hint)
                     if ext.arch_verified:
                         arch = ext.arch_verified
-                        typer.secho(
-                            f"  (ELF census: {ext.elf_count} binaries -> {arch})",
-                            fg=typer.colors.GREEN,
-                        )
+                        out.info(f"ELF census: {ext.elf_count} binaries -> {arch}")
                 except Exception as exc:  # noqa: BLE001 - best-effort probe, never fail the import
-                    typer.secho(f"  (arch verify skipped: {exc})", fg=typer.colors.YELLOW)
+                    err.warning(f"arch verify skipped: {exc}")
         image = Image(
             filename=archive.name,
             description=f"{product} {version}".strip() or None,
@@ -207,7 +231,7 @@ def extract_add(
         session.add(image)
         session.flush()
         session.commit()
-        typer.echo(f"registered image id={image.id} brand={brand} arch={arch or '?'} md5={md5[:12]}")
+        out.info(f"registered image id={image.id} brand={brand} arch={arch or '?'} md5={md5[:12]}")
 
 
 @extract_app.command("rootfs")
@@ -219,34 +243,39 @@ def extract_rootfs(
     from iris.extract.rootfs_extract import extract_rootfs as do_extract
 
     if not firmware.exists():
-        typer.secho(f"firmware not found: {firmware}", fg=typer.colors.RED, err=True)
+        err.error(f"firmware not found: {firmware}")
         raise typer.Exit(code=1)
     _reject_zip(firmware)
 
     settings = get_settings()
     scratch = settings.scratch_dir
-    typer.echo(f"extracting rootfs from {firmware.name} ...")
+    out.info(f"extracting rootfs from {firmware.name} ...")
     result = do_extract(firmware, scratch, arch_hint=arch_hint)
 
     fi = result.firmware_info
-    typer.echo(f"format          : {fi.format}")
-    typer.echo(f"arch (inferred) : {fi.arch or '?'}")
-    typer.echo(f"rootfs offset   : {fi.rootfs_offset if fi.rootfs_offset is not None else '<not found>'}")
-
+    pairs = [
+        ("format", str(fi.format)),
+        ("arch (inferred)", fi.arch or "?"),
+        ("rootfs offset", str(fi.rootfs_offset) if fi.rootfs_offset is not None else "<not found>"),
+    ]
     if result.rootfs_dir is None:
         reason = result.failure or "no rootfs structure found"
-        typer.secho(f"extraction failed: {reason}", fg=typer.colors.YELLOW)
+        out.block("error", f"extraction failed for {firmware.name}", _rows(pairs))
+        err.error(f"extraction failed: {reason}")
         raise typer.Exit(code=2)
 
-    typer.echo(f"squashfs file   : {result.squashfs_path}")
-    typer.echo(f"rootfs dir      : {result.rootfs_dir}")
-    typer.echo(f"extraction method: {result.extraction_method or 'unknown'}")
-    typer.echo(f"ELF count       : {result.elf_count}")
-    typer.echo(f"ELF arch census : {dict(result.elf_archs) or '<none>'}")
-    typer.echo(f"arch (verified) : {result.arch_verified or '?'}")
+    pairs.extend([
+        ("squashfs file", str(result.squashfs_path)),
+        ("rootfs dir", str(result.rootfs_dir)),
+        ("extraction method", result.extraction_method or "unknown"),
+        ("ELF count", str(result.elf_count)),
+        ("ELF arch census", str(dict(result.elf_archs) or "<none>")),
+        ("arch (verified)", result.arch_verified or "?"),
+    ])
     if fi.arch and result.arch_verified:
         match = "OK" if fi.arch == result.arch_verified else "MISMATCH"
-        typer.echo(f"arch check      : {fi.arch} vs {result.arch_verified} -> {match}")
+        pairs.append(("arch check", f"{fi.arch} vs {result.arch_verified} -> {match}"))
+    out.block("info", f"rootfs extracted from {firmware.name}", _rows(pairs))
 
 
 @corpus_app.command("list")
@@ -257,11 +286,11 @@ def corpus_list(
     from iris.corpus.manifest import load_manifest
 
     m = load_manifest(manifest)
-    typer.echo(f"manifest: {m.name} ({m.description})")
-    for e in m.entries:
-        typer.echo(
-            f"  [{e.status:^8}] {e.name:<24} brand={e.brand:<12} arch={e.arch_hint or '-':<7} {e.target_type}"
-        )
+    rows = [
+        f"[{e.status:^8}] {e.name:<24} brand={e.brand:<12} arch={e.arch_hint or '-':<7} {e.target_type}"
+        for e in m.entries
+    ]
+    out.block("info", f"manifest: {m.name} ({m.description})", rows)
 
 
 @corpus_app.command("download")
@@ -288,8 +317,8 @@ def corpus_download(
             download_entry(e, dest_dir, mirror=settings.download_mirror)
         except Exception as exc:  # noqa: BLE001 - report and continue with next entry
             failures += 1
-            typer.secho(f"  FAILED: {e.name}: {exc}", fg=typer.colors.RED)
-    typer.echo(f"done, {failures} failure(s)")
+            err.error(f"FAILED: {e.name}: {exc}")
+    out.info(f"done, {failures} failure(s)")
 
 
 @rules_app.command("list")
@@ -297,9 +326,11 @@ def rules_list() -> None:
     """Show all L3 boot-fix rules."""
     from iris.rules.engine import load_rules
 
-    for r in load_rules(get_settings().rules_dir):
-        first_line = (r.description.splitlines() or [""])[0]
-        typer.echo(f"{r.id:<26} stage={r.stage:<10} {first_line[:64]}")
+    rows = [
+        f"{r.id:<26} stage={r.stage:<10} {(r.description.splitlines() or [''])[0][:64]}"
+        for r in load_rules(get_settings().rules_dir)
+    ]
+    out.block("info", "L3 boot-fix rules", rows)
 
 
 @rules_app.command("apply")
@@ -311,7 +342,11 @@ def rules_apply(
     from iris.rules.engine import apply_rules, load_rules, report_json
 
     reports = apply_rules(rootfs, load_rules(get_settings().rules_dir), dry_run=not apply)
-    typer.echo(report_json(reports))
+    # The one place in the CLI that writes a bare line: this is a machine-readable
+    # report, not a log record, and `iris rules apply ... | jq` has to keep working.
+    # A timestamp in front of the JSON would make the output unparseable.
+    sys.stdout.write(report_json(reports) + "\n")
+    sys.stdout.flush()
 
 
 def main() -> None:
@@ -347,7 +382,7 @@ def emulate_run(
     from iris.emulate.qemu_config import supported_archs
 
     if not safe_present(target):
-        typer.secho(f"not found: {target}", fg=typer.colors.RED, err=True)
+        err.error(f"not found: {target}")
         raise typer.Exit(code=1)
 
     # Only reject zips if input is a file
@@ -360,7 +395,7 @@ def emulate_run(
     # Decide whether input is firmware .bin vs pre-extracted rootfs
     inferred_arch = ""
     if safe_is_file(target):
-        typer.echo(f"extracting rootfs from {target.name} ...")
+        out.info(f"extracting rootfs from {target.name} ...")
         prepared = prepare_from_firmware(
             target,
             scratch_dir=scratch,
@@ -370,10 +405,10 @@ def emulate_run(
             dry_run_rules=False,  # Write fixes to disk for auto-pipeline
         )
         if prepared.failure_reason:
-            typer.secho(f"extraction failed: {prepared.failure_reason}", fg=typer.colors.RED, err=True)
+            err.error(f"extraction failed: {prepared.failure_reason}")
             raise typer.Exit(code=2)
         if applied_rules := prepared.matched_rule_ids:
-            typer.echo(f"L3 rules matched: {', '.join(applied_rules)}")
+            out.info(f"L3 rules matched: {', '.join(applied_rules)}")
         if arch == "auto":
             inferred_arch = prepared.arch
         else:
@@ -381,16 +416,16 @@ def emulate_run(
         rootfs = prepared.rootfs_dir
     else:
         # Pre-extracted rootfs — just infer arch and report rule matches (dry-run)
-        typer.echo(f"using existing rootfs: {target.resolve()}")
+        out.info(f"using existing rootfs: {target.resolve()}")
         prepared = prepare_from_rootfs(rootfs_dir=target, rules_dir=settings.rules_dir)
         if arch == "auto":
             inferred_arch = prepared.arch
         else:
             inferred_arch = arch
         if arch != "auto" and prepared.arch and prepared.arch != arch:
-            typer.secho(f"warning: rootfs ELF census suggests {prepared.arch}, using {arch} instead", fg=typer.colors.YELLOW)
+            err.warning(f"rootfs ELF census suggests {prepared.arch}, using {arch} instead")
         if applied_rules := prepared.matched_rule_ids:
-            typer.echo(f"L3 rules matched: {', '.join(applied_rules)}")
+            out.info(f"L3 rules matched: {', '.join(applied_rules)}")
         rootfs = target
 
     # Preflight arch check against the actual chosen arch (apply arch mapping first)
@@ -400,8 +435,8 @@ def emulate_run(
         checked_arch = arch_map.get(inferred_arch, inferred_arch)
         problem = preflight_arch(rootfs, checked_arch) if not force else ""
         if problem:
-            typer.secho(f"preflight: {problem}", fg=typer.colors.RED, err=True)
-            typer.secho("  (override with --force)", fg=typer.colors.YELLOW, err=True)
+            err.error(f"preflight: {problem}")
+            err.warning("(override with --force)")
             raise typer.Exit(code=3)
 
     selected_arch = inferred_arch if inferred_arch else "auto"
@@ -413,30 +448,30 @@ def emulate_run(
     # If still auto after all inference attempts, show error
     if selected_arch == "auto":
         supported = supported_archs()
-        typer.secho("unable to determine architecture from ELF census; available:", fg=typer.colors.RED)
-        typer.echo(f"  Supported architectures: {', '.join(supported)}")
-        typer.echo(f"  Usage: iris emulate run <rootfs|bin> --arch {'|'.join(supported)}")
+        err.error("unable to determine architecture from ELF census; available:")
+        err.error(f"  Supported architectures: {', '.join(supported)}")
+        err.error(f"  Usage: iris emulate run <rootfs|bin> --arch {'|'.join(supported)}")
         raise typer.Exit(code=3)
 
-    typer.echo(f"emulating {target.name} arch={selected_arch}")
+    out.info(f"emulating {target.name} arch={selected_arch}")
     result_port = port if port != 0 else 8080
     try:
         if port == 0:
             selected_port = pick_host_port(preferred=port)
-            typer.echo(f"picked host port: {selected_port}")
+            out.info(f"picked host port: {selected_port}")
             result_port = selected_port
     except RuntimeError:
-        typer.secho("no available host port in range [8080,8199]; use --port XXX", fg=typer.colors.RED, err=True)
+        err.error("no available host port in range [8080,8199]; use --port XXX")
         raise typer.Exit(code=3) from None
 
     partition_mounts = None
     if parts_dir is not None:
         if not parts_dir.is_dir():
-            typer.secho(f"parts dir not found: {parts_dir}", fg=typer.colors.RED, err=True)
+            err.error(f"parts dir not found: {parts_dir}")
             raise typer.Exit(code=1)
         partition_mounts = build_parts_mounts(parts_dir)
         if not partition_mounts:
-            typer.secho(f"no .jffs2 slices under {parts_dir}", fg=typer.colors.RED, err=True)
+            err.error(f"no .jffs2 slices under {parts_dir}")
             raise typer.Exit(code=1)
 
     result = emulate_firmware(
@@ -450,16 +485,23 @@ def emulate_run(
         partition_mounts=partition_mounts,
     )
 
-    typer.echo(f"success     : {result.success}")
-    typer.echo(f"web ok      : {result.web_ok}")
-    typer.echo(f"web url     : {result.web_url or '-'}")
-    typer.echo(f"duration    : {result.duration_sec:.1f}s")
+    # The verdict is one record so the result reads as a single outcome; the
+    # serial tail is a second one because it is bulk guest output, not a summary,
+    # and grepping a redirected log should find it without the summary in between.
+    outcome = "success" if result.success else "failure"
+    summary = _rows([
+        ("success", str(result.success)),
+        ("web ok", str(result.web_ok)),
+        ("web url", result.web_url or "-"),
+        ("duration", f"{result.duration_sec:.1f}s"),
+    ])
     if result.error:
-        typer.secho(f"error       : {result.error}", fg=typer.colors.RED)
+        summary.append(f"{'error':<17}: {result.error}")
+    out.block("info" if result.success else "error", f"emulation {outcome}", summary)
+    if result.error:
+        err.error(f"emulation {outcome}: {result.error}")
     if result.serial_log:
-        typer.echo("serial log (tail):")
-        for line in result.serial_log.splitlines()[-20:]:
-            typer.echo(f"  {line}")
+        out.block("info", "serial log (tail)", result.serial_log.splitlines()[-20:])
 
 
 @emulate_app.command("stop")
@@ -470,7 +512,7 @@ def emulate_stop(
     from iris.emulate.orchestrator import stop_emulation
 
     ok = stop_emulation(iid)
-    typer.echo(f"stopped: {ok}")
+    (out.info if ok else err.error)(f"stopped container {iid}: {ok}")
 
 
 @emulate_app.command("list")
@@ -489,35 +531,33 @@ def emulate_list() -> None:
         )
 
         if not result.stdout.strip():
-            typer.secho("No IRIS emulation containers found.", fg=typer.colors.YELLOW)
+            out.info("no IRIS emulation containers found")
             return
 
-        lines = result.stdout.strip().split('\n')
-
-        # Print header
-        typer.secho(f"{'CONTAINER':<30} {'STATUS':<35} {'PORTS'}", fg=typer.colors.GREEN)
-        typer.secho("-" * 95, fg=typer.colors.GREEN)
-
-        # Parse data lines
-        for line in lines:
-            parts = line.split('|')
+        # The column header and its rule stay inside the block so the columns
+        # below them are the only lines carrying a timestamp, and therefore the
+        # only ones whose widths have to agree.
+        rows = [f"{'CONTAINER':<30} {'STATUS':<35} {'PORTS'}", "-" * 95]
+        tints: list[str | None] = [None, None]
+        for line in result.stdout.strip().split("\n"):
+            parts = line.split("|")
             if len(parts) < 3:
                 continue
-
-            name = parts[0]
-            status = parts[1][:35]
-            ports = parts[2]
-
-            color = typer.colors.GREEN if "Up" in status else typer.colors.YELLOW
-            typer.secho(f"{name:<30} {status:<35} {ports}", fg=color)
+            name, status, ports = parts[0], parts[1][:35], parts[2]
+            rows.append(f"{name:<30} {status:<35} {ports}")
+            # "Up" is the only state that means the guest is serving; created,
+            # restarting and exited are all equally not-ready, and the tint is
+            # what makes that readable without reading every status string.
+            tints.append(LEVEL_COLORS["info"] if "Up" in status else LEVEL_COLORS["warn"])
+        out.block("info", f"IRIS emulation containers ({len(rows) - 2})", rows, row_color=tints)
 
     except subprocess.CalledProcessError as e:
-        typer.secho(f"Failed to list containers: {e}", fg=typer.colors.RED)
+        err.error(f"failed to list containers: {e}")
         raise typer.Exit(code=1) from None
     except OSError as e:
         # No JSON parsing happens above, so this is only ever "docker is missing
         # or not runnable" — say that instead of leaking a traceback.
-        typer.secho(f"Error listing containers: {e}", fg=typer.colors.RED)
+        err.error(f"error listing containers: {e}")
         raise typer.Exit(code=1) from None
 
 
@@ -535,17 +575,17 @@ def emulate_status(iid: int = typer.Argument(..., help="image ID to inspect")) -
             capture_output=True, text=True, check=True
         )
     except subprocess.CalledProcessError:
-        typer.secho(f"Container iris-qemu-{iid} not found.", fg=typer.colors.RED)
+        err.error(f"container iris-qemu-{iid} not found")
         raise typer.Exit(code=1) from None
     except OSError as e:
-        typer.secho(f"docker is unavailable: {e}", fg=typer.colors.RED)
+        err.error(f"docker is unavailable: {e}")
         raise typer.Exit(code=1) from None
 
     # check=True already guarantees a non-empty result for an existing container,
     # but an empty list here means the id vanished between the two calls.
     inspected = json.loads(result.stdout)
     if not inspected:
-        typer.secho(f"Container iris-qemu-{iid} not found.", fg=typer.colors.RED)
+        err.error(f"container iris-qemu-{iid} not found")
         raise typer.Exit(code=1)
     info = inspected[0]
 
@@ -582,30 +622,26 @@ def emulate_status(iid: int = typer.Argument(..., help="image ID to inspect")) -
         if net_info.get("IPAddress"):
             ip_address = net_info["IPAddress"]
 
-    # Display formatted output
-    typer.echo("\n" + "="*60)
-    typer.secho(f"  Container: {container_name}", fg=typer.colors.GREEN)
-    typer.echo("="*60 + "\n")
-
-    typer.echo("Status:")
-    typer.echo(f"  State:          {state}")
-    typer.echo(f"  Created:        {created}")
-    typer.echo(f"  Started At:     {started_at}")
+    # One block per report section instead of a `====` frame with blank lines:
+    # the timestamped header is already the visual separator, and blank lines in
+    # a redirected log are just noise.
+    pairs = [
+        ("State", state),
+        ("Created", created),
+        ("Started At", started_at),
+    ]
     if state == "exited":
-        typer.echo(f"  Finished At:    {finished_at}")
-    typer.echo()
-
+        pairs.append(("Finished At", finished_at))
     if port_info:
-        typer.echo("Ports:")
-        for p in port_info:
-            typer.echo(f"  -> {p}")
-        typer.echo()
-
+        pairs.append(("Ports", ", ".join(port_info)))
     if ip_address:
-        typer.echo("Network:")
-        typer.echo(f"  IP Address:     {ip_address}")
-        typer.echo(f"  Networks:       {', '.join(network_names)}")
-        typer.echo()
+        pairs.append(("IP Address", ip_address))
+        pairs.append(("Networks", ", ".join(network_names)))
+    scratch_path = scratch_dir / str(iid)
+    if scratch_path.exists():
+        size_gb = sum(safe_stat_size(f) for f in scratch_path.rglob("*") if safe_is_file(f)) / (1024**3)
+        pairs.append(("Scratch", f"{scratch_path.resolve()} ({size_gb:.2f} GB)"))
+    out.block("info", f"container {container_name}", _rows(pairs))
 
     # Check web service accessibility
     web_ports = [80, 8080, 8000, 443]
@@ -624,23 +660,12 @@ def emulate_status(iid: int = typer.Argument(..., help="image ID to inspect")) -
             pass
 
     if accessible_ports:
-        typer.secho(f"[OK] Web services accessible on ports: {', '.join(map(str, accessible_ports))}",
-                   fg=typer.colors.GREEN)
+        out.info(f"web services accessible on ports: {', '.join(map(str, accessible_ports))}")
     elif state == "running":
-        typer.secho("[NO] No web services detected on standard ports (80/8080/8000/443)",
-                   fg=typer.colors.YELLOW)
-    typer.echo()
-
-    # Show scratch directory
-    scratch_path = scratch_dir / str(iid)
-    if scratch_path.exists():
-        typer.echo("Scratch Directory:")
-        typer.echo(f"  Path:           {scratch_path.resolve()}")
-        size_gb = sum(safe_stat_size(f) for f in scratch_path.rglob("*") if safe_is_file(f)) / (1024**3)
-        typer.echo(f"  Size:           {size_gb:.2f} GB")
-        typer.echo()
-
-    typer.echo("="*60)
+        # Running but not serving is the failure worth flagging: the container
+        # looks healthy to `docker ps` while the guest never brought up a web port.
+        err.warning(f"no web services detected on standard ports ({'/'.join(map(str, web_ports))}) "
+                    f"while container state is running")
 
 
 @serve_app.command("start")
@@ -652,8 +677,8 @@ def serve_start(
     """Start the IRIS FastAPI orchestration server."""
     import uvicorn
 
-    typer.echo(f"IRIS API server starting on {host}:{port}")
-    typer.echo(f"  docs: http://{host}:{port}/docs")
+    out.info(f"IRIS API server starting on {host}:{port}")
+    out.info(f"docs: http://{host}:{port}/docs")
     uvicorn.run("iris.api.server:app", host=host, port=port, reload=reload)
 
 
@@ -676,14 +701,13 @@ def emulate_guardian_start(
 
     settings = get_settings()
     ledger_path = settings.scratch_dir / LEDGER_FILENAME
-    typer.echo(f"starting AI Guardian for container {iid}...")
-    typer.echo(f"health check interval: {interval}s")
-    if probe_port:
-        typer.echo(f"http probe: http://127.0.0.1:{probe_port} (failure overrides serial log)")
-    else:
-        typer.echo("http probe: disabled (serial log only)")
-    typer.echo(f"action ledger: {ledger_path}")
-    typer.echo("press Ctrl+C to stop monitoring\n")
+    out.block("info", f"starting AI Guardian for container {iid}", _rows([
+        ("health check", f"every {interval}s"),
+        ("http probe", f"http://127.0.0.1:{probe_port} (failure overrides serial log)"
+         if probe_port else "disabled (serial log only)"),
+        ("action ledger", str(ledger_path)),
+    ]))
+    out.info("press Ctrl+C to stop monitoring")
 
     guardian = AIHealthMonitor(
         iid=iid, scratch_dir=settings.scratch_dir,
@@ -694,7 +718,7 @@ def emulate_guardian_start(
     try:
         guardian.start_continuous_monitoring(check_interval=interval)
     except KeyboardInterrupt:
-        typer.echo("\nmonitoring stopped by user")
+        out.info("monitoring stopped by user")
 
 
 @emulate_app.command("guardian-log")
@@ -710,30 +734,29 @@ def emulate_guardian_log(
     settings = get_settings()
     ledger_path = settings.scratch_dir / LEDGER_FILENAME
     if not ledger_path.is_file():
-        typer.secho(f"no ledger at {ledger_path} — guardian-start has not run yet",
-                    fg=typer.colors.YELLOW)
+        err.warning(f"no ledger at {ledger_path} — guardian-start has not run yet")
         raise typer.Exit(code=1)
 
     ledger = GuardianLedger(ledger_path)
     entries = ledger.recent(iid=iid, limit=limit)
     ledger.close()
     if not entries:
-        typer.echo("ledger is empty")
+        out.info("ledger is empty")
         return
 
-    typer.secho(f"{'ID':<6} {'IID':<8} {'TIMESTAMP':<21} {'ACTION':<24} {'KIND':<10} OK",
-                fg=typer.colors.GREEN)
-    typer.echo("-" * 84)
+    rows = [f"{'ID':<6} {'IID':<8} {'TIMESTAMP':<21} {'ACTION':<24} {'KIND':<10} OK", "-" * 84]
+    tints: list[str | None] = [None, None]
     for e in entries:
         mark = "yes" if e["success"] else "NO"
-        color = typer.colors.GREEN if e["success"] else typer.colors.RED
-        typer.secho(
-            f"{e['id']:<6} {e['iid']:<8} {e['ts']:<21} {e['action']:<24} {e['kind']:<10} {mark}",
-            fg=color,
+        rows.append(
+            f"{e['id']:<6} {e['iid']:<8} {e['ts']:<21} {e['action']:<24} {e['kind']:<10} {mark}"
         )
+        tints.append(LEVEL_COLORS["info"] if e["success"] else LEVEL_COLORS["error"])
+    out.block("info", f"guardian action ledger ({len(entries)} entries)", rows, row_color=tints)
+
     promoted = sum(1 for e in entries if e["promoted"])
     if promoted:
-        typer.echo(f"\n{promoted} of the shown entries have been promoted to deterministic rules")
+        out.info(f"{promoted} of the shown entries have been promoted to deterministic rules")
 
 
 if __name__ == "__main__":

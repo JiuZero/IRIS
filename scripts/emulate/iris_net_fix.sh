@@ -11,8 +11,17 @@ START=99
 # guest always takes the default.
 LOCK_DIR=${IRIS_NET_FIX_LOCK_DIR:-/var/run/.iris_net_fix.lock}
 
+# Where the log lines go. /dev/console is the guest's serial console and the only
+# thing qemu.serial.log captures, so it stays the default; overridable because
+# the same script is driven off-target by the test suite, where the open fails
+# outright. Truncating rather than appending is not a hazard: /dev/console is a
+# character device, so ">" has no truncate to do — and ">>" is not an option,
+# because opening a console device with O_APPEND fails outright, which silenced
+# every line the fallback ever wanted to say.
+CONSOLE=${IRIS_CONSOLE:-/dev/console}
+
 log() {
-    echo "IRIS-NETFIX: $*" > /dev/console 2>/dev/null
+    echo "IRIS-NETFIX: $*" > "${CONSOLE}" 2>/dev/null
 }
 
 # Two channels can reach this script: inittab's ::sysinit: (which does not wait
@@ -29,7 +38,16 @@ acquire_lock() {
     # The parent is created with -p (some firmwares ship no /var/run) but the
     # lock itself with a plain mkdir, which is the atomic part: -p on the lock
     # itself would report success to both racers.
-    mkdir -p "$(dirname "${LOCK_DIR}")" 2>/dev/null
+    #
+    # The parent path is stripped with parameter expansion rather than
+    # dirname(1): this busybox carries no dirname applet, so the command fails,
+    # the path collapses to the empty string, and the "parent" mkdir below
+    # silently creates nothing — leaving the lock to be taken inside a directory
+    # that was never made.
+    lock_parent=${LOCK_DIR%/*}
+    [ "${lock_parent}" = "${LOCK_DIR}" ] && lock_parent="."
+    [ -n "${lock_parent}" ] || lock_parent="/"
+    mkdir -p "${lock_parent}" 2>/dev/null
     if mkdir "${LOCK_DIR}" 2>/dev/null; then
         return 0
     fi
@@ -67,6 +85,75 @@ web_running() {
 
 port80_listening() {
     netstat -lan 2>/dev/null | grep -qE '[:.](80|0050|http)([[:space:]]|$)'
+}
+
+# nginx configuration files to inspect, in the order they are trusted. Overridable
+# because the layout is a per-firmware guess: a firmware with its own tree (the
+# AC15's /etc_ro) needs a different list, and hardcoding one set of absolute
+# paths is how the fallback ends up reading a file that is not there.
+: "${IRIS_NGINX_CONF:=/etc/nginx/conf/nginx.conf /etc_ro/nginx/conf/nginx.conf \
+/etc/nginx/nginx.conf /etc_ro/nginx/nginx.conf}"
+
+# The port a vendor web server actually bound, when it is not 80.
+#
+# AC15's nginx.conf hardcodes `listen 8180;` and relies on a vendor redirector
+# (cfmd) to forward 80 -> 8180. That redirector segfaults within seconds of boot,
+# so the port the rehost depends on is served by nothing while nginx is healthy
+# and listening. Reading the config is the only way to learn the real port: the
+# supervisor that would normally own the redirect is exactly what is missing.
+vendor_web_port() {
+    for conf in ${IRIS_NGINX_CONF}; do
+        [ -f "${conf}" ] || continue
+        # Only uncommented, non-ssl listen directives: the stock nginx.conf ships
+        # three commented examples (8000/443/somename) that would otherwise be
+        # read as the real port.
+        sed -n 's/^[[:space:]]*listen[[:space:]]\{1,\}\([0-9]\{1,\}\)[;[:space:]].*/\1/p' \
+            "${conf}" 2>/dev/null | head -1
+    done
+}
+
+# Put something on :80 when the vendor's own web server is not there.
+#
+# DNAT is tried first because it leaves the vendor's configuration untouched: if
+# the guest reboots or nginx restarts, the redirect still holds. Rewriting the
+# config is the fallback for the many firmwares whose busybox has no iptables
+# applet at all, and it is applied only when the config is writable — a
+# read-only /etc_ro would otherwise turn every build into a silent no-op.
+redirect_to_port80() {
+    target=$1
+    if [ "${target}" = "80" ]; then
+        log "vendor web server is already on :80, nothing to redirect"
+        return 0
+    fi
+    if iptables -t nat -C PREROUTING -p tcp --dport 80 -j DNAT --to-destination ":${target}" 2>/dev/null; then
+        log "port 80 already redirected to ${target}"
+        return 0
+    fi
+    if iptables -t nat -A PREROUTING -p tcp --dport 80 -j DNAT --to-destination ":${target}" 2>/dev/null; then
+        # OUTPUT covers traffic originating inside the guest (a health check on
+        # 127.0.0.1, say), which PREROUTING never sees.
+        iptables -t nat -A OUTPUT -p tcp --dport 80 -j DNAT --to-destination ":${target}" 2>/dev/null || true
+        log "DNAT :80 -> :${target} installed"
+        return 0
+    fi
+
+    for conf in ${IRIS_NGINX_CONF}; do
+        [ -f "${conf}" ] || continue
+        if grep -q "^[[:space:]]*listen[[:space:]]\{1,\}${target};" "${conf}"; then
+            # The captured group is the whole "  listen       " prefix, so the
+            # replacement is just the group and the new port. Appending the
+            # keyword again here would emit "listen listen 80;", which nginx
+            # refuses to start with — a silent loss of the only web server.
+            if sed -i "s/^\([[:space:]]*listen[[:space:]]\{1,\}\)${target};/\1 80;/" "${conf}" 2>/dev/null; then
+                log "nginx listen ${target} rewritten to 80 in ${conf}"
+                pkill -HUP nginx 2>/dev/null || true
+                return 0
+            fi
+            log "cannot rewrite ${conf} (read-only filesystem)"
+        fi
+    done
+    log "no way to expose vendor web server on :80 (no iptables, config not writable)"
+    return 1
 }
 
 fixup() {
@@ -119,6 +206,18 @@ fixup() {
     log "probing for a web server on :80"
     if web_running; then
         log "vendor web server is already running, leaving :80 to it"
+        if ! port80_listening; then
+            # Running but not on :80 is the AC15 case: nginx is healthy on 8180
+            # and the redirector that owned 80 crashed. Detect and repair rather
+            # than launching a second server that would only fail to bind.
+            vendor_port=$(vendor_web_port)
+            if [ -n "${vendor_port}" ] && [ "${vendor_port}" != "80" ]; then
+                log "vendor web server is on :${vendor_port}, not :80"
+                redirect_to_port80 "${vendor_port}"
+            else
+                log "vendor web server is running but its port could not be determined"
+            fi
+        fi
     elif port80_listening; then
         log "something else already listens on :80"
     elif [ -x /opt/goahead/goahead ] && [ -f /opt/goahead/route.txt ]; then
