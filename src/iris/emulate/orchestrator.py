@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from iris.emulate.qemu_config import get_config, supported_archs
-from iris.fsutil import safe_is_file, safe_read_text
+from iris.fsutil import safe_is_file, safe_present, safe_read_text, safe_stat_size
 from iris.log import get_logger
 
 logger = get_logger(__name__)
@@ -233,6 +233,58 @@ def build_parts_mounts(parts_dir: Path) -> list[tuple[str, str]]:
     return pairs
 
 
+def _newest_mtime(rootfs_dir: Path) -> float:
+    """Newest mtime anywhere in the tree, ignoring entries that refuse to stat.
+
+    ``os.walk`` is used rather than ``rglob`` because an extracted rootfs carries
+    POSIX symlinks that raise on the Windows host; ``os.walk`` skips those instead
+    of propagating, and every entry it does skip is one no rule could have edited
+    anyway.
+    """
+    newest = 0.0
+    for root, _dirs, files in os.walk(rootfs_dir):
+        for name in files:
+            try:
+                newest = max(newest, os.stat(os.path.join(root, name)).st_mtime)
+            except OSError:
+                continue
+    return newest
+
+
+def _mtime_or_zero(path: Path) -> float:
+    """mtime of *path*, or 0.0 when it cannot be stat'ed."""
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _tarball_is_stale(rootfs_dir: Path, tarball_path: Path) -> bool:
+    """Whether a cached tarball predates the tree it was built from.
+
+    The tarball is cached under ``scratch/emulate-<iid>/<iid>.tar.gz`` and ``iid``
+    is derived from the rootfs *path*, so it is stable across sessions: a rerun
+    reuses the pack from the first run forever. That is only sound while the tree
+    is unchanged, and it very rarely is — every ``iris emulate run <firmware.bin>``
+    re-extracts the rootfs and re-applies the L3 rules, which rewrites files in
+    place. Reusing the old pack silently discards the whole repair: the guest
+    boots a month-old rootfs in which ``diag`` was never disabled, and the only
+    symptom is a crash loop the rules were supposed to have prevented.
+
+    Comparing mtimes rather than hashing two thousand files keeps the check at
+    well under a second, and a file edited by a rule always carries a newer stamp
+    than the pack that was built before the edit.
+    """
+    if not safe_present(tarball_path) or not safe_present(rootfs_dir):
+        return True
+    pack_mtime = _mtime_or_zero(tarball_path)
+    if pack_mtime == 0.0:
+        # Occupies its name but cannot be stat'ed: its age is unknowable, and a
+        # pack whose age is unknowable cannot be shown to be current.
+        return True
+    return _newest_mtime(rootfs_dir) > pack_mtime
+
+
 def emulate_firmware(
     rootfs_dir: Path,
     arch: str,
@@ -258,7 +310,8 @@ def emulate_firmware(
 
     container_compose = parts_slices_dir is not None and partition_mounts is not None
     try:
-        if not tarball_path.exists():
+        stale = _tarball_is_stale(rootfs_dir, tarball_path)
+        if stale:
             if container_compose:
                 guest_script = ""
                 host_rules_script = rootfs_dir / "firmadyne" / "iris_rules.sh"
@@ -272,7 +325,9 @@ def emulate_firmware(
             else:
                 logger.info("Creating rootfs tarball...")
                 _create_tarball(rootfs_dir, tarball_path)
-        logger.info(f"Tarball: {tarball_path.stat().st_size} bytes")
+        else:
+            logger.info(f"Reusing up-to-date tarball {tarball_path.name} (rootfs unchanged since it was built)")
+        logger.info(f"Tarball: {safe_stat_size(tarball_path)} bytes")
     except RuntimeError as e:
         result.error = str(e)
         result.duration_sec = time.time() - start_time

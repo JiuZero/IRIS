@@ -6,6 +6,24 @@
 
 ## [未发布]
 
+### 修复（rootfs tarball 缓存永不失效，2026-10-02）
+
+- **重新打包的判据从"文件在不在"改成"树有没有变新"**：`emulate_firmware` 原本用
+  `if not tarball_path.exists()` 决定是否重新打包，而 tarball 落在
+  `scratch/emulate-<iid>/<iid>.tar.gz`、`iid` 由 rootfs **路径** md5 稳定推导——同一次
+  仿真在任何一次会话里都会命中同一个缓存。而 `iris emulate run <firmware.bin>` 每次都
+  会重新提取 rootfs 并重新应用 L3 规则（规则会就地改写文件），于是**刚刚生效的修复被
+  静默丢弃**：guest 跑的是几个月前的 rootfs，`diag` 从来没被禁用过，唯一症状就是规则本
+  该消灭的那个崩溃循环。
+  实测证据：某固件的 `emulate-5255/5255.tar.gz` mtime 停在 9-27，而同一次运行的 rootfs
+  规则脚本是 10-2 生成的；tar 内 30400 个条目没有 `firmadyne/iris_rules.sh`，而宿主
+  rootfs 里它刚被写好。
+- **`_tarball_is_stale` / `_newest_mtime`**：以 mtime 比较代替对两千个文件做哈希，整棵
+  树的判定实测 0.4s；树里任何一个文件比 tarball 新就重打包，而规则改过的文件必然带着
+  比它更晚的时间戳。无法 `stat` 的条目按"不可信"处理（`os.walk` 会静默跳过它们），pack
+  本身 `stat` 不了就当作陈旧——年龄不可知就无法证明它是最新的。
+- **复用与重建都进日志**：命中缓存时打印 `Reusing up-to-date tarball ...`，不再静默。
+
 ### 修复（Windows 宿主上不可解析的固件符号链接，2026-10-02）
 
 - **`iris emulate run` 不再被 `OSError: [WinError 1920]` 打断**：固件 rootfs 天生
@@ -87,6 +105,10 @@
   下不抛，且对"只有死链的 rootfs"跑完全部内置规则不炸）；`tests/test_api.py` 新增
   `TestUnresolvableRootfsEntries` 3 例（列表接口跳过死条目、pipeline 把 1920 转成
   失败响应而非 500、emulate 对死链返回 404）。测试总数 226 → 263。
+- `tests/test_tarball_cache.py` 新增 12 例：mtime 遍历（空树/最新文件/不可 stat 条目）、
+  陈旧判定（pack 缺失、rootfs 缺失、树未变、规则改写后、重新提取后、pack 时间戳更新后、
+  pack 无法 stat）、以及两条真正走 `emulate_firmware` 的用例（陈旧时确实重打包、树未变时
+  绝不重打包）。测试总数 263 → 275。
 
 ## [0.2.1] - 2026-10-01
 
