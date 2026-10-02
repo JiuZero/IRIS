@@ -23,6 +23,8 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from iris.fsutil import safe_present, safe_rmtree
+
 UIMAGE_MAGIC_BYTES = b"\x27\x05\x19\x56"
 TENDA_WRAPPER_NAME = b"Tenda_upgrade"
 TENDA_ZIP_SCAN_LIMIT = 8192
@@ -198,13 +200,19 @@ def jefferson_extract(jffs2_path: Path, dest_dir: Path) -> Path:
     exe = shutil.which("jefferson")
     if exe is None:
         raise RuntimeError("jefferson not found on PATH (pip install jefferson)")
-    if dest_dir.exists():
-        shutil.rmtree(dest_dir)
+    if safe_present(dest_dir) and not safe_rmtree(dest_dir):
+        raise RuntimeError(
+            f"cannot clear stale JFFS2 extraction {dest_dir}: reparse points or "
+            "locked files survive the delete, so jefferson would unpack into a "
+            "partial tree"
+        )
     dest_dir.mkdir(parents=True)
     result = subprocess.run(
         [exe, "-d", str(dest_dir), "-f", str(jffs2_path)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=300,
         check=False,
     )

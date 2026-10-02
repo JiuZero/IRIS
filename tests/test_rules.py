@@ -449,3 +449,72 @@ class TestGuestScriptIsPosix:
         apply_rules(rootfs, [rule], dry_run=False)
         script = (rootfs / GUEST_SCRIPT_PATH).read_text(encoding="utf-8")
         assert "\\" not in script
+
+
+class TestUnresolvableSymlinks:
+    """A firmware ``/sbin -> /bin`` on a Windows host is a dead reparse point.
+
+    ``Path.exists()`` only swallows ENOENT/ENOTDIR/EBADF and friends, so
+    ``WinError 1920`` escaped ``apply_rules`` and killed ``iris emulate run``
+    mid-simulation on a perfectly healthy image. "Cannot inspect it" must read as
+    "not there" for detection and verification alike.
+    """
+
+
+    @pytest.fixture
+    def dead_links(self, monkeypatch):
+        """Make every path *query* raise, the way an unusable reparse point does."""
+        real = {a: getattr(Path, a) for a in ("exists", "is_file", "is_dir", "stat")}
+
+        def wrap(attr):
+            def query(self):
+                if self.name == "sbin":
+                    raise OSError(1920, "The system cannot access this file")
+                return real[attr](self)
+            return query
+
+        for attr in real:
+            monkeypatch.setattr(Path, attr, wrap(attr))
+        # symlink-ness stays queryable, which is exactly why only some callers broke
+        monkeypatch.setattr(Path, "is_symlink", lambda self: False)
+
+    def test_path_exists_detect_does_not_raise(self, tmp_path, dead_links):
+        (tmp_path / "sbin").mkdir()
+        rule = Rule(id="r", description="", stage="service",
+                    detect=[{"path_exists": "sbin"}], actions=[])
+        reports = apply_rules(tmp_path, [rule], dry_run=True)
+        assert reports[0].matched is False
+
+    def test_check_files_verify_does_not_raise(self, tmp_path, dead_links):
+        (tmp_path / "sbin").mkdir()
+        rule = Rule(id="r", description="", stage="service",
+                    post_action_verify={"check_files": [
+                        {"path": "sbin", "must_exist": True}]})
+        verify = apply_rules(tmp_path, [rule], dry_run=False)[0].verify
+        assert any("MISSING" in v for v in verify)
+
+    def test_must_not_exist_verify_passes(self, tmp_path, dead_links):
+        """Uninspectable is not "still present" — the repair is not a false failure."""
+        (tmp_path / "sbin").mkdir()
+        rule = Rule(id="r", description="", stage="service",
+                    post_action_verify={"check_files": [
+                        {"path": "sbin", "must_not_exist": True}]})
+        verify = apply_rules(tmp_path, [rule], dry_run=False)[0].verify
+        assert not any("STILL PRESENT" in v for v in verify)
+
+    def test_edit_within_dead_link_scope_is_a_no_op(self, tmp_path, dead_links):
+        (tmp_path / "sbin").mkdir()
+        rule = Rule(id="r", description="", stage="service",
+                    detect=[{"file_regex": "x", "within": "sbin"}],
+                    actions=[{"edit": {"regex": "x", "replace": "y"}}])
+        report = apply_rules(tmp_path, [rule], dry_run=False)[0]
+        assert report.matched is False
+        assert list((tmp_path / "sbin").iterdir()) == []
+
+    def test_bundled_rules_survive_a_whole_dead_rootfs(self, tmp_path, dead_links):
+        """Every shipped rule, not one hand-picked case."""
+        (tmp_path / "sbin").mkdir()
+        (tmp_path / "tmp").mkdir()
+        (tmp_path / "config").mkdir()
+        reports = apply_rules(tmp_path, load_rules(PROJECT_RULES), dry_run=True)
+        assert reports

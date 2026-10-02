@@ -11,6 +11,7 @@ Workflow:
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -20,6 +21,7 @@ from pathlib import Path
 
 from iris.extract.firmware import FirmwareInfo, analyze_firmware
 from iris.extract.ubi import extract_squashfs_from_ubi
+from iris.fsutil import safe_exists, safe_is_dir, safe_present, safe_rmtree
 
 
 @dataclass
@@ -64,10 +66,12 @@ def _docker_unsquashfs(squashfs_path: Path, dest_dir: Path, image: str = "alpine
     rel_sqfs = squashfs_path.name
     rel_dest = dest_dir.name
 
-    if dest_dir.exists():
-        import shutil
-
-        shutil.rmtree(dest_dir)
+    if safe_present(dest_dir) and not safe_rmtree(dest_dir):
+        raise RuntimeError(
+            f"cannot clear stale extraction {dest_dir}: reparse points or "
+            "locked files survive the delete, so unsquashfs would merge into a "
+            "partial tree"
+        )
 
     cmd = [
         "docker", "run", "--rm",
@@ -125,35 +129,107 @@ def _census_elfs(rootfs_dir: Path) -> tuple[int, Counter]:
     return count, counter
 
 
+def _tree_has_content(tree: Path) -> bool:
+    """Whether a directory holds at least one visible entry, without raising.
+
+    Two firmware traps meet here. ``Path.exists()``/``is_dir()`` raise
+    ``WinError 1920`` on the POSIX symlinks a JFFS2 tree is dense with, while
+    ``Path.rglob`` silently drops them — so a tree holding nothing *but* dead
+    links looks empty. An explicit ``scandir`` walk sees those names without
+    following them, which is the honest answer for "did anything land here?" and
+    the one that makes a link-only tree get re-extracted instead of silently
+    becoming an empty rootfs.
+    """
+    stack = [tree]
+    while stack:
+        try:
+            with os.scandir(stack.pop()) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(Path(entry.path))
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def _link_target_within(src: Path, item: Path) -> tuple[Path, bool] | None:
+    """Re-anchor a Linux symlink so it can never leave the extracted tree.
+
+    Returns ``(target-as-seen-from-the-link, is_directory)``, or ``None`` when the
+    link should not be recreated at all.
+
+    Firmware links are POSIX by construction (``/sbin -> /bin``,
+    ``/tmp -> /var/tmp``). Recreating such a link verbatim on the Windows host
+    produces a reparse point whose target is an unresolvable ``/bin``: every
+    later ``stat()`` on it raises ``WinError 1920`` instead of answering False,
+    which took down rule verification mid-simulation. Worse, anything that reads
+    the tree through an MSYS/POSIX layer resolves ``/bin`` against the *host* —
+    a repair would then rename the user's own files.
+
+    So an absolute link is re-anchored onto the tree (``/sbin -> /bin`` becomes
+    ``sbin -> bin``): inside the chroot that is the same place, and on the host
+    it stays inside the rootfs. Relative links are already self-contained, but
+    ``../..`` can still climb out, so they are normalized and put through the
+    same containment check. A link whose target is missing from the tree is not
+    recreated at all — a dangling link that cannot be followed is worse than no
+    link, which is the pre-existing behaviour this keeps.
+    """
+    text = str(os.readlink(item))
+    anchor = item.parent.relative_to(src)
+    # Treat "/bin", "\bin" and drive-lettered "C:\bin" alike: none is meaningful
+    # inside a firmware root, all of them would escape it on the host.
+    absolute = os.path.isabs(text) or re.match(r"^[A-Za-z]:", text)
+    inner = text.lstrip("/\\") if absolute else text
+    if not inner:
+        return None
+
+    # ``resolved`` is where the link really points, as a tree-root-relative path.
+    resolved = Path(os.path.normpath(inner if absolute else anchor / inner))
+    if resolved.is_absolute() or ".." in resolved.parts:
+        return None
+    if not safe_exists(src / resolved):
+        return None
+    # Windows stores the directory flag inside the reparse point, so getting it
+    # wrong makes a file link unreadable as a file — the exact thing this copy
+    # exists to preserve.
+    return Path(os.path.relpath(resolved, anchor)), safe_is_dir(src / resolved)
+
+
 def _copy_tree_tolerant(src: Path, dst: Path) -> None:
-    """Copy a jefferson-extracted tree to NTFS, skipping dangling symlinks.
+    """Copy a jefferson-extracted tree to NTFS, re-anchoring every symlink.
 
     JFFS2 partitions are mostly soft links; on Windows they land as broken
     reparse points that raise WinError 123 on read. Real re-linking happens
     container-side (see orchestrator); here we only need regular files for
-    ELF census and an inspectable tree.
+    ELF census and an inspectable tree — but the links we do keep must point
+    *inside* the tree (see ``_link_target_within``) so that rule evaluation and
+    any shell tooling cannot act on the host filesystem.
     """
     dst.mkdir(parents=True, exist_ok=True)
     for item in src.rglob("*"):
         rel = item.relative_to(src)
         target = dst / rel
-        if item.is_symlink():
-            if not item.exists():
+        try:
+            if item.is_symlink():
+                anchored = _link_target_within(src, item)
+                if anchored is None:
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    target.symlink_to(anchored[0], target_is_directory=anchored[1])
+                except OSError:
+                    pass
                 continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                target.symlink_to(item.readlink())
-            except OSError:
-                pass
-            continue
-        if item.is_dir():
-            target.mkdir(parents=True, exist_ok=True)
-        else:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            try:
+            if item.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(item, target)
-            except OSError:
-                continue
+        except OSError:
+            # One unreachable entry must not abort the whole extraction; the
+            # census below samples what did make it across.
+            continue
 
 
 def _extract_tendaw(
@@ -169,15 +245,18 @@ def _extract_tendaw(
     stem = firmware_path.stem
     parts_dir = scratch_dir / f"{stem}-parts"
     rootfs_dir = scratch_dir / f"{stem}-rootfs"
-    if rootfs_dir.exists():
-        shutil.rmtree(rootfs_dir)
+    if safe_present(rootfs_dir) and not safe_rmtree(rootfs_dir):
+        raise RuntimeError(
+            f"cannot clear stale extraction {rootfs_dir}: reparse points or locked "
+            "files survive the delete, so the new tree would merge into a remnant"
+        )
 
     extracted: dict[str, Path] = {}
     for part in container.partitions:
         if part.payload_type != "jffs2" or not part.mount_point:
             continue
         tree = parts_dir / part.name
-        if not tree.exists() or not any(tree.rglob("*")):
+        if not _tree_has_content(tree):
             raw = parts_dir / f"{part.name}.jffs2"
             slice_partition(data, container.zip_offset, part, raw)
             jefferson_extract(raw, tree)

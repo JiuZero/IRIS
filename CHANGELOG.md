@@ -6,6 +6,40 @@
 
 ## [未发布]
 
+### 修复（Windows 宿主上不可解析的固件符号链接，2026-10-02）
+
+- **`iris emulate run` 不再被 `OSError: [WinError 1920]` 打断**：固件 rootfs 天生
+  是 POSIX 的（`/sbin -> /bin`、`/tmp -> /var/tmp`、`bin/ash -> busybox`），在 Windows
+  宿主上重建后变成目标不可解析的 reparse point，任何 `stat()` 都**抛异常而不是回答
+  False**——`WinError 1920`/errno 22 不在 `Path.exists()` 吞掉的 errno 白名单里。
+  于是一条死链就能让一次本可正常完成的仿真半途而废（实测卡在
+  `sbin/reboot.iris-disabled` 的规则校验上）。
+- **新增 `src/iris/fsutil.py`：查询而不是抛异常**。`safe_exists`/`safe_is_file`/
+  `safe_is_dir`/`safe_stat_size`/`safe_read_text` 把"看不了"与"不在"归为同一个答案，
+  这正是规则判定需要的语义。`safe_present` 额外用父目录列举兜底：`exists()` 对仍占着
+  名字的死 reparse point 返回 False，只看它会误判"目录已清干净"。
+- **规则引擎改用 `fsutil`**：`path_exists` 检测、`check_files` 后置校验、`file_glob`/
+  `file_regex` 作用域遍历全部走加固后的查询，`is_symlink()` 也一并包了保护。
+- **符号链接重锚（`_link_target_within`）**：jefferson 提取树的复制不再原样照抄 Linux
+  绝对链接，而是重写成树内可达的相对路径（`/sbin -> /bin` 变成 `sbin -> bin`，
+  子目录里的 `usr/sbin/httpd -> /bin/httpd` 变成 `../../bin/httpd`）——chroot 内指向
+  同一处，宿主上则再也逃不出 rootfs。相对链接同样做归一化并检查 `..` 越界；目标不在树内
+  （含盘符型 `C:\bin` 这类一律按逃逸处理）时不建链接——悬空链接比没有链接更糟，这也保持了
+  原有"跳过悬空链接"的行为。目录标志按源树的实际类型取值：Windows 把目录标志存在
+  reparse point 里，标志错了会让 `bin/ash` 这类文件链接无法按文件读取。
+- **提取容错**：`_copy_tree_tolerant` 的循环体整段包 `try/except OSError`，单条不可
+  访问条目不再中止整次提取；`_tree_has_content` 改用 `scandir` 显式遍历（`rglob` 会
+  静默吞掉落单的链接，导致"只有链接"的树被误当成空树而跳过重新提取）。
+- **`shutil.rmtree` 残留风险收口**：`rootfs_extract`/`tenda` 在清缓存时改用
+  `safe_rmtree`，删不干净就**报错**而不是留残目录——残目录会让后续每一次提取都失败。
+  `rmtree` 的错误回调在 3.11 是 `onerror`、3.12+ 改名 `onexc`（3.14 删除前者），
+  按解释器版本选择，不再在容错路径上抛 `TypeError`。
+- **其余击穿点一并加固**：`orchestrator` 读取 guest 规则脚本（原先外层只捕
+  `RuntimeError`，会裸栈穿透到 CLI）、`auto.prepare_from_rootfs`、
+  `cli` 的 `emulate run` 入口与 `emulate status` 的体积统计、`api` 的
+  `list_firmware`/`emulate`/`pipeline`（`extract_rootfs` 的 `RuntimeError`/`OSError`
+  现在转成正常的失败响应，不再是裸 500）。
+
 ### 新增（值守观测与自愈闭环，2026-10-02）
 
 - **串口日志增量感知**：`SerialLogAnalyzer.load_log(start_line)` 支持从指定行起读，
@@ -46,6 +80,13 @@
 - `docx/AI值守与稳定性治理.md` 同步：4.3 状态机表（expired 优先 + 增量口径）、
   4.4 五类动作、4.8 新增"执行通道的两层语义"、4.9 动作账本、4.7 已知限制移除
   已过时两条、5.3 增强清单勾掉已落地三项。
+- `tests/test_fsutil.py` 新增 29 例（查询不抛、`safe_present` 的可见残留、`safe_rmtree`
+  失败上报、链接重锚七种形态含相对链接的目录标志与越界检查、提取容错、
+  `_tree_has_content` 的链接/空/不可读场景）；
+  `tests/test_rules.py` 新增 `TestUnresolvableSymlinks` 5 例（检测/校验/编辑作用域在死链
+  下不抛，且对"只有死链的 rootfs"跑完全部内置规则不炸）；`tests/test_api.py` 新增
+  `TestUnresolvableRootfsEntries` 3 例（列表接口跳过死条目、pipeline 把 1920 转成
+  失败响应而非 500、emulate 对死链返回 404）。测试总数 226 → 263。
 
 ## [0.2.1] - 2026-10-01
 

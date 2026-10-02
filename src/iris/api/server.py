@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from iris.config import get_settings
 from iris.emulate.orchestrator import emulate_firmware, preflight_arch, stop_emulation
 from iris.emulate.qemu_config import supported_archs
+from iris.fsutil import safe_is_dir, safe_present
 
 _SUPPORTED_ARCHS = tuple(supported_archs())
 
@@ -71,7 +72,7 @@ async def list_firmware() -> list[FirmwareInfo]:
             if d.is_dir() and d.name.endswith("-rootfs"):
                 arch = "unknown"
                 bin_dir = d / "bin"
-                if bin_dir.exists():
+                if safe_is_dir(bin_dir):
                     for f in bin_dir.iterdir():
                         try:
                             if not f.is_file() or f.is_symlink():
@@ -97,7 +98,7 @@ async def list_firmware() -> list[FirmwareInfo]:
 @app.post("/api/v1/emulate", response_model=EmulateResponse)
 async def emulate(req: EmulateRequest) -> EmulateResponse:
     rootfs = Path(req.rootfs_path)
-    if not rootfs.exists():
+    if not safe_is_dir(rootfs):
         raise HTTPException(status_code=404, detail=f"rootfs not found: {req.rootfs_path}")
 
     if req.arch not in _SUPPORTED_ARCHS:
@@ -218,10 +219,26 @@ async def pipeline(
             error=f"unsupported-arch: '{detected_arch or 'unknown'}' not in supported {list(_SUPPORTED_ARCHS)}",
         )
 
-    ext = await asyncio.to_thread(lambda: extract_rootfs(fw_path, scratch, arch_hint=detected_arch))
+    # An extraction failure is an expected outcome for unsupported containers, and a
+    # WinError-1920 remnant in the scratch tree is a filesystem quirk rather than a
+    # server fault — neither deserves a bare 500.
+    try:
+        ext = await asyncio.to_thread(lambda: extract_rootfs(fw_path, scratch, arch_hint=detected_arch))
+    except (RuntimeError, OSError) as exc:
+        return PipelineResponse(
+            iid=iid,
+            firmware_name=safe_name,
+            arch=detected_arch,
+            rootfs_path="",
+            success=False,
+            web_ok=False,
+            web_url="-",
+            duration_sec=0.0,
+            error=f"rootfs extraction error: {exc}",
+        )
     rootfs_dir = scratch / f"{fw_path.stem}-rootfs"
 
-    if not rootfs_dir.exists():
+    if not safe_present(rootfs_dir):
         return PipelineResponse(
             iid=iid,
             firmware_name=safe_name,

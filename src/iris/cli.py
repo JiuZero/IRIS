@@ -7,6 +7,7 @@ import typer
 
 from iris.config import get_settings
 from iris.db.engine import get_engine, init_db, make_session
+from iris.fsutil import safe_is_file, safe_present, safe_stat_size
 from iris.log import get_logger, setup_logging
 
 app = typer.Typer(help="IRIS - IoT Rehosting & Interconnection Simulator", no_args_is_help=True)
@@ -345,12 +346,12 @@ def emulate_run(
     from iris.emulate.orchestrator import build_parts_mounts, emulate_firmware, preflight_arch
     from iris.emulate.qemu_config import supported_archs
 
-    if not target.exists():
+    if not safe_present(target):
         typer.secho(f"not found: {target}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     # Only reject zips if input is a file
-    if target.is_file():
+    if safe_is_file(target):
         _reject_zip(target)
 
     settings = get_settings()
@@ -358,7 +359,7 @@ def emulate_run(
 
     # Decide whether input is firmware .bin vs pre-extracted rootfs
     inferred_arch = ""
-    if target.is_file():
+    if safe_is_file(target):
         typer.echo(f"extracting rootfs from {target.name} ...")
         prepared = prepare_from_firmware(
             target,
@@ -635,7 +636,7 @@ def emulate_status(iid: int = typer.Argument(..., help="image ID to inspect")) -
     if scratch_path.exists():
         typer.echo("Scratch Directory:")
         typer.echo(f"  Path:           {scratch_path.resolve()}")
-        size_gb = sum(f.stat().st_size for f in scratch_path.rglob("*") if f.is_file()) / (1024**3)
+        size_gb = sum(safe_stat_size(f) for f in scratch_path.rglob("*") if safe_is_file(f)) / (1024**3)
         typer.echo(f"  Size:           {size_gb:.2f} GB")
         typer.echo()
 

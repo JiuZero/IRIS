@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from iris.emulate.qemu_config import get_config, supported_archs
+from iris.fsutil import safe_is_file, safe_read_text
 from iris.log import get_logger
 
 logger = get_logger(__name__)
@@ -261,8 +262,8 @@ def emulate_firmware(
             if container_compose:
                 guest_script = ""
                 host_rules_script = rootfs_dir / "firmadyne" / "iris_rules.sh"
-                if host_rules_script.is_file():
-                    guest_script = host_rules_script.read_text(encoding="utf-8", errors="replace")
+                if safe_is_file(host_rules_script):
+                    guest_script = safe_read_text(host_rules_script)
                 logger.info(
                     f"Composing rootfs from {len(partition_mounts)} JFFS2 slices in-container "
                     f"(symlink-safe, guest_script={bool(guest_script)})..."

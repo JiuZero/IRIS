@@ -38,6 +38,9 @@ from pathlib import Path
 
 import yaml
 
+from iris.fsutil import safe_exists as _exists
+from iris.fsutil import safe_is_file as _is_file
+
 GUEST_SCRIPT_PATH = "firmadyne/iris_rules.sh"
 VERIFY_LOG_PATH = "/etc/scripts/iris_verify.log"
 #: Guest-side directory holding the verification log. Spelled as a POSIX literal
@@ -83,6 +86,15 @@ def _is_binary(path: Path) -> bool:
 def _write_text(path: Path, text: str) -> None:
     with open(path, "w", encoding="utf-8", newline="") as fh:
         fh.write(text)
+
+
+# An extracted rootfs keeps POSIX symlinks, and on a Windows host a firmware
+# ``/sbin -> /bin`` becomes a reparse point that ``stat()`` refuses to resolve
+# (``WinError 1920``). ``Path.exists()`` only swallows ENOENT/ENOTDIR/EBADF and
+# friends, so that one dead link raised straight through ``apply_rules`` and
+# aborted a simulation that was otherwise fine. "Cannot inspect it" and "it is
+# not there" are the same answer for rule evaluation; see ``iris.fsutil``, where
+# ``_exists``/``_is_file`` below are imported from.
 
 
 def _ascii_safe(text: str) -> str:
@@ -207,11 +219,12 @@ def load_rules(rules_dir: Path) -> list[Rule]:
 def _iter_files(root: Path) -> list[Path]:
     files: list[Path] = []
     for p in root.rglob("*"):
-        try:
-            if p.is_file() and not p.is_symlink():
-                files.append(p)
-        except OSError:
-            continue
+        if _is_file(p):
+            try:
+                if not p.is_symlink():
+                    files.append(p)
+            except OSError:
+                continue
     return files
 
 
@@ -287,7 +300,7 @@ def _evaluate(rootfs: Path, cond: dict, files: list[Path]) -> tuple[bool, list[P
                 return False, []
         except OSError:
             return False, []
-        if target.is_file():
+        if _is_file(target):
             return True, [target]
         return True, [f for f in files if _under(f, rootfs, rel)]
 
@@ -448,7 +461,7 @@ def _run_verify(rootfs: Path, rule: Rule, dry_run: bool) -> list[str]:
         if ".." in Path(rel).parts:
             results.append(f"check_files refused unsafe path: {rel}")
             continue
-        present = (rootfs / rel).exists()
+        present = _exists(rootfs / rel)
         if item.get("must_exist") and not present:
             results.append(f"MISSING expected file: {rel}")
         elif item.get("must_not_exist") and present:
@@ -465,7 +478,7 @@ def _run_verify(rootfs: Path, rule: Rule, dry_run: bool) -> list[str]:
             results.append(f"forbidden_pattern refused unsafe path: {rel}")
             continue
         target = rootfs / rel
-        if not target.is_file() or _is_binary(target):
+        if not _is_file(target) or _is_binary(target):
             results.append(f"forbidden_pattern {item['pattern']}: {rel} not present — clear")
             continue
         try:

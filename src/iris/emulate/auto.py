@@ -17,6 +17,7 @@ from pathlib import Path
 
 from iris.extract.rootfs_extract import _census_elfs
 from iris.extract.rootfs_extract import extract_rootfs as do_extract
+from iris.fsutil import safe_is_dir
 from iris.rules.engine import apply_rules, load_rules
 
 
@@ -119,7 +120,7 @@ def prepare_from_firmware(
         prepared.notes.append(f"architecture from user hint: {arch_hint}")
 
     # Apply L3 rules (dry-run by default for safety; set dry_run_rules=False to write)
-    if apply_rules_flag and prepared.rootfs_dir.is_dir():
+    if apply_rules_flag and safe_is_dir(prepared.rootfs_dir):
         rules_dir = rules_dir or Path("rules")
         if rules_dir.is_dir():
             reports = apply_rules(
@@ -143,7 +144,7 @@ def prepare_from_firmware(
 
 def prepare_from_rootfs(rootfs_dir: Path, rules_dir: Path | None = None) -> PreparedRootfs:
     """Wrap a pre-extracted rootfs dir for emulation; just apply rules."""
-    if not rootfs_dir.is_dir():
+    if not safe_is_dir(rootfs_dir):
         return PreparedRootfs.from_error(f"rootfs dir not found: {rootfs_dir}")
 
     prepared = PreparedRootfs(
