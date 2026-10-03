@@ -31,6 +31,7 @@ NET_FIX = Path(__file__).resolve().parents[1] / "scripts" / "emulate" / "iris_ne
 _SOURCE = """
 add_func() { :; }
 export IRIS_NET_FIX_LOCK_DIR="$1"
+export IRIS_CONSOLE=/dev/null
 sleep 30 &
 LIVE=$!
 [ -n "$3" ] && echo "$LIVE" > "$1/pid"
@@ -58,10 +59,13 @@ def bash() -> str:
 
 
 def _acquire(bash: str, lock_dir: Path, seed_owner: str | None = None) -> str:
-    # POSIX form: the script strips the parent out of this path with parameter
-    # expansion, which only knows "/" — the guest's own paths are all absolute
-    # and slash-separated, so a Windows path here would test a case that cannot
-    # occur and quietly pass for the wrong reason.
+    # POSIX form: the parent is derived from this path with sed, which only knows
+    # "/" -- the guest's own paths are all absolute and slash-separated, so a
+    # Windows path here would test a case that cannot occur and quietly pass for
+    # the wrong reason. IRIS_CONSOLE is pointed at /dev/null for the same reason
+    # the script sends it to /dev/console on-target: off-target the console cannot
+    # be opened, so log() takes its documented fallback to the inherited stdout --
+    # which is the very stream these tests parse "rc=" out of.
     posix = str(lock_dir).replace("\\", "/")
     proc = subprocess.run(
         [bash, "-c", _SOURCE, "_", posix, str(NET_FIX).replace("\\", "/"), seed_owner or ""],

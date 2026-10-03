@@ -62,9 +62,17 @@ LISTEN_OTHER_PORT = "tcp   0  0 0.0.0.0:8080          0.0.0.0:*               LI
 #: It leaves a mark file rather than a variable because the script starts it with
 #: ``&`` -- a background subshell's assignment never reaches the parent, and
 #: whether the script waits is not what this is testing; it must not wait.
+#:
+#: ``_IRIS_IN_BOUND`` is how run_bounded's own wait opts out of the counter: that
+#: wait is the bound, so against a counter it expires in microseconds and the
+#: bounded command is killed before it produced anything, which reads as "the guest
+#: said nothing" rather than as "the stub lied about time". Poll counts stay exact.
 _STUBS = """
 netstat() { cat "${NETSTAT_FIXTURE}"; }
-sleep() { _slept=$((_slept + 1)); }
+sleep() {
+    [ -n "${_IRIS_IN_BOUND}" ] && { command sleep "$@"; return $?; }
+    _slept=$((_slept + 1))
+}
 _slept=0
 """
 
@@ -72,7 +80,10 @@ _slept=0
 #: search is what decides.
 _NO_APPLET_STUBS = """
 netstat() { cat "${NETSTAT_FIXTURE}"; }
-sleep() { _slept=$((_slept + 1)); }
+sleep() {
+    [ -n "${_IRIS_IN_BOUND}" ] && { command sleep "$@"; return $?; }
+    _slept=$((_slept + 1))
+}
 _slept=0
 IRIS_TELNETD_CANDIDATES="/nonexistent/telnetd /also/missing/telnetd"
 """

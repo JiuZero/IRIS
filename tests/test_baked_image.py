@@ -178,6 +178,17 @@ class TestBuildBakedImage:
         with pytest.raises(RuntimeError, match="Docker build failed: boom"):
             _build_baked_image()
 
+    def test_build_never_contacts_the_registry_for_the_base_image(self, fake_docker):
+        """The base is our own iris-emulate, already on the daemon.
+
+        With buildkit's default pull behaviour a mirror outage (403 from a
+        registry-mirror) fails the build, so a shell fix cannot be rebuilt at all —
+        which looks like "the fix did not work" rather than "the mirror is down".
+        """
+        _build_baked_image()
+        build_cmd = next(c for c in fake_docker.commands if c[1] == "build")
+        assert "--pull=false" in build_cmd
+
 
 class TestDropOtherBakedTags:
     def test_removes_other_tags_and_keeps_the_current_one(self, fake_docker):

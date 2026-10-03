@@ -54,6 +54,26 @@ RCS="${HOST_ETC}/init.d/rcS"
 MARKER='#IRIS-NETFIX-SYSINIT'
 ENTRY="::sysinit:${GUEST_ETC}/init.d/iris_net_fix_bg"
 
+# ------------------------------------------------------- launcher path baked in
+# The launcher has to find its sibling, and every shell-side way of doing that is
+# missing on at least one real guest: no dirname applet, and — measured on the Tenda
+# DIR-868L — `${0%/*}` expanding to the empty string, which left the fixup to be
+# looked up at /iris_net_fix and the launcher exiting 0 having run nothing. So the
+# install path goes in here, where a full shell is available, and the guest does no
+# parsing at all. Leaving the placeholder in place would silently restore that
+# failure, so it is checked rather than assumed.
+if [ -f "${BG_SCRIPT}" ]; then
+    if sed -i "s|@IRIS_GUEST_INIT_D@|${GUEST_ETC}/init.d|g" "${BG_SCRIPT}" \
+       && ! grep -q '@IRIS_GUEST_INIT_D@' "${BG_SCRIPT}"; then
+        echo "launcher path baked into ${GUEST_ETC}/init.d/iris_net_fix_bg"
+    else
+        echo "WARNING: could not bake the install path into the launcher;"
+        echo "  it will look for its sibling at the filesystem root and find nothing"
+    fi
+else
+    echo "no ${BG_SCRIPT}, launcher path not baked in"
+fi
+
 # ------------------------------------------------------------------ init family
 # procd and BusyBox init read the same file, but procd's sysinit channel cannot
 # take a second entry, and injecting one there does not merely lose the race — it
@@ -175,13 +195,46 @@ fi
 # script stands down on its lock if the sysinit hook already won the race — and
 # covers those firmwares. On procd there is no rcS file to append to, and the
 # branch above already put the fallback on the channel procd does drive.
+#
+# When there is no inittab at all, the sysinit hook above was skipped and this
+# tail hook is the ONLY channel the fallback gets — so appending to the end of
+# rcS is not good enough. Tenda DIR-868L's rcS ends with `/etc/init0.d/rcS`, a
+# handoff script that blocks or loops, and anything appended underneath it is
+# starved the same way an entry after a stuck rcS sequence would be. In that
+# configuration the hook is inserted *before the final non-blank, non-comment
+# line* instead, so the vendor's own S??* chain still runs first (the network is
+# configured by the time the fallback wakes) but no trailing handoff can eat it.
 if [ ! -f "${RCS}" ]; then
     echo "no ${RCS}, rcS fallback hook skipped"
 elif [ ! -f "${BG_SCRIPT}" ]; then
     echo "iris_net_fix_bg missing at ${BG_SCRIPT}, rcS fallback hook skipped"
 elif grep -q 'iris_net_fix_bg' "${RCS}"; then
     echo "rcS fallback hook already present"
-else
+elif [ -f "${INITTAB}" ]; then
     printf '\n/bin/sh %s/init.d/iris_net_fix_bg\n' "${GUEST_ETC}" >> "${RCS}"
     echo "iris_net_fix_bg appended to rcS"
+else
+    if awk -v entry="/bin/sh ${GUEST_ETC}/init.d/iris_net_fix_bg" '
+            { lines[NR] = $0 }
+            END {
+                last = 0
+                for (i = NR; i >= 1; i--) {
+                    s = lines[i]
+                    sub(/^[ \t]+/, "", s)
+                    if (s != "" && s !~ /^#/) { last = i; break }
+                }
+                for (i = 1; i <= NR; i++) {
+                    if (i == last) { print entry }
+                    print lines[i]
+                }
+                if (!NR) { print entry }
+            }
+        ' "${RCS}" > "${RCS}.iris"; then
+        mv "${RCS}.iris" "${RCS}"
+        chmod +x "${RCS}"
+        echo "iris_net_fix_bg inserted before the final non-comment line of rcS (no inittab to hook)"
+    else
+        rm -f "${RCS}.iris"
+        echo "WARNING: could not insert boot hook into rcS (no inittab); guest may get no network/web fallback"
+    fi
 fi

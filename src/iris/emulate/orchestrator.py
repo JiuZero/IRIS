@@ -51,21 +51,43 @@ _NET_DRIVER_HINTS = ("virtio_net", "e1000", "rtl8139", "pcnet32", "ne2k", "8139c
 #: An eth* name on its own proves nothing: firmwares print ``nvram_set: wan_ifname
 #: = "eth0"`` while their config is being read, long before any interface exists.
 #: Only a mention that reports something *about* the interface counts.
+#:
+#: The ``device ethN`` and ``dev:ethN`` forms are the ones a rehosted router actually
+#: produces. Tenda DIR-868L was reported here as "no network driver registered in
+#: the guest" while its log carried all of these -- the bridge enslaving the VLAN
+#: subinterface, both interfaces entering promiscuous mode, and 8021q installing its
+#: hardware filter. A diagnosis that contradicts the log it was derived from sends
+#: whoever reads it after a NIC that does not exist.
 _NIC_PRESENT = re.compile(
     r"^\s*(?:\[[\d.]+\]\s+)?eth\d+:"      # kernel probe: "eth0: link becomes ready"
     r"|eth\d+:\s+Link encap"               # ifconfig
     r"|\bdev eth\d+\b"                     # addrconf / "ip addr add"
+    r"|\bdevice eth\d+(?:\.\d+)?\b"        # "... entered promiscuous mode", 8021q filter
+    r"|\bdev:eth\d+(?:\.\d+)?\b"           # "br_add_if: br:br0 dev:eth0.1"
     r"|IRIS-NETFIX:.*\beth\d",             # the guest-side fallback saw it
     re.MULTILINE,
 )
+
+#: ...unless the same line says the interface is not there, which is the one form
+#: of these that argues the opposite. Without this the promiscuous-mode rule would
+#: read "device eth0 not found" as proof of a NIC.
+_NIC_ABSENT = re.compile(r"eth\d+(?:\.\d+)?\)?\s*(?:not found|no such device)", re.IGNORECASE)
 
 #: Any of these means some interface other than loopback holds an IP address.
 #: ``inet_insert_ifa`` is a kernel printk that busybox-platform firmwares rarely
 #: emit at all, so relying on it alone would report "nobody assigned an address"
 #: even for a guest whose network came up fine — checked instead for the two
 #: signals that do show up: the guest-side fallback's own report, and ifconfig.
+#:
+#: The first form matches FirmAE's own rewording of that printk, which inserts the
+#: calling process between the symbol and its arguments:
+#: ``firmadyne: __inet_insert_ifa[PID: 10045 (ip)]: device:br0 ifa:0x0100a8c0``.
+#: Matching only the bare ``inet_insert_ifa: dev X`` spelling missed every one of
+#: those lines, so a guest that had configured 192.168.0.1 on its bridge was
+#: reported as never having been given an address.
 _HAS_NON_LO_IP = re.compile(
-    r"inet_insert_ifa:\s*dev\s+(?!lo\b)"
+    r"inet_insert_ifa\[[^\]]*\]:\s*device:(?!lo\b)\S+"
+    r"|inet_insert_ifa:\s*dev\s+(?!lo\b)"
     r"|IRIS-NETFIX:\s*final:\s+(?!lo\b)\S+\s+up with IP"
     r"|inet addr:(?!127\.0\.0\.1)\d"
 )
@@ -161,7 +183,8 @@ def _boot_findings(serial_log: str, *, reboots: int) -> list[Failure]:
         ))
 
     has_nic = any(hint in serial_log for hint in _NET_DRIVER_HINTS) \
-        or _NIC_PRESENT.search(serial_log)
+        or any(_NIC_PRESENT.search(line) and not _NIC_ABSENT.search(line)
+               for line in serial_log.splitlines())
     if not has_nic:
         findings.append(Failure(
             FailureKind.NO_NETWORK_DRIVER,
@@ -345,6 +368,62 @@ def _run(cmd: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, env=_env(), timeout=timeout, check=False)
 
 
+def _host_address_on_guest_subnet(guest_ip: str) -> str | None:
+    """An address for the host bridge that the guest will accept packets from.
+
+    run_qemu.sh puts the host at ``<assumed guest ip> - 1`` with a /16, on the
+    assumption that the guest will be at that address. That assumption holds for
+    the firmwares whose own idea of "my network" is the network IRIS set up, and
+    fails for a router, which brings up a LAN of its own on a subnet of its own
+    choosing. Tenda DIR-868L measured exactly that: br0 at 192.168.0.1/24 while
+    the bridge sat at 192.168.1.254/16, so every packet the host sent arrived
+    with a source address outside the guest's subnet and was dropped without a
+    reply. The symptom is not a dropped packet, it is a total one -- ARP answered
+    (the neighbour entry went REACHABLE), ICMP unanswered, TCP connect refused by
+    timeout, and a guest web server that had demonstrably bound :80.
+
+    .254 rather than .253 or .1 because the last octet is the one the firmware is
+    least likely to have handed out or configured, and it must not collide with the
+    guest itself. /24 because that is what a router LAN is in practice, and because
+    the only statement of the guest's address that IRIS can read -- the kernel's
+    own ``inet_insert_ifa`` printk -- carries no prefix length. A LAN on some other
+    prefix is a known limit of this approach, not a case it handles.
+    """
+    parts = guest_ip.split(".")
+    if len(parts) != 4 or not all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+        return None
+    if parts[3] == "254":
+        # The guest would answer to this address itself.
+        return ".".join(parts[:3] + ["253"])
+    return ".".join(parts[:3] + ["254"])
+
+
+def _place_host_on_guest_subnet(container_name: str, iid: int, guest_ip: str) -> bool:
+    """Give the container's bridge an address inside the guest's own subnet.
+
+    A no-op returning True when the bridge is already inside that subnet, which is
+    the common case: the point is only to cover a guest whose LAN is not the one
+    IRIS assumed. Best-effort by design -- the address is an optimisation of the
+    guest's packet filter, not a requirement for the port forward to exist, so a
+    failure here must not be reported as a boot failure.
+    """
+    host_ip = _host_address_on_guest_subnet(guest_ip)
+    if host_ip is None:
+        return False
+    bridge = f"br{iid}"
+
+    add = _run(["docker", "exec", container_name, "ip", "addr", "add",
+                f"{host_ip}/24", "dev", bridge], timeout=10)
+    if add.returncode == 0:
+        logger.info(f"Placed host at {host_ip}/24 on {bridge}, inside the guest's subnet")
+        return True
+    # "File exists" is success for our purpose: the address is already there.
+    if "File exists" in (add.stderr or ""):
+        return True
+    logger.debug(f"could not add {host_ip}/24 to {bridge}: {add.stderr.strip()}")
+    return False
+
+
 def _baked_sources(project_root: Path) -> list[Path]:
     """Everything ``Dockerfile.baked`` bakes into the image, in a stable order."""
     sources = [project_root / "docker" / "emulate" / "Dockerfile.baked"]
@@ -391,7 +470,14 @@ def _build_baked_image() -> str:
     if result.returncode == 0:
         return image_name
     logger.info(f"Building baked emulation image {image_name} from current scripts...")
-    result = _run(["docker", "build", "-t", image_name, "-f", str(dockerfile), str(project_root)], timeout=600)
+    # --pull=false: the base image is this project's own iris-emulate, already on
+    # the daemon. buildkit would otherwise contact the registry on every build,
+    # which is pointless here and turns any mirror outage into a build failure —
+    # exactly when a script fix needs to be rebuilt to be tested at all.
+    result = _run(
+        ["docker", "build", "--pull=false", "-t", image_name, "-f", str(dockerfile), str(project_root)],
+        timeout=600,
+    )
     if result.returncode != 0:
         raise RuntimeError(f"Docker build failed: {result.stderr}")
     _drop_other_baked_tags(keep=image_name)
@@ -747,6 +833,7 @@ def _emulate_firmware(
     boot_deadline = time.time() + timeout_sec
     guest_ip = "192.168.1.1"
     socat_updated = False
+    placed_subnets: set[str] = set()
     progress = StatusLine()
     while time.time() < boot_deadline:
         time.sleep(5)
@@ -767,24 +854,37 @@ def _emulate_firmware(
             log_cmd = ["docker", "exec", container_name, "grep", "-a", "inet_insert_ifa",
                        f"/work/scratch/{iid}/qemu.serial.log"]
             log_res = subprocess.run(log_cmd, capture_output=True, text=True, env=_env(), timeout=10, check=False)
+            detected = None
             for line in log_res.stdout.splitlines():
                 if "device:lo" not in line and "ifa:0x" in line:
                     m = re.search(r"ifa:0x([0-9a-f]+)", line)
                     if m:
                         raw = int(m.group(1), 16)
                         if is_little_endian(arch):
-                            ip = f"{raw & 0xFF}.{(raw >> 8) & 0xFF}.{(raw >> 16) & 0xFF}.{(raw >> 24) & 0xFF}"
+                            detected = f"{raw & 0xFF}.{(raw >> 8) & 0xFF}.{(raw >> 16) & 0xFF}.{(raw >> 24) & 0xFF}"
                         else:
-                            ip = f"{(raw >> 24) & 0xFF}.{(raw >> 16) & 0xFF}.{(raw >> 8) & 0xFF}.{raw & 0xFF}"
-                        if ip != guest_ip and not ip.startswith("127."):
-                            guest_ip = ip
-                            progress.clear()
-                            logger.info(f"Detected guest IP: {guest_ip}, forwarding :{host_port}...")
-                            _run(["docker", "exec", container_name, "pkill", "-f", "socat.*TCP"], timeout=5)
-                            _run(["docker", "exec", "-d", container_name, "socat",
-                                  f"TCP-LISTEN:{host_port},reuseaddr,fork", f"TCP:{guest_ip}:80"], timeout=5)
-                            socat_updated = True
-                            break
+                            detected = f"{(raw >> 24) & 0xFF}.{(raw >> 16) & 0xFF}.{(raw >> 8) & 0xFF}.{raw & 0xFF}"
+                        break
+            # Placed for whichever address is current, not only once an address has
+            # been read out of the log: the placement is a precondition for the guest
+            # answering at all, and a guest that never prints the printk this loop
+            # reads would otherwise never get it. Tracked by address because the
+            # detected one can change under us, and re-adding is not free.
+            for target in (detected, guest_ip):
+                if target and not target.startswith("127.") and target not in placed_subnets:
+                    _place_host_on_guest_subnet(container_name, iid, target)
+                    placed_subnets.add(target)
+            if detected and detected != guest_ip and not detected.startswith("127."):
+                guest_ip = detected
+                progress.clear()
+                # Before the forward, not after: the forward is only useful once the
+                # guest will answer packets from this host, and a router whose LAN is
+                # not the assumed subnet will not.
+                logger.info(f"Detected guest IP: {guest_ip}, forwarding :{host_port}...")
+                _run(["docker", "exec", container_name, "pkill", "-f", "socat.*TCP"], timeout=5)
+                _run(["docker", "exec", "-d", container_name, "socat",
+                      f"TCP-LISTEN:{host_port},reuseaddr,fork", f"TCP:{guest_ip}:80"], timeout=5)
+                socat_updated = True
 
         check_result = subprocess.run(
             ["docker", "exec", container_name, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",

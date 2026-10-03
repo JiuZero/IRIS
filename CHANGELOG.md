@@ -4,6 +4,88 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.12] - 2026-10-03
+
+按 0.3.11 与 FirmAE 的实测对比结论回头修缺陷。**同语料仿真成功率从 2/5 变为 3/5：
+DIR-868L 由失败转为 HTTP 200 @53.0s**，且过程中推翻了上一轮自己写下的两条结论。
+
+### 修复
+
+- **宿主桥必须在 guest 自己的子网内**（`orchestrator._place_host_on_guest_subnet`）。
+  `run_qemu.sh` 把宿主放在「假定的 guest 地址减一、掩码 /16」，这对路由器不成立：
+  DIR-868L 的 LAN 是 `192.168.0.0/24`，而宿主在 `192.168.1.254/16`。
+  分层探活实测：路由正确、ARP `REACHABLE`（L2 通）、ping 无应答、curl `000`；
+  在同一座桥上 `ip addr add 192.168.0.254/24` 后 ping 与 curl 立刻正常。
+  即帧到了、guest 应答了，但源地址不在它的子网内被静默丢弃——路由器本就如此设计。
+  内核会自行按目的子网挑选源地址，因此**已经跑着的 socat 转发无需改动**即生效。
+  两条工程细节：加地址在起转发**之前**（否则转发存在但打不通）；`ip addr add`
+  的 `File exists`（退出码 2）视为成功，真实失败只记 debug 不升级为 boot 失败。
+  **已知边界**：掩码固定 /24，因为 IRIS 唯一能读到的地址声明（内核 `inet_insert_ifa`
+  printk）不带前缀长度。这是假设不是推导，非 /24 的 guest LAN 不覆盖。
+- **两个诊断探针同时误判**（`orchestrator._NIC_PRESENT` / `_HAS_NON_LO_IP`）。
+  前者只认行首 `eth0:` 与 `dev eth0`，不认 `device eth0 entered promiscuous mode`、
+  `dev:eth0.1`、`8021q: ... device eth0`；后者只认 `inet_insert_ifa: dev X`，
+  不认 FirmAE 改写过的 `__inet_insert_ifa[PID: 10045 (ip)]: device:br0`。
+  两者**互相印证**，于是 DIR-868L 被写成「没有网卡且没有地址」，而它其实 br0=192.168.0.1、
+  httpd 已绑 `:80`。补齐拼写，并加排除规则：同一行写着 `not found` / `no such device`
+  时不计入网卡证据。
+- **`iris_net_fix_bg.sh` 末尾缺换行**。BusyBox ash 丢弃脚本最后一行，而那正是启动兜底的
+  那一行；launcher 在此之前完全静默，症状表现为「boot hooks 没跑」而 hook 安装其实正确。
+- **guest 脚本注释里的 shell 元字符会被当代码解析**。实测 `iris_net_fix.sh` 头部注释
+  结尾的 `&` 让脚本停在第一条语句之前（逐行探针定位）。已清理两个 guest 脚本注释中的
+  反引号、`${`、`$(`、`&`、`<`、`>` 与非 ASCII 字符。
+- **残缺 BusyBox 的参数展开**。该固件上 `${var%/*}` 展开为空、`${var:-x}` 返回空，
+  `$(...)` 行为异常。默认值写法全部改为 `$VAR` + `[ -n "$VAR" ] || VAR=x`；
+  bg launcher 求自身目录改为宿主侧 `sed` 烘焙路径占位符；`acquire_lock` 取父目录
+  改用 `sed`。新增守卫禁止这两个家族的展开重新出现（正则含数字变量名）。
+- **`head` applet 在该固件上不存在**。新增纯内建的 `first_line()`，替换 4 处 `head`。
+- **`/dev/console` 显式打开在该固件上失败**，且打不开的重定向会把命令一起带走。
+  `log()` 改为两通道回退：先显式写 console，失败则继承 stdout。
+- **baked image 加 `--pull=false`**：拉取失败时降级为本地重建而非整轮失败。
+  这是防御性加固，不是某个实测故障的修复。
+
+### 诊断结论更正
+
+- **WRT1200AC / R7800 的根因已定位，且两台同因**：t≈1.4s eth0 拿到 192.168.1.1，
+  t≈102–122s `netifd (1056): undefined instruction: pc=c01abe18` +
+  `kernel BUG at firmadyne_kernel-v4.1/lib/nlattr.c:41`（`PC is at validate_nla`、
+  `LR is at nla_parse`，`e7f001f2` 是 `udf` 陷阱而非真的非法指令）。
+  两台的 `pc` 与文件行号完全相同。后果链：netifd 在持有 rtnl 锁时被内核 BUG 打死 →
+  之后 `ifconfig eth0 192.168.1.1` 永久阻塞（实测卡满 5s `run_bounded` 上限）→
+  guest 无地址。**属重宿主内核自身的缺陷，不在 IRIS 代码内可修。**
+  上一版写的「kernel panic」与「netifd 持有 device lock」分别是症状与错误归因。
+- **DIR-868L 上兜底脚本原理上跑不起来**，已如实记录为能力边界：该固件的 BusyBox 是
+  厂商极简定制版（缺 `head tail sort uniq dirname iptables nc` 等 applet，
+  `${var%/*}` 展开为空），**且 ash 不支持 shell 函数定义**——只要脚本里存在任何函数
+  定义，其后代码就不执行，而 `iris_net_fix.sh` 通体基于函数。
+  但这台固件不需要兜底即可成功（转发直接指向 guest 自己的 httpd），
+  因此不为此重写无函数版本。
+
+### 实测（iid 6711–6715，`--timeout 300/240`）
+
+| 固件 | arch | 结果 | 耗时 |
+|------|------|------|------|
+| Newifi D2 | mipsel | ✅ HTTP 200 | 62.2s |
+| Archer C7 v2 | mipseb | ✅ HTTP 200 | 49.9s |
+| DIR-868L revB | armel | ✅ HTTP 200（0.3.12 由失败转成功） | 53.0s |
+| WRT1200AC | armel | ❌ HTTP 000 | 312.8s |
+| R7800 | armel | ❌ HTTP 000 | 246.0s |
+
+### 测试
+
+- 新增 `tests/test_guest_subnet_placement.py`（16 项）与
+  `tests/test_boot_diagnosis.py::TestGuestNicAndAddressProbes`（7 项，样本为真实串口日志行）。
+- guest 脚本守卫扩到 16 项，新增末尾换行、注释元字符（含非 ASCII 分支）、
+  默认值展开三类；新增 `first_line` 与 `log()` 回退的 3 项测试。
+- 全量 `pytest 818 passed, 4 skipped`，`ruff` 全绿。
+- 本轮新增守卫均做变异验证：注释里放非 ASCII、恢复 `${VAR:-}` 形式，先变红 = 有效。
+
+### 文档
+
+- `docs/08-与FirmAE对比.md`：§3 表、§3.1（两条结论的推翻过程与证据链）、
+  §5、§6.2–6.4、§7、§8、§9 全部按实测重写，并新增「本文被修订过两次结论」的抬头声明。
+- `docs/eval-log.md`：M1 表按 0.3.12 重跑更新，失败原因更正为内核 BUG 而非 panic。
+
 ## [0.3.11] - 2026-10-03
 
 为了把 IRIS 与 FirmAE 放在同一份实测数据上对比，本轮先在 WSL2 里源码构建了 FirmAE

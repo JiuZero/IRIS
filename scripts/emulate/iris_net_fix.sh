@@ -2,32 +2,75 @@
 # IRIS network/service fallback, injected into the guest rootfs at /etc/init.d/iris_net_fix.
 # Two invocation styles must both work:
 #   - OpenWrt-style images source it via /etc/rc.common (START=99; boot())
-#   - arm64 generic-kernel channel calls it directly: /bin/sh /etc/init.d/iris_net_fix &
+#   - arm64 generic-kernel channel runs it directly, backgrounded by the caller
 # Everything that matters is logged to /dev/console so it lands in qemu.serial.log.
 
 START=99
 
 # Overridable only so the lock can be exercised against a scratch directory; the
-# guest always takes the default.
-LOCK_DIR=${IRIS_NET_FIX_LOCK_DIR:-/var/run/.iris_net_fix.lock}
+# guest always takes the default. Spelled as an explicit test rather than the
+# shell's own default-value expansion, which the Tenda DIR-868L busybox drops to
+# the empty string.
+LOCK_DIR=$IRIS_NET_FIX_LOCK_DIR
+[ -n "${LOCK_DIR}" ] || LOCK_DIR=/var/run/.iris_net_fix.lock
 
 # Where the log lines go. /dev/console is the guest's serial console and the only
 # thing qemu.serial.log captures, so it stays the default; overridable because
 # the same script is driven off-target by the test suite, where the open fails
 # outright. Truncating rather than appending is not a hazard: /dev/console is a
-# character device, so ">" has no truncate to do — and ">>" is not an option,
-# because opening a console device with O_APPEND fails outright, which silenced
-# every line the fallback ever wanted to say.
-CONSOLE=${IRIS_CONSOLE:-/dev/console}
+# character device, so a truncating redirect has no truncate to do -- and appending
+# is not an option, because opening a console device with O_APPEND fails outright,
+# which silenced every line the fallback ever wanted to say.
+CONSOLE=$IRIS_CONSOLE
+[ -n "${CONSOLE}" ] || CONSOLE=/dev/console
+
+# The kernel's own network tables, which the probes below read instead of asking
+# a socket-based tool. Overridable only so the test suite can drive the real
+# functions against a fixture; the guest always reads the live ones.
+FIB_TRIE=$IRIS_FIB_TRIE
+[ -n "${FIB_TRIE}" ] || FIB_TRIE=/proc/net/fib_trie
+TCP_TABLE=$IRIS_TCP_TABLE
+[ -n "${TCP_TABLE}" ] || TCP_TABLE=/proc/net/tcp
 
 log() {
-    echo "IRIS-NETFIX: $*" > "${CONSOLE}" 2>/dev/null
+    # Two channels, in order, and the second costs nothing where the first works.
+    #
+    # Opening the console device explicitly fails on the Tenda DIR-868L, and a
+    # redirection that cannot be opened takes its command down with it -- so every
+    # line this script had to say was lost, with no error anywhere. The surrounding
+    # rcS printed to the same console through the descriptor init already handed it,
+    # which is why the guest log showed the boot chain talking and the fallback
+    # silent. Where the device does open, the first echo succeeds and the fallback
+    # never runs; the last-resort echo still carries the discard of stderr so a
+    # closed descriptor cannot turn a log line into a second failure.
+    echo "IRIS-NETFIX: $*" > "${CONSOLE}" 2>/dev/null \
+        || echo "IRIS-NETFIX: $*" 2>/dev/null
+}
+
+# The first line of stdin, or nothing.
+#
+# This exists because head(1) is not in every vendor BusyBox. The Tenda DIR-868L
+# ships a reduced build with no head applet at all -- running it there prints
+# "head: applet not found" and yields no output, so a pipeline into head reads as
+# "nothing matched" rather than "cannot ask". That distinction is the whole job of
+# the port probes below: the empty answer is what makes this script start its own
+# web server on a guest whose vendor server is already listening.
+#
+# read builtin is a shell builtin in every ash this script has to run in, so
+# reading the first line needs no external command at all. Returns 1 when stdin
+# is empty, so callers can tell "no line" from "a line that happens to be blank".
+first_line() {
+    while IFS= read -r _fl_line; do
+        printf '%s\n' "${_fl_line}"
+        return 0
+    done
+    return 1
 }
 
 # Two channels can reach this script: inittab's ::sysinit: (which does not wait
 # for the vendor rcS chain) and the tail of rcS itself (which only runs if that
 # chain finished). mkdir is atomic on every filesystem this touches, so it is
-# enough to keep the loser out — without it both would probe :80, both would
+# enough to keep the loser out -- without it both would probe :80, both would
 # find it empty, and two goahead processes would fight over the port.
 #
 # Returns 0 when the fixup may proceed, 1 when another instance holds the lock.
@@ -35,16 +78,19 @@ log() {
 # conflict: standing down there would silently disable the only fallback, which
 # is the failure this whole script exists to prevent.
 acquire_lock() {
-    # The parent is created with -p (some firmwares ship no /var/run) but the
-    # lock itself with a plain mkdir, which is the atomic part: -p on the lock
-    # itself would report success to both racers.
+    # mkdir with -p for the parents (some firmwares ship no /var/run), then a
+    # plain mkdir for the lock itself, which is the atomic part: -p on the lock
+    # itself would report success to both racers -- and would also create the lock,
+    # which is the one thing the second caller has to be able to lose.
     #
-    # The parent path is stripped with parameter expansion rather than
-    # dirname(1): this busybox carries no dirname applet, so the command fails,
-    # the path collapses to the empty string, and the "parent" mkdir below
-    # silently creates nothing — leaving the lock to be taken inside a directory
-    # that was never made.
-    lock_parent=${LOCK_DIR%/*}
+    # The parent is named by stripping the last path component with sed rather than
+    # with a last-path-component expansion. That form measures *empty* on the Tenda
+    # DIR-868L -- an echo of it on a three-component path printed empty brackets
+    # there, a vendor BusyBox with part of ash's parameter expansion compiled out.
+# And dirname(1) is absent on the AC15. sed is present on both, and its output
+    # for a path with no slash in it is the input unchanged, which is what the
+    # normalisation on the next line is there to catch.
+    lock_parent=$(printf '%s' "${LOCK_DIR}" | sed 's|/[^/]*/*$||')
     [ "${lock_parent}" = "${LOCK_DIR}" ] && lock_parent="."
     [ -n "${lock_parent}" ] || lock_parent="/"
     mkdir -p "${lock_parent}" 2>/dev/null
@@ -66,8 +112,116 @@ acquire_lock() {
     return 0
 }
 
-has_ip() {
-    ifconfig "$1" 2>/dev/null | grep -q "inet addr"
+guest_has_ipv4() {
+    # Reading /proc is not a style choice. The probe used to be
+    # ifconfig piped into a grep for the legacy address form, and that had two
+    # on real guests:
+    #
+    # * BusyBox changed its ifconfig output after v1.20 -- old builds print
+    #   measured failure modes on real guests:
+    #   the legacy output was inet addr:192.168.1.1 and the current one is
+    #   unconfigured.
+    # * Worse, ifconfig never returned at all on the Linksys WRT1200AC image. The
+    #   console shows the fallback's own "probing eth0" and then nothing for the rest
+    #   of the run: ifconfig opens an AF_INET socket and asks SIOCGIFCONF, which walks
+    #   every network device, and netifd holds eth0's device lock while it retries
+    #   wpa_supplicant/hostapd about once a second, so the walk never completes. A
+    #   probe that can hang cannot sit in the boot path -- everything below it
+    #   (assigning the fallback address, opening the command channel, starting a web
+    #   server) is skipped, which is precisely how a guest ends up with no address.
+    #   /proc is a file read: it answers or it does not, and never waits on another
+    #   process.
+    #
+    # /proc/net/fib_trie is the table that answers it. /proc/net/route does not: on
+    # OpenWrt 24.10 guests it carries the header row and no data at all (measured on
+    # Newifi D2 and WRT1200AC, both of which did have an address on eth0), so a probe
+    # built on it reports every guest as unconfigured and the fallback then assigns
+    # an address the vendor chain already assigned -- which on a router whose LAN is
+    # 192.168.0.0/24 means a second, conflicting address on the same wire.
+    #
+    # fib_trie lists local addresses as a bar-or-plus followed by dashes and an
+    # address, then a masked row ending in host LOCAL. The marker row carries bars
+    # and indentation of its own, so the address is the last field rather than the
+    # second, and any row without a marker clears the candidate -- otherwise the
+    # all-zeroes address of the default branch is read as the address of whatever
+    # preceded it. 127/8 is loopback and does not count: a guest whose only address is
+    # 127.0.0.1 is exactly the guest this fallback exists for. The question is
+    # deliberately "does the guest have an address", not "which interface has it" --
+    # the fallback only ever assigns to eth0 and fib_trie does not name interfaces,
+    # so asking per interface bought nothing but the socket lookup that hangs.
+    awk '
+        /(\||\+)-- / { candidate = $NF; next }
+        {
+            if (candidate != "" && $0 ~ /host LOCAL/ \
+                && candidate ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ \
+                && candidate !~ /^127\./) {
+                found = 1
+            }
+            candidate = ""
+        }
+        END { exit found ? 0 : 1 }
+    ' "${FIB_TRIE}" 2>/dev/null
+}
+
+# Wall-clock bound for the calls that open a socket, which on some guests never
+# return.
+#
+# Two measured cases on the Linksys WRT1200AC image, both on the same device lock:
+# ifconfig on eth0 never returned, and on a later run so did the netstat call that
+# the channel report prints after everything else has already failed -- a
+# diagnostic that hangs is the worst case of all, because it is the last thing that
+# would have said anything at all. iptables goes through netlink for the same
+# reason, and a write that follows a read on the same interface cannot be assumed
+# safe when the read hung.
+#
+# The read paths that *could* be rewritten were rewritten rather than bounded:
+# guest_has_ipv4 and port_listening_line answer from /proc, which needs no timeout at all.
+#
+# The guest's busybox carries the timeout applet but does not link it into the
+# path, so the bound is assembled from what any shell has: the call runs in the
+# background, the parent polls, and anything still alive at the bound is killed and
+# reported as 124 -- the status GNU timeout uses, so the call sites read the way
+# they do with the real tool.
+#
+# Five seconds, not ten: a working socket call returns in microseconds and a
+# blocked one is blocked on a lock netifd is holding across a retry cycle, so a
+# longer bound buys nothing and costs the guest boot time the web fallback still
+# needs. On WRT1200AC the five bounded calls below were spending fifty seconds of
+# a twenty-second budget.
+BOUNDED_TIMEOUT=$IRIS_BOUNDED_TIMEOUT
+[ -n "${BOUNDED_TIMEOUT}" ] || BOUNDED_TIMEOUT=5
+
+# Prints the bounded command's stdout, returns its status (or 124 when it hung).
+# Only stdout is captured. The call sites that need stderr gone say so with their
+# own stderr discard, and merging it here would break the ones whose contract is a
+# single line of answer -- port_listening_line would start returning whatever
+# netstat complained about instead of the listener it is asked for.
+run_bounded() {
+    _rb_tmp=$TMPDIR
+    [ -n "${_rb_tmp}" ] || _rb_tmp=/tmp
+    _rb_out="${_rb_tmp}/iris_net_fix.bounded.$$"
+    "$@" > "${_rb_out}" &
+    _rb_pid=$!
+    _rb_waited=0
+    while [ "${_rb_waited}" -lt "${BOUNDED_TIMEOUT}" ] && kill -0 "${_rb_pid}" 2>/dev/null; do
+        # The wait here is the bound itself, so it has to be real time. Tests that
+        # replace sleep with a poll counter set this to stand the replacement down;
+        # on a guest nothing reads it.
+        _IRIS_IN_BOUND=1
+        sleep 1
+        _IRIS_IN_BOUND=0
+        _rb_waited=$((_rb_waited + 1))
+    done
+    if kill -0 "${_rb_pid}" 2>/dev/null; then
+        kill -9 "${_rb_pid}" 2>/dev/null
+        _rb_rc=124
+    else
+        wait "${_rb_pid}" 2>/dev/null
+        _rb_rc=$?
+    fi
+    cat "${_rb_out}" 2>/dev/null
+    rm -f "${_rb_out}"
+    return "${_rb_rc}"
 }
 
 # Busybox netstat is unreliable here: several vendor builds print the service
@@ -83,16 +237,39 @@ web_running() {
     return 1
 }
 
-# The netstat line that made this script believe a port was bound. Empty when
-# nothing matched. Kept separate from the yes/no answer because on a real guest
-# the text that satisfied this probe was an unrelated IPv6 address rather than a
-# listener, and there is no way to tell those apart without seeing the line.
+# The line that made this script believe a port was bound. Empty when nothing
+# matched. Kept separate from the yes/no answer because on a real guest the text
+# that satisfied this probe was an unrelated IPv6 address rather than a listener,
+# and there is no way to tell those apart without seeing the line.
+#
+# /proc/net/tcp is read first for the reason spelled out in guest_has_ipv4:
+# netstat needs a
+# socket too, so it inherits ifconfig's ability to hang the boot hook. When
+# /proc/net/tcp is readable the answer is authoritative and netstat is not asked --
+# falling back after a real "not bound" would reintroduce the hang this avoids.
+# netstat remains for guests whose kernel predates /proc/net/tcp.
 port_listening_line() {
     _pll_dec=$1
     _pll_hex=$(printf '%04X' "${_pll_dec}" 2>/dev/null)
-    netstat -lan 2>/dev/null \
+    if [ -r "${TCP_TABLE}" ]; then
+        # Column 2 is local_address as HEXADDR:HEXPORT and column 4 is the state,
+        # where 0A is TCP_LISTEN. Ports in /proc/net/tcp are big-endian hex, which
+        # is what printf produced above.
+        awk -v want="${_pll_hex}" '
+            NR > 1 {
+                if (split($2, addr, ":") == 2 && toupper(addr[2]) == want && $4 == "0A") {
+                    print
+                    found = 1
+                    exit
+                }
+            }
+            END { exit found ? 0 : 1 }
+        ' "${TCP_TABLE}" 2>/dev/null
+        return $?
+    fi
+    run_bounded netstat -lan 2>/dev/null \
         | grep -E "[:.]${_pll_dec}([[:space:]]|$)|[:.]${_pll_hex}([[:space:]]|$)" \
-        | head -n 1
+        | first_line
 }
 
 # Whether a TCP port is bound, as far as netstat's own output goes. Takes the port
@@ -116,15 +293,22 @@ port80_listening() {
 # Searched by absolute path for the same reason telnetd is: PATH in a firmware
 # guest is whatever the vendor's init left behind, and a guest that ships nc
 # outside PATH is a guest this probe would call dead.
-: "${IRIS_NC_CANDIDATES:=/bin/nc /usr/bin/nc /bin/netcat /usr/bin/netcat}"
-: "${IRIS_TIMEOUT_CANDIDATES:=/bin/timeout /usr/bin/timeout}"
+# Both lists are spelled as explicit tests rather than as the shell's own
+# assign-if-unset expansion: that is the same family of parameter expansion that
+# measures empty on the Tenda DIR-868L, and an empty candidate list here would
+# read as "the guest has no client", which is the answer this probe is trying to
+# earn rather than assume.
+IRIS_NC_CANDIDATES=$IRIS_NC_CANDIDATES
+[ -n "${IRIS_NC_CANDIDATES}" ] || IRIS_NC_CANDIDATES="/bin/nc /usr/bin/nc /bin/netcat /usr/bin/netcat"
+IRIS_TIMEOUT_CANDIDATES=$IRIS_TIMEOUT_CANDIDATES
+[ -n "${IRIS_TIMEOUT_CANDIDATES}" ] || IRIS_TIMEOUT_CANDIDATES="/bin/timeout /usr/bin/timeout"
 
 port_connects() {
     _pc_port=$1
     NC_PROBE=""
     for _pc_nc in ${IRIS_NC_CANDIDATES}; do
         [ -x "${_pc_nc}" ] || continue
-        # Wrapped in `timeout` when the guest has one: a client that connects
+        # Wrapped in a timeout when the guest has one: a client that connects
         # successfully and then waits on input would otherwise hang the boot hook
         # that is checking on it, and a hung fixup is a silent one.
         _pc_to=""
@@ -166,7 +350,8 @@ port_connects() {
 # Overridable for the same reason the other searches are: /proc/net/tcp is where
 # this evidence lives on a real guest and is a path that does not exist on the
 # host that has to drive it, so the test suite reads a fixture instead.
-: "${IRIS_PROC_NET_FILES:=/proc/net/tcp /proc/net/tcp6}"
+IRIS_PROC_NET_FILES=$IRIS_PROC_NET_FILES
+[ -n "${IRIS_PROC_NET_FILES}" ] || IRIS_PROC_NET_FILES="/proc/net/tcp /proc/net/tcp6"
 
 port_listening_in_proc() {
     _pip_dec=$1
@@ -178,7 +363,7 @@ port_listening_in_proc() {
         # Matched into a variable rather than piped straight out, so that "there is
         # one" and "it exited zero" are the same answer: left to the loop, a guest
         # whose files are all unreadable exits zero having printed nothing.
-        _pip_hit=$(grep -E ":${_pip_hex} [0-9A-F]+:[0-9A-F]{4} 0A" "${_pip_f}" 2>/dev/null | head -n 1)
+        _pip_hit=$(grep -E ":${_pip_hex} [0-9A-F]+:[0-9A-F]{4} 0A" "${_pip_f}" 2>/dev/null | first_line)
         if [ -n "${_pip_hit}" ]; then
             echo "${_pip_hit}"
             return 0
@@ -197,7 +382,7 @@ proc_net_evidence() {
     _pne_out=""
     for _pne_f in ${IRIS_PROC_NET_FILES}; do
         if [ -r "${_pne_f}" ]; then
-            _pne_out="${_pne_out}${_pne_f}:[$(head -n 3 "${_pne_f}" | tr '\n' '|' | cut -c1-200)] "
+            _pne_out="${_pne_out}${_pne_f}:[$(tr '\n' '|' < "${_pne_f}" 2>/dev/null | cut -c1-200)] "
         else
             _pne_out="${_pne_out}${_pne_f}:unreadable "
         fi
@@ -241,13 +426,13 @@ channel_live() {
 # because the layout is a per-firmware guess: a firmware with its own tree (the
 # AC15's /etc_ro) needs a different list, and hardcoding one set of absolute
 # paths is how the fallback ends up reading a file that is not there.
-: "${IRIS_NGINX_CONF:=/etc/nginx/conf/nginx.conf /etc_ro/nginx/conf/nginx.conf \
-/etc/nginx/nginx.conf /etc_ro/nginx/nginx.conf}"
+IRIS_NGINX_CONF=$IRIS_NGINX_CONF
+[ -n "${IRIS_NGINX_CONF}" ] || IRIS_NGINX_CONF="/etc/nginx/conf/nginx.conf /etc_ro/nginx/conf/nginx.conf /etc/nginx/nginx.conf /etc_ro/nginx/nginx.conf"
 
 # The port a vendor web server actually bound, when it is not 80.
 #
-# AC15's nginx.conf hardcodes `listen 8180;` and relies on a vendor redirector
-# (cfmd) to forward 80 -> 8180. That redirector segfaults within seconds of boot,
+# AC15's nginx.conf hardcodes a listen directive on 8180 and relies on a vendor redirector
+# (cfmd) to forward port 80 to 8180. That redirector segfaults within seconds of boot,
 # so the port the rehost depends on is served by nothing while nginx is healthy
 # and listening. Reading the config is the only way to learn the real port: the
 # supervisor that would normally own the redirect is exactly what is missing.
@@ -258,7 +443,7 @@ vendor_web_port() {
         # three commented examples (8000/443/somename) that would otherwise be
         # read as the real port.
         sed -n 's/^[[:space:]]*listen[[:space:]]\{1,\}\([0-9]\{1,\}\)[;[:space:]].*/\1/p' \
-            "${conf}" 2>/dev/null | head -1
+            "${conf}" 2>/dev/null | first_line
     done
 }
 
@@ -267,7 +452,7 @@ vendor_web_port() {
 # DNAT is tried first because it leaves the vendor's configuration untouched: if
 # the guest reboots or nginx restarts, the redirect still holds. Rewriting the
 # config is the fallback for the many firmwares whose busybox has no iptables
-# applet at all, and it is applied only when the config is writable — a
+# applet at all, and it is applied only when the config is writable -- a
 # read-only /etc_ro would otherwise turn every build into a silent no-op.
 redirect_to_port80() {
     target=$1
@@ -275,14 +460,14 @@ redirect_to_port80() {
         log "vendor web server is already on :80, nothing to redirect"
         return 0
     fi
-    if iptables -t nat -C PREROUTING -p tcp --dport 80 -j DNAT --to-destination ":${target}" 2>/dev/null; then
+    if run_bounded iptables -t nat -C PREROUTING -p tcp --dport 80 -j DNAT --to-destination ":${target}" 2>/dev/null; then
         log "port 80 already redirected to ${target}"
         return 0
     fi
-    if iptables -t nat -A PREROUTING -p tcp --dport 80 -j DNAT --to-destination ":${target}" 2>/dev/null; then
+    if run_bounded iptables -t nat -A PREROUTING -p tcp --dport 80 -j DNAT --to-destination ":${target}" 2>/dev/null; then
         # OUTPUT covers traffic originating inside the guest (a health check on
         # 127.0.0.1, say), which PREROUTING never sees.
-        iptables -t nat -A OUTPUT -p tcp --dport 80 -j DNAT --to-destination ":${target}" 2>/dev/null || true
+        run_bounded iptables -t nat -A OUTPUT -p tcp --dport 80 -j DNAT --to-destination ":${target}" 2>/dev/null || true
         log "DNAT :80 -> :${target} installed"
         return 0
     fi
@@ -293,7 +478,7 @@ redirect_to_port80() {
             # The captured group is the whole "  listen       " prefix, so the
             # replacement is just the group and the new port. Appending the
             # keyword again here would emit "listen listen 80;", which nginx
-            # refuses to start with — a silent loss of the only web server.
+            # refuses to start with -- a silent loss of the only web server.
             if sed -i "s/^\([[:space:]]*listen[[:space:]]\{1,\}\)${target};/\1 80;/" "${conf}" 2>/dev/null; then
                 log "nginx listen ${target} rewritten to 80 in ${conf}"
                 pkill -HUP nginx 2>/dev/null || true
@@ -308,7 +493,8 @@ redirect_to_port80() {
 
 #: Where a fallback shell may live, most likely first. Overridable only so the
 #: test suite can point the search at a stub; the guest always takes the default.
-: "${IRIS_TELNETD_CANDIDATES:=/bin/telnetd /sbin/telnetd /usr/bin/telnetd /usr/sbin/telnetd}"
+IRIS_TELNETD_CANDIDATES=$IRIS_TELNETD_CANDIDATES
+[ -n "${IRIS_TELNETD_CANDIDATES}" ] || IRIS_TELNETD_CANDIDATES="/bin/telnetd /sbin/telnetd /usr/bin/telnetd /usr/sbin/telnetd"
 
 # Start the guest's fallback shell and report what actually happened.
 #
@@ -342,7 +528,7 @@ ensure_command_channel() {
     # second one on top of theirs is how two daemons end up fighting over a port.
     [ -e /etc/rc.common ] && return 0
 
-    # Searched by absolute path rather than `command -v`, because PATH is whatever
+    # Searched by absolute path rather than through command -v, because PATH is
     # the vendor's init left behind: a guest that ships telnetd under /sbin with
     # /sbin absent from PATH is a guest with a shell and, by the PATH test, no
     # command channel. The path is also overridable so the test suite can point
@@ -406,8 +592,9 @@ ensure_command_channel() {
         return 0
     fi
 
-    # One log call, not two: log() writes with ">" because /dev/console is a
-    # character device, and on any other target each call would replace the last.
+    # One log call, not two: log() writes with a truncating redirect because
+    # /dev/console is a character device, and on any other target each call would
+    # replace the last.
     # The verdict and the evidence belong on the same line anyway -- the next
     # question about this firmware is "what did netstat claim", and a summary that
     # may be the thing that was wrong is no answer to it.
@@ -418,7 +605,7 @@ ensure_command_channel() {
     # daemon that had died would have taken its socket with it, so exactly one of
     # the two probes could be right. Raw output does not need reconciling: it
     # settles the question in a second, for whoever reads it.
-    log "telnetd (${_telnetd}) ran but nothing answers on :7002 after ${_waited}s: no command channel; why: ${CHANNEL_PROBE}; pidof said: [$(pidof telnetd 2>&1)]; netstat -lan said: [$(netstat -lan 2>/dev/null | tr '\n' '|')]; client said: [${NC_PROBE}]; bindv6only=${BIND_V6ONLY}"
+    log "telnetd (${_telnetd}) ran but nothing answers on :7002 after ${_waited}s: no command channel; why: ${CHANNEL_PROBE}; pidof said: [$(pidof telnetd 2>&1)]; netstat -lan said: [$(run_bounded netstat -lan 2>/dev/null | tr '\n' '|')]; client said: [${NC_PROBE}]; bindv6only=${BIND_V6ONLY}"
     return 1
 }
 
@@ -433,31 +620,38 @@ fixup() {
     # is the critical path for reachability, so fix it early and only wait longer
     # before deciding whether a web server has to be launched.
     sleep 15
+    log "grace period over, probing for an address"
 
-    HAS_IP=0
-    for iface in eth0 eth1 br0 br-lan br1 ra0; do
-        if has_ip "$iface"; then
-            HAS_IP=1
-            log "$iface already has an IP (vendor configured it)"
-        fi
-    done
-
-    if [ "$HAS_IP" = "0" ]; then
-        log "no interface has an IP, assigning fallback 192.168.1.1 to eth0"
-        ifconfig eth0 192.168.1.1 netmask 255.255.255.0 up 2>/dev/null || true
+    # One question, not one per interface: whether to assign the fallback at all.
+    # Asking per interface was only ever a way to ask this, and it needed a probe
+    # that could name an interface -- which is what forced the socket-based lookup
+    # that hangs. fib_trie answers the question that matters without naming one.
+    if guest_has_ipv4; then
+        HAS_IP=1
+        log "guest already has a non-loopback address, leaving the vendor's addressing alone"
+    else
+        HAS_IP=0
+        log "no non-loopback address, assigning fallback 192.168.1.1 to eth0"
+        run_bounded ifconfig eth0 192.168.1.1 netmask 255.255.255.0 up || true
     fi
+    log "address probe finished (has_ip=${HAS_IP}); fib_trie said: [$(tr '\n' '|' < "${FIB_TRIE}" 2>/dev/null)]"
 
-    ifconfig eth0 up 2>/dev/null || true
+    run_bounded ifconfig eth0 up || true
 
     # Vendor firewalls block rehosted-internal traffic by default.
-    iptables -F 2>/dev/null || true
-    iptables -P INPUT ACCEPT 2>/dev/null || true
-    iptables -P OUTPUT ACCEPT 2>/dev/null || true
-    iptables -P FORWARD ACCEPT 2>/dev/null || true
+    run_bounded iptables -F 2>/dev/null || true
+    run_bounded iptables -P INPUT ACCEPT 2>/dev/null || true
+    run_bounded iptables -P OUTPUT ACCEPT 2>/dev/null || true
+    run_bounded iptables -P FORWARD ACCEPT 2>/dev/null || true
 
-    for iface in lo eth0; do
-        has_ip "$iface" && log "final: $iface up with IP"
-    done
+    # The verdict after the writes, not before: this is the line the host reads to
+    # decide whether the guest ever got an address, so it has to be the last word on
+    # the question rather than the state before the fallback's own attempt.
+    if guest_has_ipv4; then
+        log "final: guest has a non-loopback address"
+    else
+        log "final: guest still has no non-loopback address"
+    fi
 
     # Start the guest's fallback shell; it reports its own outcome to the console.
     ensure_command_channel || true

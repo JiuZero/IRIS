@@ -63,23 +63,38 @@ M0 当时的记录，不再随后续运行自动更新。
 ## IRIS M1 L2 仿真结果
 
 > IRIS 自主仿真（QEMU + libnvram + TAP/bridge + socat），非 FirmAE baseline。
+>
+> **本表已按 2026-10-03 的 0.3.12 重跑更新**（iid 6711–6715，`--timeout 300/240`）。
+> 与上一版相比：DIR-868L 由失败转为成功；两台 armel OpenWrt 的失败原因由
+> 「kernel panic」更正为**内核 BUG 打死 netifd 并泄漏 rtnl 锁**（非 panic，
+> 且两者 `pc` 与 `nlattr.c:41` 完全相同，是同一根因）。详见
+> [`08-与FirmAE对比.md`](08-与FirmAE对比.md) §3.1。
 
 | # | 固件 | arch | QEMU 启动 | 服务启动 | Web 可达 | guest IP | 耗时 | 失败原因 |
 |---|------|------|-----------|----------|----------|----------|------|----------|
-| 1 | DIR-868L revB | armel | ✅ | ✅ httpd:80 | ❌ | 192.168.0.1 | 148s | VLAN (eth0.1→br0) 路由不通 |
-| 2 | Archer C7 v2 | mipseb | ✅ | ✅ uhttpd:80 | ✅ HTTP 200 | 192.168.1.1 | 73s | — |
-| 3 | WRT1200AC | armel | ✅ | ✅ uhttpd:80 | ❌ | 192.168.1.1 | 144s | kernel panic (nlattr.c:41) |
-| 4 | R7800 | armel | ✅ | ✅ uhttpd:80 | ❌ | 192.168.1.1 | 161s | kernel panic (nlattr.c:41) |
+| 1 | DIR-868L revB | armel | ✅ | ✅ httpd:80 | ✅ HTTP 200 | 192.168.0.1 | 53.0s | —（0.3.12 修复宿主不在 guest 子网） |
+| 2 | Archer C7 v2 | mipseb | ✅ | ✅ uhttpd:80 | ✅ HTTP 200 | 192.168.1.1 | 49.9s | — |
+| 3 | WRT1200AC | armel | ✅ | ✅ uhttpd:80 | ❌ | 无（eth0 曾短暂为 192.168.1.1） | 312.8s | 重宿主内核 `nlattr.c:41` BUG 打死 netifd |
+| 4 | R7800 | armel | ✅ | ✅ uhttpd:80 | ❌ | 无（eth0 曾短暂为 192.168.1.1） | 246.0s | 同上（同一 `pc=c01abe18`） |
 | 5 | x86/64 | x64 | — | — | — | — | — | x86 不在仿真范围 |
-| 6 | Newifi D2 | mipsel | ✅ | ✅ uhttpd:80 | ✅ HTTP 200 | 192.168.1.1 | 47s | — |
+| 6 | Newifi D2 | mipsel | ✅ | ✅ uhttpd:80 | ✅ HTTP 200 | 192.168.1.1 | 62.2s | — |
 
 **说明**：
-- MIPS 固件（mipsel/mipseb）2/2 仿真成功，Web 管理面从主机可达（LuCI 界面）。
-- ARM 固件 3/3 启动成功，服务启动成功，但 Web 不可达：
-  - DIR-868L：VLAN 架构（eth0.1→br0=192.168.0.1），TAP+VLAN1 桥接仍不通，需进一步调试 VLAN tag 转发。
-  - WRT1200AC/R7800：FirmAE 预编译 ARM kernel v4.1 有 bug（`lib/nlattr.c:41` Oops），启动后 ~127s panic 导致网络栈崩溃。
-- 网络推断：orchestrator 从串口日志解析 `__inet_insert_ifa` 自动发现 guest IP，动态调整 socat 转发目标。
+- 仿真成功率 **3/5**（x86/64 架构级不在范围内）；上一版为 2/5。
+- mipsel/mipseb/armel 三个架构**各有至少一台 Web 可达**，armel 的可达那台是
+  2016 年的 Tenda 厂商固件（非 OpenWrt）。
+- WRT1200AC/R7800 的根因链（实测）：t≈1.4s eth0 拿到 192.168.1.1 →
+  t≈102–122s `netifd (1056): undefined instruction: pc=c01abe18` +
+  `kernel BUG at firmadyne_kernel-v4.1/lib/nlattr.c:41`（`PC is at validate_nla`，
+  `LR is at nla_parse`）→ netifd 在持有 rtnl 锁时被内核 BUG 打死 →
+  之后 `ifconfig eth0 192.168.1.1` 永久阻塞（实测卡满 5s `run_bounded` 上限）
+  → guest 无地址，`uhttpd` 虽绑 `:80` 但不可达。
+  **这是重宿主内核自身的缺陷，不在 IRIS 代码内可修。**
+- 网络推断：orchestrator 从串口日志解析 `__inet_insert_ifa` 自动发现 guest IP，
+  并在桥上补一个该子网内的宿主地址（0.3.12 新增），随后动态调整 socat 转发目标。
 - 网络修复注入：`iris_net_fix` OpenWrt init 脚本（START=99）在固件未配置 IP 时分配 192.168.1.1。
+  该脚本在 DIR-868L 上跑不起来（厂商 BusyBox 不支持 shell 函数定义），
+  但该固件不需要它即可成功——如实的边界，不是缺陷。
 
 **本表覆盖范围**：仅上表 6 款 M0 语料（`image` id 1-6）。此后入库的实物固件
 （G1 V3.1si / i27 V1.1br / RP3 V3.0ac / TES7002，id 7/8/10/11）不在本表内，

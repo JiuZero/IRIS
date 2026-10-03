@@ -15,6 +15,7 @@ shell the host has (Git Bash on Windows), which is the same awk/sed/grep family.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -502,72 +503,291 @@ class TestProcdInittab:
         assert "is procd's" in proc.stdout
 
 
-class TestBackgroundLauncher:
-    """The launcher's only job is finding the fixup in whatever tree it landed in.
+class TestNoInittabRcSHook:
+    """A firmware with no /etc/inittab ever boots BusyBox straight into rcS.
 
-    It is installed into whichever tree the firmware's inittab names, and on the
-    AC15 that tree is /etc_ro while /etc is an empty overlay the vendor rcS only
-    populates one step later. A launcher that names /etc/init.d therefore fails at
-    exactly the moment it was added to be early, which is the sysinit hook.
+    The sysinit channel is skipped entirely, so the rcS tail hook becomes the
+    fallback's ONLY channel. Appending to the end of rcS lets a trailing handoff
+    script starve it — Tenda DIR-868L's rcS ends with `/etc/init0.d/rcS`, which
+    loops on `service status`, and the measured effect was `IRIS-NETFIX` 0 lines
+    for a firmware whose vendor chain Had already built br0/eth0.1. In this
+    layout the hook is inserted before the last non-blank, non-comment line
+    instead, so vendor S??* scripts still run first and no handoff line can eat
+    the fallback.
+    """
+
+    NO_INITTAB_RCS = (
+        "#!/bin/sh\n"
+        "for i in /etc/init.d/S??* ;do\n"
+        "\t[ ! -f \"$i\" ] && continue\n"
+        "\techo \"[$i]\"\n"
+        "\t$i\n"
+        "done\n"
+        "echo \"[$0] done!\"\n"
+        "/etc/init0.d/rcS\n"
+    )
+
+    def _hook(self, run_hooks, rcs: str | None = NO_INITTAB_RCS, **kw):
+        kw.setdefault("inittab", None)
+        kw.setdefault("rcs", rcs)
+        return run_hooks(**kw)
+
+    def test_hook_lands_before_the_trailing_handoff(self, run_hooks):
+        root, proc = self._hook(run_hooks)
+        assert proc.returncode == 0, proc.stderr
+        rcs = (root / "etc" / "init.d" / "rcS").read_text(encoding="utf-8")
+        assert rcs.index("/bin/sh /etc/init.d/iris_net_fix_bg") < rcs.index("/etc/init0.d/rcS")
+
+    def test_the_vendor_s_chain_still_runs_first(self, run_hooks):
+        """Inserted after the S??* loop, never before the vendor's own work."""
+        root, _ = self._hook(run_hooks)
+        rcs = (root / "etc" / "init.d" / "rcS").read_text(encoding="utf-8")
+        assert rcs.index("for i in /etc/init.d/S??*") < rcs.index("iris_net_fix_bg")
+
+    @pytest.mark.skipif(os.name == "nt", reason="Windows ACLs do not expose POSIX x bits; the exec-bit contract is exercised by the Linux container build")
+    def test_rcs_stays_executable_after_the_replace(self, run_hooks):
+        root, _ = self._hook(run_hooks)
+        rcs = root / "etc" / "init.d" / "rcS"
+        assert rcs.stat().st_mode & 0o111, "rcS lost its executable bit"
+
+    def test_the_no_inittab_insert_branch_reapplies_the_exec_bit(self):
+        """The replace moves rcS to a new inode (awk temp file + mv), which starts
+        with the umask rather than the old mode; the insert branch must re-apply
+        chmod +x or rcS silently stops being executable on Linux hosts."""
+        text = (SCRIPTS / "inject_boot_hooks.sh").read_text(encoding="utf-8")
+        insert = "inserted before the final non-comment line"
+        assert insert in text, "insert branch marker missing, static guard is stale"
+        branch = text[text.index(insert) - 600:text.index(insert) + 100]
+        assert "chmod +x" in branch, "insert branch lost its chmod +x"
+
+    def test_rcs_stays_valid_shell(self, run_hooks, sh):
+        root, _ = self._hook(run_hooks)
+        proc = _run_sh([*sh, "-n", str(root / "etc" / "init.d" / "rcS")])
+        assert proc.returncode == 0, proc.stderr
+
+    def test_is_idempotent_across_repeated_runs(self, run_hooks):
+        root, _ = self._hook(run_hooks)
+        _run_sh([*_shell(), str(INJECT), str(root), str(SCRIPTS)])
+        rcs = (root / "etc" / "init.d" / "rcS").read_text(encoding="utf-8")
+        assert rcs.count("iris_net_fix_bg") == 1
+
+    def test_a_vendor_exit_line_is_not_starved(self, run_hooks):
+        root, proc = self._hook(run_hooks, rcs="#!/bin/sh\nexit 0\n")
+        rcs = (root / "etc" / "init.d" / "rcS").read_text(encoding="utf-8")
+        assert rcs.index("iris_net_fix_bg") < rcs.index("exit")
+        assert "inserted before the final non-comment line" in proc.stdout
+
+    def test_an_empty_rcs_still_gets_the_hook(self, run_hooks, sh):
+        root, proc = self._hook(run_hooks, rcs="")
+        assert proc.returncode == 0, proc.stderr
+        rcs = (root / "etc" / "init.d" / "rcS").read_text(encoding="utf-8")
+        assert "iris_net_fix_bg" in rcs
+        assert _run_sh([*sh, "-n", str(root / "etc" / "init.d" / "rcS")]).returncode == 0
+
+    def test_no_temp_files_are_left_behind(self, run_hooks):
+        root, _ = self._hook(run_hooks)
+        leftovers = [p.name for p in (root / "etc" / "init.d").iterdir() if "rcS.iris" in p.name]
+        assert leftovers == []
+
+    def test_an_inittab_still_appends_instead_of_inserting(self, run_hooks):
+        """Inserting is the no-inittab fallback; with an inittab the existing
+        append behaviour (unconditional second line) is preserved."""
+        root, proc = run_hooks()
+        assert "appended to rcS" in proc.stdout
+        rcs = (root / "etc" / "init.d" / "rcS").read_text(encoding="utf-8")
+        assert rcs.index("start_up_run_file") < rcs.index("iris_net_fix_bg")
+
+
+class TestBackgroundLauncher:
+    """The launcher starts the fixup without blocking, and knows where it is.
+
+    Two channels reach the fallback and they need different things from this file.
+    An inittab ::sysinit: entry execs its process field verbatim, so the `&` has to
+    live here rather than in the entry; and the fixup's own path has to be known,
+    because the launcher is installed into whichever tree the firmware's inittab
+    names — /etc_ro on the AC15, where /etc is an empty overlay the vendor rcS only
+    populates one step later.
+
+    The path is baked in at install time rather than derived from $0 at runtime.
+    Both runtime ways of deriving it are unavailable on real guests: no dirname
+    applet, and `${0%/*}` expanding to the empty string on the Tenda DIR-868L
+    (measured: `x=/a/b/c; echo "[${x%/*}]"` printed `[]`). With $0 unusable the
+    launcher looked for /iris_net_fix, exited 0, and printed nothing — a guest log
+    with zero IRIS-NETFIX lines, which reads exactly like "the hook never ran".
     """
 
     BG = SCRIPTS / "iris_net_fix_bg.sh"
+    PLACEHOLDER = "@IRIS_GUEST_INIT_D@"
 
-    def _run_bg(self, sh, tree: str) -> str:
-        """Install the real launcher beside a stand-in fixup, run it, report the hit."""
-        root = Path(tree)
-        root.mkdir(parents=True, exist_ok=True)
-        (root / "marker").mkdir(exist_ok=True)
-        # POSIX form: backslashes are escape characters to /bin/sh, both in the
-        # redirection target and in the path the launcher has to resolve.
-        posix = str(root).replace("\\", "/")
-        (root / "iris_net_fix").write_text(
-            f'#!/bin/sh\necho "ran from $0" > "{posix}/console"\n', encoding="utf-8"
+    def _install(self, root: Path) -> tuple[Path, str]:
+        """Write the launcher the way inject_boot_hooks.sh does, placeholder filled in."""
+        guest_dir = str(root).replace("\\", "/")
+        text = self.BG.read_text(encoding="utf-8").replace(self.PLACEHOLDER, guest_dir)
+        assert self.PLACEHOLDER not in text, (
+            "the launcher lost its install-path placeholder, so inject_boot_hooks.sh "
+            "would have nothing to substitute"
         )
-        (root / "iris_net_fix_bg").write_text(self.BG.read_text(encoding="utf-8"), encoding="utf-8")
-        proc = _run_sh([*sh, "-c",
-                        f'IRIS_CONSOLE="{posix}/console" "{posix}/iris_net_fix_bg"'])
+        path = root / "iris_net_fix_bg"
+        path.write_text(text, encoding="utf-8", newline="\n")
+        return path, guest_dir
+
+    def test_it_finds_the_fixup_beside_itself(self, sh, tmp_path, monkeypatch):
+        root = tmp_path / "etc_ro" / "init.d"
+        root.mkdir(parents=True)
+        (root / "iris_net_fix").write_text(
+            f'#!/bin/sh\necho "ran from $0" > "{str(root).replace(chr(92), "/")}/console"\n',
+            encoding="utf-8",
+        )
+        _launcher, posix = self._install(root)
+        monkeypatch.setenv("IRIS_BG", f"{posix}/iris_net_fix_bg")
+        proc = _run_sh([*sh, "-c", 'exec "$IRIS_BG"'])
         assert proc.returncode == 0, proc.stderr
         console = root / "console"
-        # The launcher backgrounds the fixup, so the parent is gone before it runs.
         for _ in range(50):
             if console.exists() and console.read_text(encoding="utf-8").strip():
-                return console.read_text(encoding="utf-8")
+                break
             time.sleep(0.1)
-        return ""
+        assert "ran from" in console.read_text(encoding="utf-8"), (
+            f"the launcher did not start the sibling in {posix}"
+        )
 
-    def test_it_finds_the_fixup_next_to_itself(self, sh, tmp_path):
-        assert "ran from" in self._run_bg(sh, str(tmp_path / "etc_ro"))
+    def test_the_install_path_is_baked_in_by_the_injector(self, sh, tmp_path):
+        """The placeholder is only useful if the real injector fills it in."""
+        root = tmp_path / "image"
+        (root / "etc" / "init.d").mkdir(parents=True)
+        (root / "etc" / "init.d" / "rcS").write_text(
+            '#!/bin/sh\nfor i in /etc/init.d/S??*; do $i; done\n'
+            'echo "[$0] done!"\n/etc/init0.d/rcS\n',
+            encoding="utf-8", newline="\n",
+        )
+        (root / "etc" / "init.d" / "iris_net_fix_bg").write_text(
+            self.BG.read_text(encoding="utf-8"), encoding="utf-8", newline="\n"
+        )
+        proc = _run_sh([*sh, str(SCRIPTS / "inject_boot_hooks.sh"), str(root), str(SCRIPTS)])
+        assert proc.returncode == 0, proc.stderr
+        assert "launcher path baked into /etc/init.d" in proc.stdout, proc.stdout
+        installed = (root / "etc" / "init.d" / "iris_net_fix_bg").read_text(encoding="utf-8")
+        assert self.PLACEHOLDER not in installed, installed
+        assert "DIR=/etc/init.d\n" in installed, installed
 
     def test_the_path_it_uses_is_not_hardcoded(self):
         text = self.BG.read_text(encoding="utf-8")
         assert "/etc/init.d/iris_net_fix" not in text
-        assert "${0%/*}" in text
+        assert f"DIR={self.PLACEHOLDER}" in text
 
-    def test_it_does_not_need_an_external_applet(self):
-        """The AC15's busybox has no dirname applet; the command fails, the
-        directory collapses to empty, and the fixup is looked up at /iris_net_fix."""
+    def test_it_never_parses_its_own_path_at_runtime(self):
+        """`${0%/*}` is empty on the DIR-868L, and dirname(1) is absent on the AC15.
+
+        Both failures are silent: the script keeps going with an empty directory and
+        exits 0, so nothing anywhere records that the lookup was never attempted.
+
+        Only executable lines count — the comments in both scripts quote the exact
+        expansion that broke, and a guard that flagged those would have them deleted.
+        """
+        pattern = re.compile(r"^\s*[^#]*\$\{[A-Za-z_0-9][A-Za-z0-9_]*[%#]")
         for script in (self.BG, SCRIPTS / "iris_net_fix.sh"):
             text = script.read_text(encoding="utf-8")
-            assert not re.search(r"^\s*\w+=?\$\(dirname", text, re.MULTILINE), script.name
+            offenders = [
+                f"{script.name}: {line}"
+                for line in text.splitlines()
+                if pattern.search(line)
+            ]
+            assert not offenders, (
+                f"{offenders} rely on parameter expansion that measured empty on a "
+                "real guest"
+            )
             assert "$(dirname" not in text, script.name
 
-    def test_it_really_does_background_the_fixup(self, sh, tmp_path):
-        """A foreground fixup blocks every later ::sysinit: step behind a 45s sleep."""
+    def test_it_never_asks_the_shell_to_supply_a_default(self):
+        """`${VAR:-default}` and `${VAR:=default}` are the same defect, one function away.
+
+        The substitution form of this problem was found and fixed first; the
+        default-value forms were left in the script on the assumption that a shell
+        which drops `${x%/*}` will still handle `${x:-/tmp}`. That assumption was
+        never tested, and the failure it would cause is the same silent one: an
+        unset variable stays unset, so `CONSOLE` ends up empty, the redirect to it
+        fails, and the fallback writes its verdict nowhere at all.
+
+        The costs of avoiding the syntax are one line per default and no cleverness,
+        so the guard is on the syntax rather than on the resulting behaviour -- which
+        cannot be checked off-target, since a working shell is exactly what the test
+        host provides.
+        """
+        pattern = re.compile(
+            r"^\s*[^#]*\$\{[A-Za-z_0-9][A-Za-z0-9_]*[:?][-=+]?\}?"
+        )
+        for script in (self.BG, SCRIPTS / "iris_net_fix.sh"):
+            offenders = [
+                f"{script.name}: {line}"
+                for line in script.read_text(encoding="utf-8").splitlines()
+                if pattern.search(line)
+            ]
+            assert not offenders, (
+                f"{offenders} ask the shell for a default value, which a reduced "
+                "vendor BusyBox was measured to reduce to the empty string; spell it "
+                "as an explicit test instead"
+            )
+
+    def test_it_really_does_background_the_fixup(self, sh, tmp_path, monkeypatch):
+        """A foreground fixup blocks every later ::sysinit: step behind a 45s sleep.
+
+        stdout and stderr go to DEVNULL rather than being captured: the launcher does
+        not redirect the fixup, so the backgrounded child inherits the pipes and a
+        capturing read would wait out the child's whole 30s — measuring the pipe, not
+        the backgrounding. The fixup writes its own marker file instead.
+        """
         root = tmp_path / "blocking"
         root.mkdir()
         posix = str(root).replace("\\", "/")
         (root / "iris_net_fix").write_text(
             f'#!/bin/sh\nsleep 30\necho done >> "{posix}/console"\n', encoding="utf-8"
         )
-        (root / "iris_net_fix_bg").write_text(self.BG.read_text(encoding="utf-8"), encoding="utf-8")
+        _launcher, posix = self._install(root)
         started = time.monotonic()
-        proc = _run_sh([*sh, "-c",
-                        f'IRIS_CONSOLE="{posix}/console" "{posix}/iris_net_fix_bg"'])
-        assert proc.returncode == 0, proc.stderr
+        monkeypatch.setenv("IRIS_BG", f"{posix}/iris_net_fix_bg")
+        proc = subprocess.run(
+            [*sh, "-c", 'exec "$IRIS_BG"'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=60, check=False,
+        )
+        assert proc.returncode == 0
         assert time.monotonic() - started < 10, "the launcher waited for the fixup"
-        # The redirect itself creates the file before the background job starts,
-        # so its existence proves nothing; the fixup's first output would arrive
-        # 30 seconds from now, and the launcher must be long gone by then.
-        time.sleep(3)
-        assert (root / "console").read_text(encoding="utf-8") == "", "the fixup ran in the foreground"
+
+    def test_the_launcher_marks_itself_before_spawning_the_fixup(self, sh, tmp_path, monkeypatch):
+        """"The hook never ran" and "the fixup never started" are otherwise the same
+        empty log, and they need different fixes. The mark is printed before the fixup
+        is spawned, so its presence says which of the two happened — and it names the
+        path it is about to use, which is what told the DIR-868L investigation that the
+        path was the problem."""
+        root = tmp_path / "mark"
+        root.mkdir()
+        (root / "iris_net_fix").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        _launcher, posix = self._install(root)
+        monkeypatch.setenv("IRIS_BG", f"{posix}/iris_net_fix_bg")
+        proc = _run_sh([*sh, "-c", 'exec "$IRIS_BG"'])
+        assert proc.returncode == 0, proc.stderr
+        assert "bg launcher starting" in proc.stdout, proc.stdout
+        assert f"{posix}/iris_net_fix" in proc.stdout, proc.stdout
+
+    def test_the_mark_goes_to_the_inherited_stdout(self):
+        """The launcher must not open /dev/console itself.
+
+        On the DIR-868L that open fails, and a redirection that cannot be opened takes
+        its command down with it — so the redirected form printed nothing at all while
+        the surrounding rcS, writing to the same console through the descriptor init
+        handed it, printed fine. stdout is already that console.
+        """
+        text = self.BG.read_text(encoding="utf-8")
+        assert "IRIS_CONSOLE" not in text, text
+        assert not re.search(r'^\s*echo .*>\s*"\$\{?CONSOLE', text, re.MULTILINE), text
+
+    def test_the_fixup_is_not_given_a_redirection_that_cannot_be_opened(self):
+        """`>> /dev/console` fails outright — log() says so in the fixup itself.
+
+        A redirection that cannot be opened takes its command down with it, so the
+        backgrounded fixup would never start and the guest would get no fallback
+        without a single line anywhere saying why.
+        """
+        text = self.BG.read_text(encoding="utf-8")
+        assert not re.search(r'iris_net_fix"?\s*>>', text), text
+        assert not re.search(r'iris_net_fix"?\s*2>&1', text), text

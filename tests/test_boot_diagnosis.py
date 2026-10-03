@@ -9,6 +9,9 @@ from pathlib import Path
 import pytest
 
 from iris.emulate.orchestrator import (
+    _HAS_NON_LO_IP,
+    _NIC_ABSENT,
+    _NIC_PRESENT,
     REBOOT_LOOP_THRESHOLD,
     _count_guest_reboots,
     _failure_diagnosis,
@@ -214,6 +217,65 @@ class TestFailureDiagnosis:
         monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(
             cmd, 0, stdout="", stderr=""))
         assert _failure_diagnosis("c", 1).startswith("emulation failed: ")
+
+
+#: Verbatim lines from the Tenda DIR-868L serial log (iid 6630). This guest had a
+#: working network the whole time -- eth0 enslaved into br0, br0 holding
+#: 192.168.0.1, httpd bound to :80 -- and was reported as having neither a NIC nor
+#: an address. Both probes missed the FirmAE wording and the bridge wording below.
+_DIR868L = """
+[    6.051382] 8021q: adding VLAN 0 to HW filter on device eth0
+[    6.237574] firmadyne: br_add_if[PID: 492 (brctl)]: br:br0 dev:eth0.1
+[    6.238771] device eth0 entered promiscuous mode
+[    6.180539] firmadyne: __inet_insert_ifa[PID: 483 (ip)]: device:lo ifa:0x0100007f
+[   16.885524] firmadyne: __inet_insert_ifa[PID: 10045 (ip)]: device:br0 ifa:0x0100a8c0
+nvram_set: wan_ifname = "eth0"
+[   40.802430] firmadyne: inet_bind[PID: 21271 (httpd)]: proto:SOCK_STREAM, port:80
+"""
+
+
+class TestGuestNicAndAddressProbes:
+    """Two probes that once agreed with each other on a wrong answer.
+
+    Both were "is there a NIC" and "did anything get an address", both concluded
+    no, and both conclusions were false for a guest whose log says br0 holds
+    192.168.0.1 and httpd is on :80. The two failures reinforced each other, which
+    is what makes them worth a fixture each.
+    """
+
+    def test_bridge_and_promuous_lines_count_as_a_present_nic(self):
+        for line in _DIR868L.splitlines():
+            if "8021q" in line or "br_add_if" in line or "promiscuous" in line:
+                assert _NIC_PRESENT.search(line), line
+
+    def test_the_firmadyne_address_printk_counts_as_an_assigned_address(self):
+        assert _HAS_NON_LO_IP.search(
+            "[   16.885524] firmadyne: __inet_insert_ifa[PID: 10045 (ip)]: "
+            "device:br0 ifa:0x0100a8c0")
+
+    def test_loopback_still_does_not_count(self):
+        assert not _HAS_NON_LO_IP.search(
+            "firmadyne: __inet_insert_ifa[PID: 483 (ip)]: device:lo ifa:0x0100007f")
+
+    def test_config_naming_eth0_still_does_not_count_as_a_nic(self):
+        """The false positive this whole probe exists to avoid."""
+        assert not _NIC_PRESENT.search('nvram_set: wan_ifname = "eth0"')
+
+    def test_a_missing_interface_is_not_read_as_a_present_one(self):
+        line = "net: device eth0 not found"
+        assert _NIC_PRESENT.search(line)
+        assert _NIC_ABSENT.search(line), "the exclusion is what keeps this honest"
+
+    def test_dir868l_is_neither_nicless_nor_addressless(self):
+        out = diagnose_boot_failure(_DIR868L)
+        assert "no network driver registered" not in out
+        assert "no non-loopback address" not in out
+
+    def test_dir868l_is_still_told_its_netfix_never_ran(self):
+        """One guest, one line of IRIS-NETFIX, one hook failure -- and the fix was
+        still worth nothing here, so this must not be papered over by the above."""
+        out = diagnose_boot_failure("IRIS-NETFIX: bg launcher starting\n" + _DIR868L)
+        assert "IRIS network fallback ran" in out
 
 
 class TestRealSerialLogIsDiagnosable:
