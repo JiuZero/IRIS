@@ -153,6 +153,10 @@ cp "${TMP_IMAGE}" "${IMAGE}"
 # only creates one when it is missing. Leaving it here would boot the new image with
 # the old one's writes still in it.
 rm -f "${WORK_DIR}/state.raw"
+# Same reasoning for the guest address a previous boot measured: it described the
+# network of the image being replaced, and run_qemu.sh would keep deriving the bridge
+# and the port forward from it.
+rm -f "${WORK_DIR}/guest_ip"
 rm -rf "${TMP_BUILD}"
 
 echo "==== Image built: ${IMAGE} ===="

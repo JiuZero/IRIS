@@ -378,6 +378,18 @@ def _run(cmd: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
 
 
 
+def _is_dotted_quad(value: str) -> bool:
+    """Whether ``value`` is an IPv4 address written as four dotted decimal octets.
+
+    Strict on purpose: the addresses that pass through here end up in shell
+    arithmetic and in ``ip addr add``, where anything else is a launch that dies on
+    the way in. ``str.isdigit`` is not enough for that -- it accepts superscript
+    digits that ``int()`` then refuses, which is a ``ValueError`` inside a boot loop.
+    """
+    parts = value.split(".")
+    return len(parts) == 4 and all(re.fullmatch(r"[0-9]{1,3}", p) and int(p) <= 255 for p in parts)
+
+
 def _host_address_on_guest_subnet(guest_ip: str) -> str | None:
     """An address for the host bridge that the guest will accept packets from.
 
@@ -399,13 +411,50 @@ def _host_address_on_guest_subnet(guest_ip: str) -> str | None:
     own ``inet_insert_ifa`` printk -- carries no prefix length. A LAN on some other
     prefix is a known limit of this approach, not a case it handles.
     """
-    parts = guest_ip.split(".")
-    if len(parts) != 4 or not all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+    if not _is_dotted_quad(guest_ip):
         return None
+    parts = guest_ip.split(".")
     if parts[3] == "254":
         # The guest would answer to this address itself.
         return ".".join(parts[:3] + ["253"])
     return ".".join(parts[:3] + ["254"])
+
+
+def _record_guest_ip(container_name: str, iid: int, guest_ip: str) -> bool:
+    """Write the address this boot measured next to the image, for the next launch.
+
+    ``run_qemu.sh`` derives both the bridge address and the port forward from the
+    guest address it is handed, and the only caller that can hand it one is the boot
+    loop below -- which does not exist at restart time. A container restart brings
+    back PID 1 (``sleep 3600``) and nothing else, so a relaunch has to be told where
+    the guest is, and this file is the only place that can still say so. Without it
+    the guardian's ``WEB_SERVER_RESTART`` re-derives everything from the
+    192.168.1.1 assumption: on Tenda DIR-868L, measured, the restarted bridge sat at
+    192.168.1.254/16 and socat forwarded to an address nothing was listening on, so
+    a guest that had just answered HTTP 200 answered HTTP 000 after the restart that
+    was meant to bring it back.
+
+    Recorded next to ``image.raw`` beside the arch marker rather than in the run
+    table, because it has to outlive the run: what needs it is a launch that starts
+    after the run is over. Best-effort, and reported when it fails -- losing the
+    marker costs the next restart this address, which is exactly the failure it
+    exists to prevent, so it must not pass silently.
+
+    The address is handed to ``sh -c`` as a positional parameter rather than
+    interpolated into the script text: it comes out of a guest's own printk, and
+    whatever lands in this file is later fed to shell arithmetic.
+    """
+    if not _is_dotted_quad(guest_ip) or guest_ip.startswith("127."):
+        return False
+    marker = f"/work/scratch/{iid}/guest_ip"
+    res = _run(["docker", "exec", container_name, "sh", "-c",
+                'printf "%s\\n" "$1" > "$2"', "sh", guest_ip, marker], timeout=10)
+    if res.returncode != 0:
+        logger.warning(f"could not record the measured guest address {guest_ip} in {marker}: "
+                       f"{res.stderr.strip()} -- the next launch will assume 192.168.1.1")
+        return False
+    logger.info(f"Recorded guest address {guest_ip} in {marker} for the next launch")
+    return True
 
 
 def _place_host_on_guest_subnet(container_name: str, iid: int, guest_ip: str) -> bool:
@@ -903,6 +952,11 @@ def _emulate_firmware(
                 # guest will answer packets from this host, and a router whose LAN is
                 # not the assumed subnet will not.
                 logger.info(f"Detected guest IP: {guest_ip}, forwarding :{host_port}...")
+                # Recorded inside this branch on purpose. `guest_ip` starts out as the
+                # 192.168.1.1 assumption, so writing it unconditionally would pin the
+                # assumption as a measurement and leave a relaunch with exactly the
+                # address it already had by default.
+                _record_guest_ip(container_name, iid, guest_ip)
                 _run(["docker", "exec", container_name, "pkill", "-f", "socat.*TCP"], timeout=5)
                 _run(["docker", "exec", "-d", container_name, "socat",
                       f"TCP-LISTEN:{host_port},reuseaddr,fork", f"TCP:{guest_ip}:80"], timeout=5)

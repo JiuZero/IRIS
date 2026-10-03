@@ -4,10 +4,40 @@ set -e
 IID=$1
 ARCH=$2
 HOST_PORT=${3:-8080}
-GUEST_IP=${4:-192.168.1.1}
 WORK_DIR=/work/scratch/${IID}
 IMAGE=${WORK_DIR}/image.raw
 BINARIES=/work/binaries
+
+# The guest address everything below is built around: an explicit $4, else the
+# address a previous boot measured, else the 192.168.1.1 assumption.
+#
+# The recorded address is what separates a restart that can repair from one that
+# cannot. run_qemu.sh can only be re-run after the container is gone, and whoever
+# re-runs it is not watching a boot, so a relaunch has no way to learn the address
+# except from what an earlier boot wrote down. Without that, every restart derives
+# the bridge address and the port forward from the assumption. Tenda DIR-868L
+# measured the consequence: its LAN is 192.168.0.1/24, so the restarted bridge sat
+# at 192.168.1.254/16 and socat forwarded to an address nothing was listening on --
+# a guest that had just answered HTTP 200 answered HTTP 000 after the restart meant
+# to bring it back. The orchestrator writes the marker next to the image when the
+# first boot reads the address out of the kernel's own printk; a re-bake drops it
+# along with the state disk, because then it describes a different filesystem.
+GUEST_IP_MARKER=${WORK_DIR}/guest_ip
+GUEST_IP=${4:-}
+if [ -z "${GUEST_IP}" ] && [ -f "${GUEST_IP_MARKER}" ]; then
+    # Four dotted decimal octets in range, nothing else: the value is fed to the awk
+    # arithmetic below and to `ip addr add`, so a truncated or hand-edited marker has
+    # to fall back to the assumption rather than take the launch down with it. `|| true`
+    # is what keeps awk's rejection (and `set -e`) from making that fatal.
+    MARKER_IP=$(head -n 1 "${GUEST_IP_MARKER}" | awk -F. 'NF==4 { for (i=1; i<=4; i++) if ($i !~ /^[0-9]+$/ || $i+0 > 255) exit 1; print }' || true)
+    if [ -n "${MARKER_IP}" ]; then
+        GUEST_IP="${MARKER_IP}"
+        echo "Guest address taken from ${GUEST_IP_MARKER}: ${GUEST_IP}"
+    else
+        echo "WARNING: ${GUEST_IP_MARKER} does not hold an IPv4 address; using the 192.168.1.1 assumption"
+    fi
+fi
+GUEST_IP=${GUEST_IP:-192.168.1.1}
 # The disk QEMU actually writes, kept across launches. The guest's root filesystem
 # is this file and nothing else, so anything the guest writes -- and anything a
 # repair injects -- has to land here to survive the next boot.
@@ -44,7 +74,7 @@ MEMORY=256
 # Setup TAP networking for guest-to-host connectivity
 TAP_IFACE="tap${IID}"
 BR_IFACE="br${IID}"
-GUEST_IP="${GUEST_IP}"
+
 HOST_IP=$(echo "${GUEST_IP}" | awk -F. '{print $1"."$2"."$3"."$4-1}')
 # If last octet is 0 or 1, use .254 as host IP
 LAST_OCTET=$(echo "${GUEST_IP}" | awk -F. '{print $4}')

@@ -499,6 +499,14 @@ class AIHealthMonitor:
         writable layer, so relaunching QEMU is the only missing step -- and
         ``run_qemu.sh`` clears any TAP/bridge left behind before recreating it.
 
+        Three arguments are enough because everything else the relaunch needs is
+        on disk beside the image: the arch from ``make_image.sh``'s marker, and
+        the guest address ``run_qemu.sh`` reads from the marker the first boot
+        wrote when it recognised the guest's own subnet. That last one is why
+        this can be a repair rather than a regression -- relaunching on the
+        assumed 192.168.1.1 subnet puts the host bridge outside a router's LAN
+        and turns a serving guest into one that answers nothing.
+
         A restart that is not followed by a serving port is not a repair; the
         verification window gives the guest time to boot (the orchestration
         path itself allows minutes, so a short window here can only over-report
