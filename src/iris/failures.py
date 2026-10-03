@@ -97,6 +97,21 @@ class FailureKind(StrEnum):
     NO_GUEST_IP = "no-guest-ip"
     NO_NETWORK_DRIVER = "no-network-driver"
 
+    # -- network: measured, layer by layer, by ``emulate.linkprobe`` ------------
+    #: These four name *where a packet stopped*, which is a different claim from
+    #: the two above (which are read out of a boot log) and a much more specific
+    #: one than ``web-unreachable``. Each is produced only when the layer was
+    #: measured and measured blocked; a probe that could not run produces none
+    #: of them, so an unreadable diagnostic never becomes a network diagnosis.
+    LINK_NO_ROUTE = "link-no-route"
+    LINK_NO_ARP = "link-no-arp"
+    #: The signature of 0.3.12's DIR-868L: frames arrive and the guest answers
+    #: ARP, but it drops what comes from an address outside its own subnet --
+    #: which is what a router is designed to do. Guessing "the firmware is
+    #: broken" here cost two rounds of wrong conclusions.
+    LINK_NO_ICMP = "link-no-icmp"
+    LINK_NO_SERVICE = "link-no-service"
+
     # -- service: the guest is fine, the web plane is not -----------------------
     WEB_NOT_STARTED = "web-not-started"
     WEB_WRONG_PORT = "web-wrong-port"
@@ -129,6 +144,10 @@ _KIND_STAGE: dict[FailureKind, Stage] = {
     FailureKind.NVRAM_UNREADABLE: Stage.NVRAM,
     FailureKind.NO_GUEST_IP: Stage.NETWORK,
     FailureKind.NO_NETWORK_DRIVER: Stage.NETWORK,
+    FailureKind.LINK_NO_ROUTE: Stage.NETWORK,
+    FailureKind.LINK_NO_ARP: Stage.NETWORK,
+    FailureKind.LINK_NO_ICMP: Stage.NETWORK,
+    FailureKind.LINK_NO_SERVICE: Stage.NETWORK,
     FailureKind.WEB_NOT_STARTED: Stage.SERVICE,
     FailureKind.WEB_WRONG_PORT: Stage.SERVICE,
     FailureKind.WEB_UNREACHABLE: Stage.SERVICE,
@@ -162,6 +181,16 @@ _KIND_HINT: dict[FailureKind, str] = {
                                    "the nvram/flash device is not being emulated",
     FailureKind.NO_GUEST_IP: "nothing assigned an address in the guest; check the netfix injection",
     FailureKind.NO_NETWORK_DRIVER: "the rehost exposes no NIC this kernel can bind",
+    FailureKind.LINK_NO_ROUTE: "the host has no path to the guest address; the bridge or "
+                               "the assumed subnet is wrong",
+    FailureKind.LINK_NO_ARP: "the path exists but the guest does not answer for its own "
+                             "address; frames are not reaching it",
+    FailureKind.LINK_NO_ICMP: "the guest answers ARP but ignores ICMP -- it is dropping "
+                              "packets whose source address is outside its own subnet, "
+                              "which is what a router does. Put the host bridge inside "
+                              "the guest's subnet",
+    FailureKind.LINK_NO_SERVICE: "the guest answers at IP level but nothing served the web "
+                                 "port; check which port httpd actually bound",
     FailureKind.WEB_NOT_STARTED: "no known web server process ever appeared in the serial log",
     FailureKind.WEB_WRONG_PORT: "the web server bound a port the forward does not reach",
     FailureKind.WEB_UNREACHABLE: "the guest booted but :80 never answered within the timeout",

@@ -1,3 +1,6 @@
+# 评测基线：expect_web 声明该条目是否参与 Web 可达率，None（缺省）表示不参与。
+# 分母 = 声明了 expect_web 且被实测的条目；未实测条目计入 skipped，不进任何分母。
+# expectation_note 记录该期望的来源实测，避免下次凭记忆改结论。
 # IRIS M0 baseline corpus: 10 firmware entries for pipeline validation.
 # status=confirmed  -> URL verified / high confidence; download directly.
 # status=pending    -> URL may rotate; browse the vendor portal to fix before download.
@@ -16,6 +19,10 @@ url = "https://github.com/pr0v3rbs/FirmAE/releases/download/v1.0/DIR-868L_fw_rev
 status = "confirmed"
 source = "FirmAE release page"
 notes = "Official FirmAE README sample; auto-routed through IRIS_ mirror for github"
+expect_web = true
+timeout_sec = 300
+expectation_note = "0.3.12 实测 HTTP 200 @53.0s；此前两次结论（VLAN 路由不通 / 宿主不在 guest 子网）均已被推翻"
+db_match = "DIR-868L_fw_revB_2-05b02"
 
 [[entries]]
 name = "openwrt-archer-c7-v2"
@@ -27,6 +34,10 @@ arch_hint = "mipseb"
 status = "confirmed"
 source = "downloads.openwrt.org"
 notes = "ath79/generic MIPS74Kc big-endian"
+expect_web = true
+timeout_sec = 300
+expectation_note = "0.3.12 实测 HTTP 200 @49.9s"
+db_match = "tplink_archer-c7-v2"
 
 [[entries]]
 name = "openwrt-newifi-d2"
@@ -38,6 +49,10 @@ arch_hint = "mipsel"
 status = "confirmed"
 source = "downloads.openwrt.org"
 notes = "ramips/mt7621 MIPS little-endian; replaces xiaomi_mi-router-4a-gigabit (404 in 24.10.0); sysupgrade.bin contains full squashfs rootfs"
+expect_web = true
+timeout_sec = 300
+expectation_note = "0.3.12 实测 HTTP 200 @62.2s"
+db_match = "d-team_newifi-d2"
 
 [[entries]]
 name = "openwrt-wrt1200ac"
@@ -49,6 +64,10 @@ arch_hint = "armel"
 status = "confirmed"
 source = "downloads.openwrt.org"
 notes = "mvebu/cortexa9 ARM32 little-endian"
+expect_web = true
+timeout_sec = 300
+expectation_note = "环境适配失败：宿主内核 validate_nla BUG 打死 netifd，项目内不可修；计入 web 分母、不计入能力分母"
+db_match = "linksys_wrt1200ac"
 
 [[entries]]
 name = "openwrt-r7800"
@@ -60,6 +79,10 @@ arch_hint = "armel"
 status = "confirmed"
 source = "downloads.openwrt.org"
 notes = "ipq806x ARM32 little-endian"
+expect_web = true
+timeout_sec = 300
+expectation_note = "环境适配失败：与 WRT1200AC 同一根因（pc=c01abe18）；计入 web 分母、不计入能力分母"
+db_match = "netgear_r7800"
 
 [[entries]]
 name = "openwrt-x86-64"
@@ -71,6 +94,8 @@ arch_hint = "x64"
 status = "confirmed"
 source = "downloads.openwrt.org"
 notes = "x64 support verification sample (expected NOT firmae-supported)"
+expectation_note = "未实测：x86_64 不在本项目支持范围（见 README 能力边界），不参与任何分母"
+db_match = "x86-64-generic-ext4"
 
 [[entries]]
 name = "netgear-r6220"
@@ -81,6 +106,7 @@ url = "https://www.downloads.netgear.com/files/GDC/R6220/R6220-V1.1.0.60_1.0.1.z
 status = "pending"
 source = "netgear vendor portal"
 notes = "vendor URLs rotate; if 404 browse https://www.netgear.com/support/product/R6220"
+expectation_note = "未实测：固件未获取（status=pending），无样本可评"
 
 [[entries]]
 name = "tplink-wdr4300"
@@ -91,6 +117,7 @@ url = "https://static.tp-link.com/resources/software/TL-WDR4300_V1_141110.zip"
 status = "pending"
 source = "tp-link vendor portal"
 notes = "vendor URLs rotate; if 404 browse https://www.tp-link.com/en/support/download/tl-wdr4300/"
+expectation_note = "未实测：固件未获取（status=pending），无样本可评"
 
 [[entries]]
 name = "dlink-dir615-e4"
@@ -101,6 +128,7 @@ url = "ftp://ftp2.dlink.com/PRODUCTS/DIR-615/REVC/DIR-615_REVC_FIRMWARE_4.13.ZIP
 status = "pending"
 source = "ftp2.dlink.com"
 notes = "ftp may be blocked on modern networks; vendor portal as fallback"
+expectation_note = "未实测：固件未获取（status=pending，ftp 源），无样本可评"
 
 [[entries]]
 name = "camera-slot-1"
@@ -112,3 +140,4 @@ target_type = "camera"
 status = "pending"
 source = "vendor portal (login-gated) or hardware UART/SPI dump"
 notes = "Camera firmware is login-gated upstream; acquire via vendor portal or hardware side, then replace url and set status=confirmed"
+expectation_note = "未实测：占位条目（url 未替换），摄像头平面尚无样本"

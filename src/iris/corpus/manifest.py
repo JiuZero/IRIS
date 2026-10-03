@@ -28,6 +28,32 @@ class FirmwareEntry(BaseModel):
     source: str = ""
     notes: str = ""
 
+    # -- evaluation baseline -------------------------------------------------
+    #: Whether this entry is expected to serve a web plane. ``None`` means "not a
+    #: web-reachability participant" -- an entry with no expectation cannot
+    #: silently move the headline rate, which is how a denominator ends up
+    #: counting things nobody ever tried to make work.
+    expect_web: bool | None = None
+    #: Boot timeout to give this device. Per-entry because the corpus spans a
+    #: 49.9s OpenWrt image and a 480s arm64 vendor image; one global default
+    #: makes the slow ones fail for a reason that has nothing to do with IRIS.
+    timeout_sec: int = 300
+    #: Where the firmware already sits on this host, when it was obtained
+    #: out of band. Checked before ``url`` so a manifest entry can be evaluated
+    #: without network access -- the usual state of a curated corpus.
+    local_file: str = ""
+    #: Why an entry is excluded from the rate, or what its failure means. Recorded
+    #: so an "environment broke" verdict stays attached to the number instead of
+    #: being re-derived (and mis-changed) by the next person reading the table.
+    expectation_note: str = ""
+    #: Substring identifying this entry's row in the `image` table, used by
+    #: ``iris corpus eval --from-db`` to pull the latest recorded run. Explicit
+    #: rather than fuzzy-matched on ``name``: the manifest key
+    #: (``dlink-dir868l-revb``) and the stored filename
+    #: (``DIR868L_B1_FW205WWb02.bin``) share no scheme, and a guess that silently
+    #: attaches one device's result to another is worse than no match at all.
+    db_match: str = ""
+
 
 class CorpusManifest(BaseModel):
     name: str

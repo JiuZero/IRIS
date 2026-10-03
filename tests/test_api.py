@@ -10,16 +10,21 @@ from fastapi.testclient import TestClient
 
 from iris.api.server import app
 
+#: These cases are about the endpoint contracts that did not change (status
+#: codes, error shapes). Authentication, ownership and the upload cap have their
+#: own file, ``test_api_security.py``, because they need an isolated database and
+#: a configurable token.
 client = TestClient(app)
 
 
 def test_health() -> None:
+    from iris import __version__
+
     resp = client.get("/api/v1/health")
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "ok"
-    assert data["version"] == "0.1.0"
-    assert data["active_emulations"] == 0
+    assert data["version"] == __version__
 
 
 def test_list_firmware() -> None:
@@ -41,10 +46,14 @@ def test_get_emulation_not_found() -> None:
 
 
 def test_stop_emulation_not_found() -> None:
+    """An iid with no hosted run is a 404, not a 200 with a failed delete.
+
+    It used to answer 200 and call ``docker rm -f`` first, which meant "stop
+    something you do not own" was indistinguishable from "stop nothing" -- and
+    the delete could land on another caller's container.
+    """
     resp = client.delete("/api/v1/emulate/99999")
-    assert resp.status_code == 200
-    assert "stopped" in resp.json()
-    assert "iid" in resp.json()
+    assert resp.status_code == 404
 
 
 def test_emulate_invalid_arch() -> None:
@@ -94,9 +103,18 @@ class TestUnresolvableRootfsEntries:
 
         scratch = tmp_path / "scratch"
         (scratch / "fw-rootfs" / "sbin").mkdir(parents=True)
-        monkeypatch.setattr("iris.api.server.get_settings", lambda: type(
-            "S", (), {"scratch_dir": scratch, "rules_dir": tmp_path / "rules"}
-        )())
+        from iris.config import Settings
+
+        # A real Settings, not a hand-rolled stand-in: the pipeline endpoint reads
+        # ``api_max_upload_mb`` off it, and a stub missing that field fails with
+        # AttributeError instead of testing the behaviour.
+        monkeypatch.setattr("iris.api.server.get_settings", lambda: Settings(
+            scratch_dir=scratch, iris_home=str(tmp_path),
+            database_url=f"sqlite:///{tmp_path / 'dead.db'}",
+        ))
+        monkeypatch.setattr("iris.api.auth.get_settings", lambda: Settings(
+            scratch_dir=scratch, iris_home=str(tmp_path),
+        ))
         real = {a: getattr(Path, a) for a in ("exists", "is_file", "is_dir", "stat")}
 
         def wrap(attr):

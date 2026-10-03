@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from iris.arch import census_to_runnable, is_little_endian, normalize_arch
+from iris.emulate.linkprobe import LinkProfile, probe_link, render_table
 from iris.emulate.qemu_config import get_config, supported_archs
 from iris.failures import BootDiagnosis, Failure, FailureKind
 from iris.fsutil import safe_is_file, safe_present, safe_read_text, safe_stat_size
@@ -319,9 +320,9 @@ def preflight_arch(rootfs_dir: Path, arch: str) -> Failure | None:
 class EmulationResult:
     """Outcome of one emulation run.
 
-    ``web_ok`` is the reachability verdict; there is no separate ping field
-    because reachability is only ever decided by an HTTP probe against the
-    forwarded port.
+    ``web_ok`` is the reachability verdict, decided only by the HTTP probe
+    against the forwarded port. :attr:`link_profile` does not change that --
+    it explains a failure, it never promotes a run to success.
 
     ``error`` stays the prose every caller prints, and ``failure`` is the
     machine-readable half. They are written together by :meth:`fail` so the
@@ -341,6 +342,14 @@ class EmulationResult:
     #: found alongside it — one failed guest usually has several causes stacked.
     failure: Failure | None = None
     findings: tuple[Failure, ...] = ()
+    #: The layered link measurement, when one was taken. ``None`` means either
+    #: the web plane came up (nothing to explain) or the probe could not run --
+    #: see :attr:`iris.emulate.linkprobe.LinkProfile.unavailable`.
+    link_profile: LinkProfile | None = None
+    #: The address the run was actually judged against. Recorded because the
+    #: default is an assumption and the detected one is a measurement, and
+    #: those two disagree exactly when a network bug is present.
+    guest_ip: str = ""
 
     def fail(self, failure: Failure, message: str = "") -> None:
         """Record a failure and the message that describes it."""
@@ -366,6 +375,7 @@ def _env() -> dict[str, str]:
 
 def _run(cmd: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, env=_env(), timeout=timeout, check=False)
+
 
 
 def _host_address_on_guest_subnet(guest_ip: str) -> str | None:
@@ -832,6 +842,11 @@ def _emulate_firmware(
     logger.info(f"Waiting for firmware to boot (timeout {timeout_sec}s)...")
     boot_deadline = time.time() + timeout_sec
     guest_ip = "192.168.1.1"
+    # Carried on the result from here on, so a failed run still records which
+    # address it was judged against -- the default is an assumption and the
+    # detected one is a measurement, and they disagree exactly when there is a
+    # network bug to explain.
+    result.guest_ip = guest_ip
     socat_updated = False
     placed_subnets: set[str] = set()
     progress = StatusLine()
@@ -876,6 +891,7 @@ def _emulate_firmware(
                     placed_subnets.add(target)
             if detected and detected != guest_ip and not detected.startswith("127."):
                 guest_ip = detected
+                result.guest_ip = detected
                 progress.clear()
                 # Before the forward, not after: the forward is only useful once the
                 # guest will answer packets from this host, and a router whose LAN is
@@ -896,6 +912,7 @@ def _emulate_firmware(
             result.web_ok = True
             result.web_url = f"http://localhost:{host_port}"
             result.success = True
+            result.guest_ip = guest_ip
             progress.close()
             logger.info(f"Web reachable at {result.web_url} (HTTP {http_code}) after {elapsed}s")
             break
@@ -904,7 +921,25 @@ def _emulate_firmware(
         progress.clear()
         logger.warning(f"guest web still unreachable on :{host_port} after {timeout_sec}s")
         if not result.error:
-            result.fail_from_diagnosis(_failure_diagnosis(container_name, iid))
+            diagnosis = _failure_diagnosis(container_name, iid)
+            # A log cannot say where a packet stopped. Before falling back to the
+            # log-only verdict, ask the link: the layered table distinguishes a
+            # guest that never came up from one that is up and dropping our
+            # packets, which the log reads identically. The measured failure is
+            # put first so it leads the diagnosis, with the log findings kept
+            # behind it as the boot-side explanation.
+            profile = probe_link(container_name, guest_ip, 80, runner=_run)
+            measured = profile.as_failure()
+            findings = ((measured,) if measured else ()) + tuple(diagnosis.findings)
+            if measured:
+                logger.error(render_table(profile))
+                diagnosis = BootDiagnosis(
+                    f"emulation failed: {measured.detail}; "
+                    + "; ".join(f.detail for f in diagnosis.findings) + ".",
+                    findings,
+                )
+            result.fail_from_diagnosis(diagnosis)
+            result.link_profile = profile
             logger.error(result.error)
 
     log_result = _run(["docker", "cp", f"{container_name}:/work/scratch/{iid}/qemu.serial.log", str(work_dir / "qemu.serial.log")])
@@ -943,9 +978,30 @@ def _record_outcome(result: EmulationResult, *, iid: int, started_at: datetime) 
                 findings=result.findings,
                 duration_sec=result.duration_sec,
                 started_at=started_at,
+                ping_reachable=result.link_profile.ping_ok if result.link_profile else None,
+                ip=result.guest_ip,
             )
     except Exception as exc:  # noqa: BLE001 - a metric must never fail a run
         logger.warning(f"run {iid} was not recorded to the metadata database: {exc}")
+
+
+def container_exists(name: str, *, timeout: int = 10) -> bool:
+    """Whether docker still has this container -- running *or* exited.
+
+    `stop_emulation` answers this implicitly by deleting and checking the exit
+    code, which cannot be used to look without changing anything. The API needs
+    the read-only version to tell a hosted emulation from a leftover row after a
+    restart. `inspect` rather than `ps` because an exited container is still
+    there: its serial log is the evidence a failure diagnosis needs.
+
+    A name that does not exist makes docker exit non-zero, which is the answer;
+    only a timeout or a missing docker is an error, and the caller decides what
+    to do about that (see ``iris.db.active.container_alive``).
+    """
+    if not name:
+        return False
+    result = _run(["docker", "inspect", "--type", "container", name], timeout=timeout)
+    return result.returncode == 0
 
 
 def stop_emulation(iid: int) -> bool:

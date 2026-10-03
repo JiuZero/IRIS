@@ -103,6 +103,8 @@ def record_run(
     findings: tuple[Failure, ...] = (),
     duration_sec: float = 0.0,
     started_at: datetime | None = None,
+    ping_reachable: bool | None = None,
+    ip: str | None = None,
 ) -> int:
     """Write one ``emulation_run`` row plus a ``failure_profile`` row per finding.
 
@@ -110,6 +112,11 @@ def record_run(
     cause -- while every finding gets its own row, because one guest that fails to
     come up usually has several causes stacked (no NIC, no address, no web server)
     and collapsing them into one bucket would hide which one to fix first.
+
+    ``ping_reachable`` and ``ip`` come from the layered link probe and are both
+    nullable on purpose. "Never measured" and "measured, no reply" are different
+    rows, and a NOT NULL column would force the first to be recorded as the second
+    -- which is how a device that was never probed ends up in the failure count.
     """
     if not findings and not success:
         findings = (Failure(FailureKind.WEB_UNREACHABLE,
@@ -130,6 +137,8 @@ def record_run(
         started_at=started_at or finished,
         finished_at=finished,
         time_web=int(duration_sec) if web_ok else None,
+        ping_reachable=ping_reachable,
+        ip=ip or None,
     )
     session.add(run)
     session.flush()

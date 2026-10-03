@@ -4,6 +4,11 @@
 导致的整机重启循环、`diag` 诊断工具的 SIGSEGV 刷屏、Web 服务无法启动三类问题的证据链、
 根因、修复措施，以及由此沉淀出的 AI 值守（AI Guardian）能力。
 
+> **命名说明**：这里的「AI 值守」是历史沿用的叫法。`src/iris/monitor/ai_guardian.py`
+> 的实现是**正则 + 状态机 + 规则表**，仓库内没有任何模型调用、也没有任何网络推理。
+> 下文的「智能」「自动恢复」等描述均指规则命中后的自动处置，不指模型推断。
+> `emulate guardian-start` 这个命令名与文件名一并保留，以免既有脚本失效。
+
 > 本文档由 `AI_GUARDIAN_SUMMARY.md`、`AI_GUARDIAN_DEPLOYMENT.md`、
 > `TES7002_WEB_NOT_STARTING_ANALYSIS.md`、`FINAL_SOLUTION_SUMMARY.md`、
 > `FINAL_STATUS.md` 五份过程文档归并去重而成。原文之间的矛盾实测数据已在

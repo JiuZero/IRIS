@@ -4,6 +4,91 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.13] - 2026-10-03
+
+产品化改造，优先级 P0–P3。核心动机是实测记录已经在**两次**推翻自己的结论后没人
+同步（`docs/eval-log.md` 说 DIR-868L 不可达，旁边的失败表却已记 HTTP 200），而
+README 还写着「服务起、VLAN 路由不通」。本版让声明可被核对、让判定可被重算。
+
+### 安全
+
+- **API 默认只监听本机**（`serve start` 的 host 默认 `0.0.0.0` → `127.0.0.1`），
+  且非 loopback 且未配置 token 时**拒绝启动**（exit 2）而非静默暴露。README 此前
+  写「docs: http://127.0.0.1:9000/docs」，把一个全网可达的服务描述成本机服务。
+- **token 鉴权**（新增 `iris/api/auth.py`）。`IRIS_API_TOKEN` 或 `--api-token` 配置，
+  接受 `Authorization: Bearer` 与 `X-IRIS-Token`，`hmac.compare_digest` 恒定时间比较；
+  调用方标识取 token 的 sha256 前 16 hex，**不存明文**。health 免鉴权（供探活）。
+  同一 token 的调用方之间按 iid 做归属校验，越权与不存在**同为 404**，不泄露 id 存在性。
+- **上传大小上限**（`IRIS_API_MAX_UPLOAD_MB`，默认 64）。分块读取并在超限时返回 413，
+  此前 `firmware.read()` 无上限。
+
+### 状态可恢复
+
+- **活跃仿真落库**（新增 `ActiveEmulation` 表与 `iris/db/active.py`）。此前
+  `_active_emulations` 是进程内 dict，`serve restart` 后所有在跑的仿真从列表里消失、
+  且无法停止。历史（`emulation_run`）与活跃分表：混用会让重启丢仿真、并污染 `db stats` 口径。
+- **`container_alive` 改为三态**（`bool | None`）。探测异常时旧实现返回 `False`，
+  而 `reconcile` 把 `False` 当「容器已死」→ docker 一次抖动就会误删存活容器的记录，
+  让调用方失去停止能力。现在 `None`（未知）保留行，仅 `is False` 时删除。
+
+### 声明与实现对齐
+
+- README 定位速览去掉「LLM 双轨」，新增**能力边界**小节（LLM 未接入、不含模型调用、
+  拓扑单平面无无线、x86 不在范围）与 **API 交付面**小节（默认绑本机、token、归属隔离、
+  上传上限、重启可见）。量化目标拆为「当前实测 3/5」与「目标 ≥80%（尚未达成）」。
+- 实测表按 0.3.12 同批刷新（62.2 / 49.9 / 53.0 / 312.8 / 246.0s），并标注 WRT1200AC 与
+  R7800 为**环境适配失败（宿主内核 `validate_nla` BUG，项目内不可修）**。
+- API `version` 不再硬编码 `0.1.0`，改为跟随包版本；新增守卫禁止 `src/` 出现三段式
+  版本字面量。
+- 新增 `tests/test_docs_claims.py`（15 项）：未接入的 LLM 不得被声称接入、README 每个
+  耗时数字必须能在 `docs/eval-log.md` 找到（双向溯源）、非 loopback 的 serve 示例必须
+  同时设置 token。
+
+### 评测基线
+
+- 新增 `iris corpus eval` 与 `iris/corpus/baseline.py`。分母 = **声明了 `expect_web`
+  且被实测**的条目；未声明或未实测一律 `skipped`，不进任何分母。分母为 0 时明确告警
+  「这不是 0% 成功率」。
+- **三种口径分开报**：`web_rate`（含环境失败，用户依然没拿到设备）、`capability_rate`
+  （剔除环境失败，只衡量宿主健康时的能力）、`regressions_against`（逐设备点名，
+  因为 `3/5 → 4/5` 可以藏着一修一坏）。
+- `FirmwareEntry` 新增 `expect_web` / `timeout_sec` / `local_file` / `expectation_note` /
+  `db_match`。`db_match` 显式声明与 `image` 表 filename 的对应关系：清单键
+  （`dlink-dir868l-revb`）与存储文件名（`DIR868L_B1_FW205WWb02.bin`）不共享任何命名方案，
+  模糊匹配把一台设备的结果错接到另一台上比没有数字更糟。
+- 报告 JSON 遇到未知 verdict **抛错而非降级**：旧版本读新版本的基线时若静默降级，
+  每一台设备都会显示成未实测，等于凭空造出一个通过。
+- `m0-baseline.toml` 全部 10 个条目补齐排除理由与 `db_match`；两条环境失败按实测标注
+  `env-broken`。实测：`web_rate=50%` / `capability_rate=100%`（该口径下 IRIS 未失分）。
+
+### 链路分层主动探测
+
+- 新增 `iris.emulate.linkprobe`：**实测** route / ARP / ICMP / service 四层，产出链路
+  分层表，并直接命名断点所在层。0.3.12 那次「路由正确、ARP `REACHABLE`、ping 无应答、
+  curl `000`」的手工排查从此固化为代码——它当时被读成「固件有问题」，实际是宿主桥地址
+  落在 guest 子网之外，而路由器按设计静默丢弃这类报文。
+- 新增 4 个 `FailureKind`（`Stage.NETWORK`）：`link-no-route` / `link-no-arp` /
+  `link-no-icmp` / `link-no-service`。hint 直接写明实测根因，例如 `link-no-icmp`
+  指向「源地址不在 guest 自己的子网内」。
+- **三态而非两态**：每层是 `ok` / `blocked` / `unknown`。探针跑不起来（容器无 `ping`、
+  docker 不可用）与「报文真的死了」是两件事，混同会凭空造出网络故障。实测镜像内
+  **`nc` 与 `arping` 不存在、`ping` 存在**，故 L2 用 `ip neigh`、L4 用 `curl`。
+- **ARP 在 ICMP 之后读**：邻居表是「发包」的副产物，先读 ARP 会在健康链路上得到空表，
+  从而把 L4 的问题错记到 L2 头上。`INCOMPLETE` / 全零 MAC / `FAILED` 三种实测形态
+  都判为 `blocked`，空表判为 `unknown`。
+- **curl 退出码只记录不解读**：实测对不可达地址返回 7 或 28、对可达但端口关闭也返回 7，
+  同一码覆盖两种完全不同的原因，因此由上层的层结论来判定。
+- 任何 HTTP 码（**含 403 / 404**）都算「有东西应答了」——guest 在猜错的端口上跑着登录页
+  仍是可用设备，把它记成不可达正是「端口猜错」变成「固件坏了」的路径。
+- 失败诊断顺序：实测结论在前、日志推断在后，且 verdict 的 detail 会显式写出
+  **哪一层没能测到**（无邻居表条目时无法区分「没有这个地址」与「ARP 无人应答」）。
+- `emulation_run.ping_reachable` / `ip` 两列此前存在于 schema 却无任何写入路径，现由
+  分层探测填充；两列均可空，因为「没测过」与「测了没有」必须能区分。
+- API `EmulateResponse` 新增 `link` 字段（分层表），`state` 用 `LayerState` 枚举而非
+  字符串，未知状态直接校验失败而不是原样透传。
+- 关键命令与解析器**均在 `iris-emulate:latest` 内实跑校验**，测试夹具是捕获的真实输出
+  而非凭记忆编写。
+
 ## [0.3.12] - 2026-10-03
 
 按 0.3.11 与 FirmAE 的实测对比结论回头修缺陷。**同语料仿真成功率从 2/5 变为 3/5：

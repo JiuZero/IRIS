@@ -1,32 +1,60 @@
-"""L5 orchestration API — FastAPI service for batch firmware emulation."""
+"""L5 orchestration API — FastAPI service for batch firmware emulation.
+
+Three things changed when this became something other than a local convenience
+script, and each one is enforced here rather than in documentation:
+
+* **Authentication.** Every route below except ``/api/v1/health`` requires the
+  shared token (:mod:`iris.api.auth`). Without one the server runs in local mode,
+  which is only reachable because ``iris serve start`` refuses to bind a
+  non-loopback address in that case.
+* **Ownership.** Emulations live in ``active_emulation`` with the client that
+  created them, not in a module-level dict. A run survives a restart, and no
+  caller can read or stop somebody else's run -- both were impossible with a
+  dict, which also meant two workers disagreed about what was running.
+* **Bounded input.** ``/api/v1/pipeline`` streams the upload and aborts past a
+  configured cap instead of ``firmware.read()``-ing an arbitrary body into
+  memory.
+
+``/api/v1/health`` stays unauthenticated on purpose: a liveness probe cannot
+carry a token. It therefore reports only what a probe needs.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
-import time
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from pydantic import BaseModel, Field
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from pydantic import BaseModel, ConfigDict, Field
 
+from iris import __version__
+from iris.api.auth import require_client
 from iris.arch import normalize_arch
 from iris.config import get_settings
+from iris.db.active import list_owned, reconcile, register, release
+from iris.db.engine import get_engine, init_db, make_session
+from iris.emulate.linkprobe import LayerState
 from iris.emulate.orchestrator import emulate_firmware, preflight_arch, stop_emulation
 from iris.emulate.qemu_config import supported_archs
 from iris.extract.arch import identify_elf
 from iris.fsutil import safe_is_dir, safe_present
+from iris.log import get_logger
+
+logger = get_logger(__name__)
 
 _SUPPORTED_ARCHS = tuple(supported_archs())
 
 app = FastAPI(
     title="IRIS — IoT Rehosting & Interconnection Simulator",
-    version="0.1.0",
+    version=__version__,
     description="Automated firmware rehosting platform for network devices",
 )
 
-_active_emulations: dict[int, dict[str, Any]] = {}
+#: Read in chunks so the cap is enforced while the body arrives. 1 MiB keeps the
+#: number of iterations low for a 64 MiB default without ever holding two copies.
+_UPLOAD_CHUNK = 1024 * 1024
 
 
 class EmulateRequest(BaseModel):
@@ -37,6 +65,28 @@ class EmulateRequest(BaseModel):
     timeout: int = Field(120, description="boot timeout in seconds")
 
 
+
+class LinkLayerView(BaseModel):
+    """One row of the layered link table.
+
+    ``state`` is the closed :class:`~iris.emulate.linkprobe.LayerState` enum
+    rather than a string: ``unknown`` means the probe could not run, which is not
+    the same claim as ``blocked``, and a client that cannot tell them apart will
+    page someone about a network that was never measured.
+    """
+
+    layer: str
+    state: LayerState
+    detail: str = ""
+
+
+class LinkProfileView(BaseModel):
+    guest_ip: str
+    first_break: str = ""
+    unavailable: str = ""
+    layers: list[LinkLayerView] = Field(default_factory=list)
+
+
 class EmulateResponse(BaseModel):
     iid: int
     success: bool
@@ -45,6 +95,10 @@ class EmulateResponse(BaseModel):
     duration_sec: float
     error: str
     container_id: str
+    #: ``None`` when the run succeeded, or when the probe could not run at all.
+    #: Present on the failure path because that is the only path where it says
+    #: anything: it names the layer a packet stopped at.
+    link: LinkProfileView | None = None
 
 
 class FirmwareInfo(BaseModel):
@@ -54,18 +108,81 @@ class FirmwareInfo(BaseModel):
 
 
 class HealthResponse(BaseModel):
+    #: ``extra="forbid"`` because the default silently drops unknown fields.
+    #: With the default, re-adding ``active_emulations`` produced a response that
+    #: simply did not contain it, so the mutation stayed green and nothing
+    #: constrained this model's shape from the outside.
+    model_config = ConfigDict(extra="forbid")
+
     status: str
     version: str
-    active_emulations: int
+
+
+#: Every stateful route depends on this. It returns the caller's client id, which
+#: is what ownership is checked against.
+Caller = Annotated[str, Depends(require_client)]
+
+
+#: Engines cached per database URL. Building an ``Engine`` per request would
+#: open a fresh connection pool and re-run ``create_all`` on every call; keying
+#: by URL rather than keeping one global also means a caller that repoints
+#: ``database_url`` gets its own pool instead of the real database's.
+_ENGINES: dict[str, Any] = {}
+
+
+def _session():
+    """A session against the configured database, creating the schema on first use.
+
+    Created per request rather than at import time: importing this module must
+    not touch the filesystem, because the tests import it and the CLI imports it
+    for ``serve start`` without ever serving.
+    """
+    url = get_settings().database_url
+    engine = _ENGINES.get(url)
+    if engine is None:
+        engine = get_engine(url)
+        init_db(engine)
+        _ENGINES[url] = engine
+    return make_session(engine)
 
 
 @app.get("/api/v1/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
-    return HealthResponse(status="ok", version="0.1.0", active_emulations=len(_active_emulations))
+    """Liveness probe. Unauthenticated on purpose -- a probe cannot carry a token.
+
+    Reports liveness and the version only. The emulation count this used to
+    return was unauthenticated information about how much work the host is doing,
+    and it moved to ``/api/v1/emulate``, which is authenticated.
+    """
+    return HealthResponse(status="ok", version=__version__)
+
+
+async def _read_upload(firmware: UploadFile, limit_bytes: int) -> bytes:
+    """Read the upload, refusing to go past ``limit_bytes``.
+
+    Streaming rather than ``firmware.read()``: the whole point is that a body
+    larger than the cap never gets to exist in memory. The client is disconnected
+    from as soon as the cap is passed, so an oversized upload costs the bytes
+    already transferred and nothing more.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await firmware.read(_UPLOAD_CHUNK)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"upload exceeds the {limit_bytes // (1024 * 1024)} MiB limit",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 @app.get("/api/v1/firmware", response_model=list[FirmwareInfo])
-async def list_firmware() -> list[FirmwareInfo]:
+async def list_firmware(caller: Caller) -> list[FirmwareInfo]:
     settings = get_settings()
     scratch = settings.scratch_dir
     result = []
@@ -96,7 +213,7 @@ async def list_firmware() -> list[FirmwareInfo]:
 
 
 @app.post("/api/v1/emulate", response_model=EmulateResponse)
-async def emulate(req: EmulateRequest) -> EmulateResponse:
+async def emulate(req: EmulateRequest, caller: Caller) -> EmulateResponse:
     rootfs = Path(req.rootfs_path)
     if not safe_is_dir(rootfs):
         raise HTTPException(status_code=404, detail=f"rootfs not found: {req.rootfs_path}")
@@ -131,15 +248,13 @@ async def emulate(req: EmulateRequest) -> EmulateResponse:
         timeout_sec=req.timeout,
     )
 
-    _active_emulations[iid] = {
-        "iid": iid,
-        "arch": arch,
-        "success": result.success,
-        "web_ok": result.web_ok,
-        "web_url": result.web_url,
-        "container_id": result.container_id,
-        "started_at": time.time(),
-    }
+    _remember(
+        iid=iid,
+        caller=caller,
+        arch=arch,
+        rootfs_path=rootfs,
+        result=result,
+    )
 
     return EmulateResponse(
         iid=iid,
@@ -149,26 +264,99 @@ async def emulate(req: EmulateRequest) -> EmulateResponse:
         duration_sec=result.duration_sec,
         error=result.error or "",
         container_id=result.container_id,
+        link=_link_view(result.link_profile),
     )
 
 
+def _link_view(profile: Any) -> LinkProfileView | None:
+    """The layered link table, shaped for a client. ``None`` when there is none."""
+    if profile is None:
+        return None
+    return LinkProfileView(
+        guest_ip=profile.guest_ip,
+        first_break=str(profile.first_break) if profile.first_break else "",
+        unavailable=profile.unavailable,
+        layers=[
+            LinkLayerView(layer=p.layer.value, state=p.state.value, detail=p.detail)
+            for p in profile.probes
+        ],
+    )
+
+
+def _remember(*, iid: int, caller: str, arch: str, rootfs_path: Path, result: Any) -> None:
+    """Record the run as hosted by ``caller``. Best-effort, like run recording.
+
+    A database that cannot be reached must not turn a finished emulation into an
+    error response -- but it must say so, because that is exactly the state in
+    which a caller cannot later stop their own container.
+    """
+    try:
+        with _session() as session:
+            register(
+                session,
+                iid=iid,
+                client_id=caller,
+                arch=arch,
+                rootfs_path=str(rootfs_path),
+                container_id=result.container_id,
+                web_url=result.web_url or "",
+                success=result.success,
+                web_ok=result.web_ok,
+            )
+    except Exception as exc:  # noqa: BLE001 - bookkeeping must not fail a run
+        logger.warning(f"emulation {iid} was not registered as active: {exc}")
+
+
+def _drop_stale(client_id: str) -> None:
+    """Reconcile before listing, so a restart does not report dead containers."""
+    try:
+        with _session() as session:
+            reconcile(session)
+    except Exception as exc:  # noqa: BLE001 - listing must not fail on this
+        logger.warning(f"could not reconcile stale emulations: {exc}")
+
+
 @app.get("/api/v1/emulate", response_model=list[dict])
-async def list_emulations() -> list[dict]:
-    return list(_active_emulations.values())
+async def list_emulations(caller: Caller) -> list[dict]:
+    """Only the caller's own emulations. There is no way to ask for others'."""
+    _drop_stale(caller)
+    try:
+        with _session() as session:
+            rows = list_owned(session, caller)
+    except Exception as exc:  # noqa: BLE001 - an empty list beats a 500 here
+        logger.warning(f"could not read active emulations: {exc}")
+        return []
+    return [vars(record) for record in rows]
 
 
 @app.get("/api/v1/emulate/{iid}", response_model=dict)
-async def get_emulation(iid: int) -> dict:
-    if iid not in _active_emulations:
+async def get_emulation(iid: int, caller: Caller) -> dict:
+    try:
+        with _session() as session:
+            rows = [r for r in list_owned(session, caller) if r.iid == iid]
+    except Exception as exc:
+        logger.warning(f"could not read emulation {iid}: {exc}")
+        raise HTTPException(status_code=503, detail="active emulation table unavailable") from exc
+    if not rows:
+        # 404 for "not yours" as well as "not there": saying which would tell a
+        # caller that somebody else's id exists.
         raise HTTPException(status_code=404, detail=f"emulation {iid} not found")
-    return _active_emulations[iid]
+    return vars(rows[0])
 
 
 @app.delete("/api/v1/emulate/{iid}")
-async def stop_emulation_api(iid: int) -> dict:
+async def stop_emulation_api(iid: int, caller: Caller) -> dict:
+    try:
+        with _session() as session:
+            record = release(session, iid=iid, client_id=caller)
+    except Exception as exc:
+        logger.warning(f"could not release emulation {iid}: {exc}")
+        raise HTTPException(status_code=503, detail="active emulation table unavailable") from exc
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"emulation {iid} not found")
     ok = stop_emulation(iid)
-    _active_emulations.pop(iid, None)
     return {"stopped": ok, "iid": iid}
+
 
 class PipelineResponse(BaseModel):
     iid: int
@@ -184,6 +372,7 @@ class PipelineResponse(BaseModel):
 
 @app.post("/api/v1/pipeline", response_model=PipelineResponse)
 async def pipeline(
+    caller: Caller,
     firmware: UploadFile = File(..., description="Firmware binary file"),
     arch: str = "",
     port: int = 8080,
@@ -196,7 +385,8 @@ async def pipeline(
     settings = get_settings()
     scratch = settings.scratch_dir
 
-    content = await firmware.read()
+    limit_bytes = max(1, settings.api_max_upload_mb) * 1024 * 1024
+    content = await _read_upload(firmware, limit_bytes)
     safe_name = Path(firmware.filename or "firmware.bin").name
     if safe_name.lower().endswith(".zip") or content[:4] == b"PK\x03\x04":
         raise HTTPException(
@@ -284,15 +474,13 @@ async def pipeline(
         timeout_sec=timeout,
     )
 
-    _active_emulations[iid] = {
-        "iid": iid,
-        "arch": detected_arch,
-        "success": result.success,
-        "web_ok": result.web_ok,
-        "web_url": result.web_url,
-        "container_id": result.container_id,
-        "started_at": time.time(),
-    }
+    _remember(
+        iid=iid,
+        caller=caller,
+        arch=detected_arch,
+        rootfs_path=rootfs_dir,
+        result=result,
+    )
 
     return PipelineResponse(
         iid=iid,

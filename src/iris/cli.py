@@ -380,6 +380,122 @@ def corpus_download(
     out.info(f"done, {failures} failure(s)")
 
 
+@corpus_app.command("eval")
+def corpus_eval(
+    manifest: Path = typer.Argument(Path("iris-home/corpus/m0-baseline.toml")),
+    # `None`, not `Path("")`: typer renders an empty Path default as "." and
+    # `bool(Path("."))` is True, so an "unset" Path option reads the current
+    # directory and raises PermissionError instead of being skipped.
+    observations: Path | None = typer.Option(
+        None,
+        help="JSON file of {entry_name: {web_ok, duration_sec, failure_kind}}; "
+             "omit to report the manifest's declared expectations unmeasured",
+    ),
+    env_broken: str = typer.Option(
+        "",
+        help="comma-separated entry names whose failure was environmental, not IRIS's",
+    ),
+    from_db: bool = typer.Option(
+        False,
+        "--from-db",
+        help="take each entry's observation from the newest recorded run instead of --observations",
+    ),
+    baseline: Path | None = typer.Option(
+        None,
+        help="a previous report JSON to diff against; prints per-device regressions",
+    ),
+    write: Path | None = typer.Option(None, help="also write the Markdown report here"),
+    write_json: Path | None = typer.Option(
+        None, help="also write the machine-readable report here (for --baseline)"
+    ),
+) -> None:
+    """Score the corpus against declared expectations.
+
+    The denominator is the entries that declare an expectation and were actually
+    measured -- never "all entries in the manifest", because an unmeasured device
+    silently becomes a failure that way.
+    """
+    import json
+
+    from iris.corpus.baseline import (
+        evaluate,
+        render_markdown,
+        report_from_json,
+        report_to_json,
+    )
+    from iris.corpus.manifest import load_manifest
+
+    m = load_manifest(manifest)
+    observed: dict[str, dict[str, object]] = {}
+    if from_db:
+        from iris.corpus.baseline import observations_from_db
+
+        settings = get_settings()
+        engine = get_engine(settings.database_url)
+        init_db(engine)
+        with make_session(engine) as session:
+            observed = observations_from_db(m.entries, session)
+        out.info(f"{len(observed)}/{len(m.entries)} entries matched a recorded run")
+    elif observations:
+        observed = json.loads(observations.read_text(encoding="utf-8"))
+    broken = tuple(n.strip() for n in env_broken.split(",") if n.strip())
+
+    report = evaluate(m.entries, observed, env_broken=broken)
+
+    rows = [
+        f"{r.name:<28} {r.verdict:<10} web={'-' if r.web_ok is None else r.web_ok!s:<5} "
+        f"{r.duration_sec:>7.1f}s {r.failure_kind}"
+        for r in report.results
+    ]
+    out.block("info", f"corpus eval: {m.name}", rows)
+    if report.total == 0:
+        # 0/0 printed as "0%" reads as "everything failed", which is the opposite
+        # of what happened: nothing was measured. Say which it is.
+        err.warning(
+            "denominator is 0 -- no entry declared an expectation and was measured. "
+            "This is NOT a 0% success rate; pass --from-db or --observations."
+        )
+    out.info(
+        f"participants={report.total} met={report.met} "
+        f"web_rate={report.web_rate:.0%} env_broken={report.env_broken} "
+        f"capability_rate={report.capability_rate:.0%}"
+    )
+
+    if baseline:
+        # An absent baseline file must say so. Silently skipping the comparison
+        # prints no regression line, which reads as "nothing got worse" -- the
+        # one conclusion a regression check exists to prevent.
+        if not baseline.is_file():
+            err.warning(
+                f"baseline {baseline} does not exist -- no comparison was made. "
+                "This is NOT a clean bill of health; write one with --write-json."
+            )
+        else:
+            previous = report_from_json(json.loads(baseline.read_text(encoding="utf-8")))
+            regressions = report.regressions_against(previous)
+            if regressions:
+                for r in regressions:
+                    err.warning(
+                        f"REGRESSION: {r.name} was met, now {r.verdict} "
+                        f"({r.failure_kind or 'no failure kind recorded'})"
+                    )
+            else:
+                out.info(f"no regressions against {baseline.name}")
+
+    if write:
+        write.parent.mkdir(parents=True, exist_ok=True)
+        write.write_text(render_markdown(report, title=f"{m.name} 评测基线"), encoding="utf-8")
+        out.info(f"report written: {write}")
+
+    if write_json:
+        write_json.parent.mkdir(parents=True, exist_ok=True)
+        write_json.write_text(
+            json.dumps(report_to_json(report), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        out.info(f"machine-readable report written: {write_json}")
+
+
 @rules_app.command("list")
 def rules_list() -> None:
     """Show all L3 boot-fix rules."""
@@ -739,14 +855,36 @@ def emulate_status(iid: int = typer.Argument(..., help="image ID to inspect")) -
 
 @serve_app.command("start")
 def serve_start(
-    host: str = typer.Option("0.0.0.0", help="bind address"),
+    host: str = typer.Option(
+        "127.0.0.1",
+        help="bind address; 0.0.0.0 exposes the API to the network and requires a token",
+    ),
     port: int = typer.Option(9000, help="API server port"),
     reload: bool = typer.Option(False, help="auto-reload on code changes"),
+    api_token: str = typer.Option(
+        "",
+        help="API token; falls back to $IRIS_API_TOKEN, and is mandatory for non-loopback binds",
+    ),
 ) -> None:
     """Start the IRIS FastAPI orchestration server."""
     import uvicorn
 
-    out.info(f"IRIS API server starting on {host}:{port}")
+    from iris.api.auth import configured_token, is_loopback_host
+
+    token = api_token.strip() or configured_token()
+    if not is_loopback_host(host) and not token:
+        # Fail closed. The API can upload a file, start a container and stop one
+        # by id; binding it to every interface without a token hands all three to
+        # everyone on the LAN, which is how the server shipped with a default
+        # nobody had opted into.
+        err.warning(
+            f"refusing to bind {host}: no API token configured. "
+            "Set IRIS_API_TOKEN, pass --api-token, or bind a loopback address."
+        )
+        raise typer.Exit(code=2)
+
+    bind_note = " (token required)" if token else " (local mode: no token)"
+    out.info(f"IRIS API server starting on {host}:{port}{bind_note}")
     out.info(f"docs: http://{host}:{port}/docs")
     uvicorn.run("iris.api.server:app", host=host, port=port, reload=reload)
 

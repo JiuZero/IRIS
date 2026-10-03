@@ -11,18 +11,30 @@
 |---|---|
 | 主干路线 | QEMU 全系统仿真 + 定制内核插桩 + libnvram 用户态仿真（FirmAE 已验证路线） |
 | arm64 通道 | Alpine generic virt 内核 + 自建 initramfs，直跑厂商 `/sbin/init`（FirmAE 无 aarch64 内核的补位方案） |
-| 差异化 | 结构化失败画像 + 规则引擎/LLM 双轨环境恢复；摄像头媒体面（RTSP/ONVIF）；多设备虚拟组网 |
-| 量化目标 | 精选评测集 Web 可达 ≥80%；长尾语料 ≥60%（对标 FirmPilot 2026 的 52.39%） |
+| 差异化 | 结构化失败画像 + 可插拔规则引擎（YAML，零 Python）；摄像头媒体面（RTSP/ONVIF，规划中）；多设备虚拟组网（规划中） |
+| 当前实测 | 同语料 5 设备 Web 可达 **3/5**（`docs/eval-log.md` M1 表，逐条附日志指纹）。两个未通过均为宿主内核 `validate_nla` BUG，已定位、项目内不可修 |
+| 目标 | 精选评测集 Web 可达 ≥80%；长尾语料 ≥60%（对标 FirmPilot 2026 的 52.39%）。**尚未达成**，当前 60% |
+
+> 上表的目标行是目标，不是现状。数字全部取自 `docs/eval-log.md` 的实测记录，改动仿真链路后必须同步刷新该表。
 
 ## 当前能力
 
 | 层 | 能力 | 状态 |
 |---|---|---|
-| L1 提取 | 格式识别（TendaW / squashfs / JFFS2 / uImage / UBI / FIT / 加密厂商格式）、rootfs 解包、ELF 架构校验入库 | ✅ |
+| L1 提取 | 格式识别（TendaW / squashfs / uImage / UBI / FIT magic / 加密厂商格式**仅识别不解密**）、rootfs 解包（squashfs 为唯一解包路径）、ELF 架构校验入库 | ✅ |
 | L2 仿真 | QEMU 全系统仿真，四架构通道：`mipsel` / `mipseb` / `armel` / `arm64`；架构预检（不符直接给出正确架构建议，`--force` 可绕过）；Docker 网络桥接 + 主机端口转发 + 串口日志采集 | ✅ |
+| L2 诊断 | **链路分层主动探测**：失败路径上实测 route / ARP / ICMP / service 四层，产出链路分层表并直接命名断点所在层（`link-no-route` / `link-no-arp` / `link-no-icmp` / `link-no-service`） | ✅ |
 | L3 规则 | YAML 启动修复规则引擎（`rules/`，6 条实证规则），可插拔、可回归，修复后带证据校验 | ✅ |
-| L4 交互 | RTSP/ONVIF 媒体面 | 🔬 M3 |
-| L5 编排 | Typer CLI + FastAPI 服务（上传固件 → 提取 → 仿真一条 `/api/v1/pipeline` 打通）+ AI 值守监控（`emulate guardian-start`） | ✅ |
+| L4 交互 | RTSP/ONVIF 媒体面 | 🔬 未实现（M3 规划） |
+| L5 编排 | Typer CLI + FastAPI 服务（上传固件 → 提取 → 仿真一条 `/api/v1/pipeline` 打通）+ 值守监控（`emulate guardian-start`，规则+状态机，**不含模型调用**） | ✅ |
+| L5 交付面 | API 鉴权（`IRIS_API_TOKEN`）、按调用方隔离的仿真归属、上传大小上限、运行状态落库（重启可见） | ✅ |
+
+### 能力边界（请按此判断可行性）
+
+- **LLM 尚未接入**：失败修复当前全部由 YAML 规则引擎完成，仓库内没有任何模型调用代码。`ai_guardian.py` 是正则 + 状态机的规则式值守，不含推理。
+- **解包格式单一**：实际可解包的只有 `squashfs`。`ext4` / `cramfs` / `yaffs2` / `cpio` / `tar` 会明确落到 `no-rootfs` 失败画像，而不是静默产出错误 rootfs。`JFFS2` 仅在 TendaW 容器内可解。
+- **网络拓扑单平面**：单 TAP + 单网桥 + 固定 VLAN 1，端口转发目标端口硬编码；无 `eth1` 及以上网卡，无无线（802.11）仿真。
+- **x86 语料不在仿真范围**。
 
 ## 快速开始
 
@@ -54,6 +66,22 @@ iris serve start                                   # docs: http://127.0.0.1:9000
 curl -F "file=@firmware.bin" http://127.0.0.1:9000/api/v1/pipeline
 ```
 
+### API 交付面
+
+默认**只监听本机**。要让局域网访问，必须显式配 token，否则 `serve start` 会拒绝启动（退出码 2）：
+
+```bash
+export IRIS_API_TOKEN=$(python -c "import secrets;print(secrets.token_urlsafe(32))")
+iris serve start --host 0.0.0.0 --port 9000
+curl -H "Authorization: Bearer $IRIS_API_TOKEN" -F "file=@firmware.bin" \
+     http://127.0.0.1:9000/api/v1/pipeline
+```
+
+- 除 `/api/v1/health`（探针用，故意免鉴权）外，所有路由都要求 token：`Authorization: Bearer <token>` 或 `X-IRIS-Token` 两种写法均可。
+- 仿真按调用方隔离：`GET` / `DELETE /api/v1/emulate/{iid}` 只能操作**自己创建**的仿真，越权一律返回 404（不区分「不存在」与「不属于你」，避免泄露 id 是否存在）。
+- 运行中的仿真记录在数据库而不是进程内存里，**重启服务后仍可见**；容器已消失的记录会被自动清理。
+- 上传上限 `IRIS_API_MAX_UPLOAD_MB`（默认 64），超出返回 413。
+
 **调试入口 / Debug entrypoint**：根目录 `iris.py` 与 `iris` 命令、`python -m iris.cli` 完全等价，
 但它是个真实文件，IDE 的"调试当前文件"可直接打上断点跑通整条 CLI 链路，无需配置 module 与工作目录：
 
@@ -72,17 +100,48 @@ python iris.py emulate run ./rootfs_out --arch mipsel --port 8080
 
 ## 已验证样例（M0/M1 评测集）
 
+下表为 **0.3.12 同批实测**（iid 6711–6715，`--timeout 300/240`），不是历史最优值：
+
 | 固件 | arch | 结果 |
 |---|---|---|
-| OpenWrt Archer C7 v2 | mipseb | ✅ Web 可达（HTTP 200，73s） |
-| OpenWrt Newifi D2 | mipsel | ✅ Web 可达（HTTP 200，47s） |
-| D-Link DIR-868L revB | armel | ⚠️ 服务起、VLAN 路由不通 |
-| Linksys WRT1200AC / Netgear R7800 | armel | ⚠️ 启动后 kernel panic（nlattr） |
+| OpenWrt Newifi D2 | mipsel | ✅ Web 可达（HTTP 200，62.2s） |
+| OpenWrt Archer C7 v2 | mipseb | ✅ Web 可达（HTTP 200，49.9s） |
+| D-Link DIR-868L revB | armel | ✅ Web 可达（HTTP 200，53.0s）— 0.3.12 由失败转成功，见下方说明 |
+| Linksys WRT1200AC | armel | ❌ HTTP 000（312.8s）。**环境适配失败**：宿主内核在 `validate_nla+0x3c` 触发 BUG（`udf` 陷阱），netifd 被打死 → eth0 地址丢失。项目内不可修 |
+| Netgear R7800 | armel | ❌ HTTP 000（246.0s）。与 WRT1200AC **同一根因**（`pc` 与出错文件行号完全相同） |
 | Tenda TC3T14C（摄像头） | armel | 多 JFFS2 合并提取成功，Lua init 仿真待研究 |
 | Tenda US_i29 / TES7002（aarch64） | arm64 | ✅ TES7002 走 arm64 通道：厂商 init + `iris_net_fix` 兜底网络，Web 登录页 HTTP 200（两次实测 289s / 258s，`--timeout` 需 ≥480）；US_i29 仍需 arm64 内核镜像 |
 | YZTenda 加密固件 | — | 明确失败画像："FIT + 加密无法提取"（不再误报 no squashfs） |
 
+**DIR-868L 的结论曾被推翻两次**，这里记录最终状态以免旧结论再次流传：最初记为「服务起、VLAN 路由不通」，0.3.11 记为「宿主与 guest 不同子网导致全网失败」，两者都被推翻。真实根因在宿主侧——`run_qemu.sh` 把宿主桥放在 `192.168.1.254/16`，而目标网络是 `192.168.0.0/24`，宿主地址不在 guest 子网内被静默丢弃。修复是在宿主桥上补一个落在 guest 子网内的地址（`.254`，guest 占用时退 `.253`）。**这是宿主基础设施缺陷，不是固件缺陷，也不是 VLAN 问题。**
+
 明细与日志指纹见 `docs/eval-log.md`。
+
+### 口径可执行化（`iris corpus eval`）
+
+上表的数字此前靠人手维护：结论被推翻两次，旁边的失败表却没人同步，两个文件能各说各话。
+现在判定由 `iris corpus eval` 从语料清单 + 实测记录算出，三种口径分开报：
+
+```bash
+# 从 emulation_run 取每个条目最新一次运行来评分（清单里的 db_match 声明对应关系）
+python iris.py corpus eval --from-db --env-broken openwrt-wrt1200ac,openwrt-r7800
+
+# 导出报告，并与上一版逐设备对比回归
+python iris.py corpus eval --from-db --write-json iris-home/corpus/m0-report.json
+python iris.py corpus eval --from-db --baseline iris-home/corpus/m0-report.json \
+    --write iris-home/corpus/m0-report.md
+```
+
+报告写到 `iris-home/corpus/`，**不要覆盖 `docs/eval-log.md`**：那份文件还带串口日志指纹，
+是人工判读的证据；`corpus eval` 的输出口径不同，覆盖它等于删掉证据。
+
+- **Web 可达率**：分母含环境失败条目——用户依然没拿到设备。
+- **能力口径**：分母剔除环境失败条目——只衡量宿主健康时 IRIS 能做到什么。
+- **逐设备回归**：`3/5 → 4/5` 可能藏着一修一坏，比率相等时尤其如此，所以回归按设备点名。
+
+三条口径都不能靠「全部条目」当分母：清单里没声明期望的条目永远不进分母，
+未实测的条目记 `skipped`。`db_match` 声明与 `image` 表 filename 的对应关系，
+匹配不上的条目显示为未实测，而不是悄悄缩小分母。
 
 ## 目录结构（Monorepo）
 
@@ -135,6 +194,9 @@ M0 技术验证 → M1 MVP 主干 → M2 规模化 → M3 交互与分析 → M4
 - **厂商网络模型强绑定真实存储**：如 Tenda configd 依赖 `ubi0:ubi_Config` 挂载 `/var/config`，仿真环境无该分区时 eth0 不获址，由 `iris_net_fix` 兜底（补 IP、放行 iptables、telnetd:7002、goahead/boa Web 拉起），TES7002 实测由此拿到可达 Web；
 - **QEMU CPU 型号**：厂商 aarch64 二进制常用 ARMv8.3 指针认证（PAC），arm64 通道必须 `-cpu max`，否则 SIGILL；
 - x86 语料不在仿真范围（当前仅 mipsel/mipseb/armel/arm64）。
+- **失败知识尚未闭环**：`failure_profile` 只写不读，仓库内没有任何代码按历史失败指导下一次仿真；73 次历史 run 未产生复利。
+- **链路已主动测量，但仅在失败路径上**：`iris.emulate.linkprobe` 会分层实测 route / ARP / ICMP / service 并产出链路分层表，且只在 Web 超时的失败路径上运行——成功路径不做探测。ARP 层在没有邻居表条目时**无法区分「没有这个地址」与「ARP 问过但没人应」**，此时该层记 `unknown`，verdict 的 detail 会显式写出「哪一层没测到」。
+- **语料规模**：当前 5 个 M1 设备，离任何可承诺的成功率都还很远。
 
 ## 协作规范（强制）
 

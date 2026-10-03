@@ -153,3 +153,31 @@ class RepairAction(Base):
     evidence: Mapped[str | None] = mapped_column(String)
     applied: Mapped[bool] = mapped_column(Boolean, default=False)
     promoted: Mapped[bool] = mapped_column(Boolean, default=False)  # promoted to deterministic rule
+
+class ActiveEmulation(Base):
+    """A run this service is currently hosting.
+
+    Separate from ``emulation_run`` on purpose. ``emulation_run`` is history and is
+    what ``iris db stats`` counts; folding "still running right now" into it would
+    make the live set and the recorded set the same population, so a restarted
+    service would either lose its emulations or silently inflate every statistic
+    with rows that are not finished.
+
+    ``client_id`` is a hash prefix of the caller's token (see
+    ``iris.api.auth.client_id_of``), never the token. It answers one question:
+    may this caller stop this run? Rows for a container that no longer exists are
+    stale and get dropped by ``reconcile`` rather than trusted.
+    """
+
+    __tablename__ = "active_emulation"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    iid: Mapped[int] = mapped_column(Integer, nullable=False, unique=True, index=True)
+    client_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    arch: Mapped[str | None] = mapped_column(String)
+    container_id: Mapped[str | None] = mapped_column(String)
+    rootfs_path: Mapped[str | None] = mapped_column(String)
+    web_url: Mapped[str | None] = mapped_column(String)
+    success: Mapped[bool] = mapped_column(Boolean, default=False)
+    web_ok: Mapped[bool] = mapped_column(Boolean, default=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, default=datetime.utcnow)
