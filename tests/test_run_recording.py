@@ -18,7 +18,7 @@ import pytest
 from sqlalchemy import select
 
 from iris.db.engine import get_engine, init_db, make_session
-from iris.db.models import Brand, EmulationRun, FailureProfile, Image
+from iris.db.models import Brand, EmulationRun, FailureProfile, Image, RepairAction
 from iris.db.runs import (
     attribute_to_image,
     failure_histogram,
@@ -300,6 +300,37 @@ class TestOrchestratorRecordsEveryOutcome:
         result = orchestrator.emulate_firmware(tmp_path / "fw-rootfs", "ppc", 1,
                                                 tmp_path / "scratch", record=False)
         assert result.failure is not None
+
+
+class TestTheRepairLedgerIsWrittenOnTheRun:
+    """`repair_action` shipped with six columns and no writer, so L3 rules fired on
+    every emulation and nothing recorded that they had. These drive the orchestrator
+    rather than `record_repairs` directly, because the missing link was never the
+    ledger function -- it was that nothing ever handed it the rule ids."""
+
+    @pytest.fixture(autouse=True)
+    def _record_into_this_test_s_database(self, db, monkeypatch):
+        from iris import config
+
+        monkeypatch.setattr(config.get_settings(), "database_url",
+                            f"sqlite:///{(Path(db.url.database)).as_posix()}")
+
+    def test_a_run_that_fired_rules_records_them(self, session, tmp_path):
+        (tmp_path / "fw-rootfs").mkdir()
+        orchestrator.emulate_firmware(
+            tmp_path / "fw-rootfs", "ppc", 1, tmp_path / "scratch",
+            applied_rule_ids=("netfix-telnetd", "boot-hook-order"),
+        )
+        rows = list(session.scalars(select(RepairAction)))
+        assert [r.rule_id for r in rows] == ["netfix-telnetd", "boot-hook-order"]
+        (run,) = session.scalars(select(EmulationRun))
+        assert {r.run_id for r in rows} == {run.id}
+
+    def test_a_run_that_fired_nothing_leaves_the_ledger_empty(self, session, tmp_path):
+        (tmp_path / "fw-rootfs").mkdir()
+        orchestrator.emulate_firmware(tmp_path / "fw-rootfs", "ppc", 1, tmp_path / "scratch")
+        assert session.query(RepairAction).count() == 0
+
 
 
 class TestSchemaUpgrade:

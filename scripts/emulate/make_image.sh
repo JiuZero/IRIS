@@ -149,6 +149,10 @@ sync
 
 # Copy the final image to the output directory
 cp "${TMP_IMAGE}" "${IMAGE}"
+# A state disk from an earlier bake describes a different filesystem, and run_qemu.sh
+# only creates one when it is missing. Leaving it here would boot the new image with
+# the old one's writes still in it.
+rm -f "${WORK_DIR}/state.raw"
 rm -rf "${TMP_BUILD}"
 
 echo "==== Image built: ${IMAGE} ===="

@@ -89,6 +89,79 @@ README 还写着「服务起、VLAN 路由不通」。本版让声明可被核�
 - 关键命令与解析器**均在 `iris-emulate:latest` 内实跑校验**，测试夹具是捕获的真实输出
   而非凭记忆编写。
 
+### 失败知识闭环
+
+- **`repair_action` 此前有表无写入路径**：六列齐全、零写入代码，L3 规则每次仿真都在
+  触发却没有任何一行记录，于是「施加这条规则是否改变了结果」连人都无法回答。
+  现由 `emulate_firmware(applied_rule_ids=...)` 在**该 run 那一行**上落账
+  （`source="rule"`，`emulate run` 由 `prepared.matched_rule_ids` 透传）。
+  只记真正命中的规则，并去重、剔除空白 id：被提出但没被采纳的修复不是动作。
+  API 的两个仿真端点不跑 L3 规则（它们接受已提取的 rootfs 直接开仿），账本为空是实况。
+- **新增 `iris db cards`**（`iris/db/knowledge.py`）：把 `failure_profile` 按 kind
+  聚成根因卡片——多少次 run、哪些镜像、哪些架构、首次到最后一次、这些 run 上触发过
+  哪些规则。`--promote-only [--recent N]` 只留**最近 N 次失败 run**里仍在出现的 kind，
+  即"还需要写确定性规则的清单"；不带参数时另外打印已退出窗口的 kind，这是修复是否
+  生效的第一个可见信号。实测 73 次历史 run：N=10 留 3 类，N=3 只留 `web-wrong-port`。
+- **信息类被排除**（复用 `db.runs` 的同一份封闭集合）。`network-fallback-ok` 的含义
+  是"注入的网络兜底**按设计生效了**"；按根因排序它会以 36 次排第一并把自己的意思
+  反过来。空 signal 跳过，NULL `started_at` 的 run 计数但不进时间线，
+  `web_reachable` 为 NULL（从未探测）不计为恢复。
+- **门禁是"最近还在发生"而非"是否已恢复"**。本语料没有任何成功 run 带过失败行，
+  `recovered` 对每个 kind 都答"否"，拿它当门禁等于把所有 kind 都排上。窗口按**失败
+  run 条数**而非天数或 kind 数计：本语料的 run 间隔在分钟到小时级，天数窗口会把两天
+  的历史整体判成"活"或"死"；而 kind 数窗口会在同一分钟多个 kind 共用 last-seen 时失真
+  （语料里 `no-guest-ip` 与 `no-network-driver` 的 last_seen 完全相同）。
+- **刻意不自动化**：不因历史行自动施加修复。判定规则有效的唯一证据是活体运行上的
+  `Rule.post_action_verify`，被记住的成功不是它。输出是排序清单，规则仍由人写。
+- 已知缺口（如实记录，不掩饰）：`RuleReport.touched_files` 不落库——`prepare_from_firmware`
+  只带出命中的 rule id，报告本身不外传，因此回答不了"这次修补动了几处"；
+  卡片上的 `recovered` 恒为 0，那是数据的实况而非结论。
+- 新增 `tests/test_failure_knowledge.py`（35 项）与 `test_run_recording.py` 的
+  `TestTheRepairLedgerIsWrittenOnTheRun`（2 项，走 orchestrator 而非直接调
+  `record_repairs`——缺的那一环从来不是账本函数，而是没人把 rule id 交给它）。
+  10 项变异验证全部由测试捕获。
+
+### 运行期写入不再丢弃 + 进 guest 的通道
+
+- **`run_qemu.sh` 改用持久状态盘**。此前每次启动都把 `image.raw` 复制一份到
+  `/tmp/qemu-<iid>.raw` 交给 QEMU、退出时删除，于是 guest 的一切写入只落在临时副本上，
+  随 QEMU 退出一起消失——重启（**包括值守的 `WEB_SERVER_RESTART`**）等于从出厂镜像
+  重开。现在是 `state.raw`：不存在才复制、退出不删，`image.raw` 保持出厂状态。
+  两个后果都是想要的：被强杀弄脏的状态盘可以删掉回到出厂镜像而不必重烤，
+  重烤也永远不会覆盖已注入的修补。
+- **`make_image.sh` 重烤后 `rm -f state.raw`**。`run_qemu.sh` 只在缺失时创建状态盘，
+  留着旧的就会用新镜像配旧状态盘启动。
+- **QEMU 退出后 `e2fsck -p`**。值守的 `docker restart -t 10` 是 SIGKILL，ext2 没有日志
+  可回放，下一次挂载会失败——看起来就像固件坏了。用 `|| echo` 保证它不会带走后面的
+  TAP 清理（`set -e` 下非零 e2fsck 会跳过清理，下一次启动就建不出桥）。
+- **新增 `iris guest ls/get/put/reset`**（`src/iris/emulate/guestfs.py`）：在特权仿真
+  容器内对 guest 镜像做 loop 挂载。这是**第一条能直接看 guest 里有什么的通道**，此前
+  所有关于 guest 的判断都来自串口日志推断。读操作一律 `ro` 挂载；`state.raw` 在 QEMU
+  运行时拒绝访问而不是尝试（把运行中 guest 打开读写着的文件系统再挂一次会损坏它，
+  损坏会很久以后才以"无法解释的启动失败"出现）；不做任意命令执行。
+- **Git Bash 的路径重写会被还原**。`iris guest ls 1 /etc/passwd` 在 Windows 上到达
+  Python 时是 `C:/Program Files/Git/etc/passwd`，不加处理则**每一条文档里的例子都失败**，
+  且报错指向 guest 而不是 shell。只有 Git 安装前缀会被还原，`C:/temp/x` 仍被拒绝。
+- **实测（2026-10-04，DIR-868L / iid 6630 真实容器，双重证据）**：QEMU 运行中读出厂镜像，
+  `guest get /firmadyne/init` 读出 `infer_init` 的结果 `/sbin/init`（此前任何代码都看不到
+  这个文件）；运行中读 `state.raw` 被正确拒绝；停 QEMU 后 `guest put` 改写
+  `/etc/init.d/iris_net_fix` 并插入一条 `echo`；重启 QEMU（`Reusing existing state disk`）
+  后**串口日志出现 `IRIS-REPAIR-PROOF`**——guest 自己执行了注入的代码；补上首启那一版
+  桥地址后 `curl` 得 **HTTP 200**。状态盘逻辑本身另在容器内单独验证过：写入的标记跨
+  "两次启动"保留，出厂镜像不被污染。
+- **新发现且未修**：`WEB_SERVER_RESTART` 重跑时不重复首启那次"把宿主桥地址补进 guest
+  自己子网"的观测（0.3.12 的 DIR-868L 修复），桥地址退回默认的 `192.168.1.254/16`，
+  实测重启后 `curl` 为 `HTTP 000`，手动补 `ip addr add 192.168.0.254/24 dev br6630`
+  后立刻 `HTTP 200`。根因是首启检测到的 guest 地址没有落盘（`arch` 落盘了，地址没有）。
+  记在 `docx/AI值守与稳定性治理.md` §9。
+- 边界写明而非留给用户发现：通道看到的是**磁盘上的文件**，不是运行中 guest 的视图；
+  值守**仍然用不上**这个通道（它要求 QEMU 已停止，而值守动作都发生在 QEMU 运行时），
+  所以值守侧 `n=0` 依旧读作 UNKNOWN。
+- 新增 `tests/test_guest_fs.py`（43 项）与 `tests/test_run_qemu_flags.py` 的
+  `TestTheStateDisk` / `TestTheBakedImageIsRebuiltClean`（7 项）。16 项变异验证全部捕获，
+  其中 3 项第一轮漏网（读挂载的 `ro`、mode 的八进制校验、Git Bash 路径还原）是因为
+  测试没覆盖到，已补测试后重跑通过。
+
 ## [0.3.12] - 2026-10-03
 
 按 0.3.11 与 FirmAE 的实测对比结论回头修缺陷。**同语料仿真成功率从 2/5 变为 3/5：

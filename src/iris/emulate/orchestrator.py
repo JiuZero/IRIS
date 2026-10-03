@@ -693,6 +693,7 @@ def emulate_firmware(
     parts_slices_dir: Path | None = None,
     partition_mounts: list[tuple[str, str]] | None = None,
     record: bool = True,
+    applied_rule_ids: tuple[str, ...] = (),
 ) -> EmulationResult:
     """Boot ``rootfs_dir`` under QEMU and report whether its web plane answered.
 
@@ -703,6 +704,11 @@ def emulate_firmware(
     the runs a hand-kept table drops, so the recording lives in this wrapper
     rather than at the end of the pipeline: a `return` added mid-function would
     otherwise skip it silently. Pass ``record=False`` to opt out.
+
+    ``applied_rule_ids`` closes the other half of the loop: the L3 rules that fired
+    are recorded against this run, which is what lets a later query ask whether
+    applying them changed anything. Without it ``repair_action`` stays empty and
+    every rule's worth is unmeasurable.
     """
     started_at = datetime.now(UTC).replace(tzinfo=None)  # naive: the column is naive
     result = _emulate_firmware(
@@ -717,7 +723,7 @@ def emulate_firmware(
         partition_mounts=partition_mounts,
     )
     if record:
-        _record_outcome(result, iid=iid, started_at=started_at)
+        _record_outcome(result, iid=iid, started_at=started_at, applied_rule_ids=applied_rule_ids)
     return result
 
 
@@ -953,7 +959,13 @@ def _emulate_firmware(
     return result
 
 
-def _record_outcome(result: EmulationResult, *, iid: int, started_at: datetime) -> None:
+def _record_outcome(
+    result: EmulationResult,
+    *,
+    iid: int,
+    started_at: datetime,
+    applied_rule_ids: tuple[str, ...] = (),
+) -> None:
     """Persist the run. Never allowed to change or delay the caller's verdict.
 
     A metrics write that can fail an emulation would make the measurement part of
@@ -963,12 +975,13 @@ def _record_outcome(result: EmulationResult, *, iid: int, started_at: datetime) 
     try:
         from iris.config import get_settings
         from iris.db.engine import get_engine, init_db, make_session
+        from iris.db.knowledge import record_repairs
         from iris.db.runs import record_run
 
         engine = get_engine(get_settings().database_url)
         init_db(engine)
         with make_session(engine) as session:
-            record_run(
+            run_id = record_run(
                 session,
                 iid=iid,
                 arch=result.arch,
@@ -981,6 +994,12 @@ def _record_outcome(result: EmulationResult, *, iid: int, started_at: datetime) 
                 ping_reachable=result.link_profile.ping_ok if result.link_profile else None,
                 ip=result.guest_ip,
             )
+            if applied_rule_ids:
+                # After ``record_run``, which commits: the repair rows carry a
+                # foreign key to this run, so writing them into an uncommitted
+                # session would either order the inserts wrong or lose both.
+                record_repairs(session, run_id=run_id, applied_rule_ids=applied_rule_ids)
+                session.commit()
     except Exception as exc:  # noqa: BLE001 - a metric must never fail a run
         logger.warning(f"run {iid} was not recorded to the metadata database: {exc}")
 

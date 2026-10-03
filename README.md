@@ -194,8 +194,10 @@ M0 技术验证 → M1 MVP 主干 → M2 规模化 → M3 交互与分析 → M4
 - **厂商网络模型强绑定真实存储**：如 Tenda configd 依赖 `ubi0:ubi_Config` 挂载 `/var/config`，仿真环境无该分区时 eth0 不获址，由 `iris_net_fix` 兜底（补 IP、放行 iptables、telnetd:7002、goahead/boa Web 拉起），TES7002 实测由此拿到可达 Web；
 - **QEMU CPU 型号**：厂商 aarch64 二进制常用 ARMv8.3 指针认证（PAC），arm64 通道必须 `-cpu max`，否则 SIGILL；
 - x86 语料不在仿真范围（当前仅 mipsel/mipseb/armel/arm64）。
-- **失败知识尚未闭环**：`failure_profile` 只写不读，仓库内没有任何代码按历史失败指导下一次仿真；73 次历史 run 未产生复利。
+- **失败知识已读回，但只到"可读"为止**：`iris db cards` 按失败种类聚合 `failure_profile`，读出该类失败出现在多少次 run、哪些镜像、哪些架构、最后一次何时、以及这些 run 上实际触发过哪些 L3 规则；`--promote-only` 只留最近若干次失败 run 里仍在出现的种类，即"还需要写规则的清单"（`network-fallback-ok` 这类信息类被排除，它表示兜底**正常工作**）。**不会**据此自动施加修复：一条规则有效的唯一证据是活体运行上的 `post_action_verify`，被记住的成功不是。剩余限制：`repair_action` 此前有表无写入路径（现已由 `emulate_firmware` 落库），但 `RuleReport.touched_files` 不落库——`prepare_from_firmware` 只保留命中的 rule id，因此无法回答"这次修补动了几处"；卡片上的 `recovered` 目前恒为 0，因为历史上没有任何成功 run 带过失败行。
 - **链路已主动测量，但仅在失败路径上**：`iris.emulate.linkprobe` 会分层实测 route / ARP / ICMP / service 并产出链路分层表，且只在 Web 超时的失败路径上运行——成功路径不做探测。ARP 层在没有邻居表条目时**无法区分「没有这个地址」与「ARP 问过但没人应」**，此时该层记 `unknown`，verdict 的 detail 会显式写出「哪一层没测到」。
+- **已能直接读写 guest 文件系统，但值守还用不上**：`iris guest ls/get/put` 在特权容器内对 guest 镜像做 loop 挂载（与 `make_image.sh` 构建期同一操作），`guest put` 注入的代码会在下次启动被 guest 执行（2026-10-04 DIR-868L 实测：串口出现注入的 `IRIS-REPAIR-PROOF`，Web 仍 HTTP 200）。两条边界：看到的是**磁盘上的文件**，不是运行中 guest 的视图（内存缓冲、被挂载覆盖的路径都不算）；访问状态盘要求 **QEMU 已停止**，而值守的动作都发生在它运行时，所以值守侧 `n=0` 依旧读作 UNKNOWN。详见 `docx/AI值守与稳定性治理.md` §6.4 与 §9。
+- **运行期写入不再丢弃，但首启观测没有被重启复现**：`run_qemu.sh` 改用持久的 `state.raw`（出厂镜像 `image.raw` 保持不动，可随时 `iris guest reset <iid>` 回到出厂状态），guest 与修补的写入能跨启动保留。**未修**：`WEB_SERVER_RESTART` 重跑时不会重复首启那次"把宿主桥地址补进 guest 自己子网"的观测（实测重启后 `curl` 为 `HTTP 000`，手动补上同一地址立刻 `HTTP 200`），根因是首启检测到的 guest 地址没有落盘。
 - **语料规模**：当前 5 个 M1 设备，离任何可承诺的成功率都还很远。
 
 ## 协作规范（强制）

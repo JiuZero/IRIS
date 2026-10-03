@@ -8,11 +8,27 @@ GUEST_IP=${4:-192.168.1.1}
 WORK_DIR=/work/scratch/${IID}
 IMAGE=${WORK_DIR}/image.raw
 BINARIES=/work/binaries
-
-# Copy image to /tmp for QEMU (overlay2 can have issues with large files)
-TMP_IMAGE=/tmp/qemu-${IID}.raw
-cp "${IMAGE}" "${TMP_IMAGE}"
-IMAGE="${TMP_IMAGE}"
+# The disk QEMU actually writes, kept across launches. The guest's root filesystem
+# is this file and nothing else, so anything the guest writes -- and anything a
+# repair injects -- has to land here to survive the next boot.
+#
+# Previously QEMU was handed a fresh `cp` of the baked image in /tmp that was
+# deleted on exit, so every relaunch (including the guardian's WEB_SERVER_RESTART)
+# discarded whatever the guest had written since the image was baked. Keeping the
+# copy instead of re-making it is the whole difference between a restart that can
+# act on what the previous boot learned and one that reboots a pristine disk.
+#
+# image.raw stays pristine on purpose: a state disk that QEMU or a hard kill has
+# left inconsistent can be deleted to get back to the baked image without paying
+# for another `make_image.sh`, and re-baking can never silently overwrite a repair.
+STATE_IMAGE=${WORK_DIR}/state.raw
+if [ ! -f "${STATE_IMAGE}" ]; then
+    cp "${IMAGE}" "${STATE_IMAGE}"
+    echo "State disk created from the baked image: ${STATE_IMAGE}"
+else
+    echo "Reusing existing state disk: ${STATE_IMAGE}"
+fi
+IMAGE="${STATE_IMAGE}"
 
 KERNEL=""
 QEMU=""
@@ -143,7 +159,14 @@ echo "QEMU exited with code ${QEMU_EXIT}"
 
 # Cleanup
 kill ${SOCAT_PID} 2>/dev/null || true
-rm -f "${TMP_IMAGE}"
+# Leave the state disk in place -- that is the point of it -- but leave it
+# mountable. A boot killed part-way through (the guardian stops the container with
+# `docker restart -t 10`, which SIGKILLs QEMU) can leave ext metadata dirty, and
+# ext2 has no journal to replay it on the next mount. `e2fsck -p` only preens what
+# is safe to fix silently; anything it declines is reported rather than swallowed,
+# because a boot that fails on a dirty filesystem would otherwise look like a
+# firmware problem.
+e2fsck -p "${IMAGE}" || echo "e2fsck -p reported problems on ${IMAGE} (rc=$?)"
 ip link set "${TAP_IFACE}" down 2>/dev/null || true
 ip link set "${BR_IFACE}" down 2>/dev/null || true
 brctl delif "${BR_IFACE}" "${TAP_IFACE}" 2>/dev/null || true

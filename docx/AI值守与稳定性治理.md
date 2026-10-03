@@ -459,6 +459,87 @@ initramfs 三个设置 Python 侧连字段都没有，而 `-cpu max` 直接决�
 仍未收口的是另一半：`image.arch` 的历史登记值仍是 `aarch64`，与落库的 `arm64` 对不上。
 这需要一个迁移决策（改历史行 or 改查询口径），本次未做。
 
+### 6.3 失败知识从"只写不读"到读得回（0.3.13）
+
+6.1 那节把仿真侧数字从手工台账收进了表，但只收了**写**的一侧。写进去而没有读者，
+闭环仍然不存在：`failure_profile` 每次仿真都写，仓库内没有任何代码按历史失败指导
+下一次仿真；`repair_action` 更彻底——表有六列，**零写入路径**，L3 规则每次仿真都在
+触发，却没有任何一行记录"这次触发过"。连人都无法回答这张表唯一要回答的问题：
+*施加这条规则之后结果变了吗？*
+
+0.3.13 补上两端：
+
+- **写**：`emulate_firmware(applied_rule_ids=...)` 把本次命中的 rule id 交给
+  `db.knowledge.record_repairs`，落在**该 run 那一行**上（`source="rule"`）。
+  只记真正命中的规则：被提出但没被采纳的修复不是动作，不进动作账本。
+  `emulate run` 由 `prepared.matched_rule_ids` 透传，因此 CLI 这一条入口自动落账。
+  API 的两个仿真端点**不跑 L3 规则**（它们接受已提取的 rootfs 直接开仿），没有 rule id
+  可记，账本为空是实况而不是漏写；值守侧同理，它重启的是既有容器而不是重新配规则。
+- **读**：`iris db cards` 把 `failure_profile` 按 kind 聚成根因卡片——多少次 run、
+  哪些镜像、哪些架构、第一次到最后一次、以及这些 run 上触发过哪些规则。
+
+两处口径是刻意选的，写在这里以免后人当成 bug 改回去：
+
+1. **信息类被排除**。`network-fallback-ok` 的含义是"注入的网络兜底**按设计生效了**"
+   （第 1.3 节的 Web 拉起就靠它）。若按根因排序，它会以 36 次排在第一位并把自己的意思
+   反过来。复用 `db.runs` 直方图用的同一份封闭集合排除。
+2. **门禁是"最近还在发生"，不是"是否已恢复"**。本语料里没有任何成功 run 带过失败行，
+   所以 `recovered` 对每一个 kind 都答"否"，拿它当门禁等于把所有 kind 都排上，等于没排。
+   改为统计最近 N 次**失败 run**里仍在出现的 kind（0.3.13 实测语料：N=10 时
+   `no-guest-ip` / `web-wrong-port` / `no-network-driver` 三类仍在；N=3 时只剩
+   `web-wrong-port`；不带参数时另有 `boot-hooks-missing`、`web-not-started`、
+   `container-start-failed` 被标为"最近未见"，这是修复是否生效的第一个可见信号）。
+
+**刻意不做**：不因为历史行自动施加修复。判定一条规则有效的唯一证据是活体运行上的
+`Rule.post_action_verify`，被记住的成功不是它。输出是一份"该给哪些失败写确定性规则"
+的排序清单，规则仍由人写，下一次运行仍然去证明或推翻它。
+
+两处已知缺口，同样不掩饰：`RuleReport.touched_files` 不落库（`prepare_from_firmware`
+只把命中的 rule id 带出来，报告本身不外传），因此回答不了"这次修补动了几处"；
+卡片上的 `recovered` 目前恒为 0，那是数据的实况而非结论。
+
+### 6.4 进 guest 的通道，与"运行期写入不再丢弃"（0.3.13）
+
+§4.8 与 §9 反复记着一句话：探针在容器里，被探的东西在 `image.raw` 里，所以运行期
+够不到 guest。这句话在 0.3.13 之后需要改一半。
+
+**为什么以前连磁盘都是空的。** `run_qemu.sh` 每次启动都把 `image.raw` 复制一份到
+`/tmp/qemu-<iid>.raw` 交给 QEMU，退出时 `rm -f`。guest 的一切写入只落在这份**临时副本**
+上，随 QEMU 退出一起消失。于是即便有人能进 guest filesystem，也没有"上一次运行留下的
+状态"可看——重启等于从出厂镜像重开。0.3.13 改为 `state.raw`：
+
+- `state.raw` 与 `image.raw` 同目录，**不存在时才复制**，退出时**不删**，QEMU 挂的是它；
+- `image.raw` 保持出厂状态。这样被强杀弄脏的状态盘可以直接删掉回到出厂镜像，
+  不必重跑 `make_image.sh`，而重烤镜像也永远不会覆盖掉已经注入的修补；
+- `make_image.sh` 在重烤后 `rm -f state.raw`——新镜像配旧状态盘是另一种错；
+- QEMU 退出后 `e2fsck -p`。值守的 `docker restart -t 10` 是 SIGKILL，ext2 没有日志
+  可回放，下一次挂载会直接失败；那看起来就像"固件坏了"，所以这一步必须存在，
+  且用 `|| echo` 保证它不会带走后面的 TAP 清理。
+
+**通道本身**：`iris guest ls/get/put`（`src/iris/emulate/guestfs.py`）。在特权仿真
+容器内对镜像做 loop 挂载——和 `make_image.sh` 构建期做的同一个操作。三条性质是选择，
+不是实现细节：读操作一律 `ro` 挂载；`state.raw` 在 QEMU 运行时**拒绝**访问而不是尝试，
+因为把运行中 guest 打开读写着的文件系统再挂一次会损坏它，而损坏会很久以后才以
+"无法解释的启动失败"出现；不做任意命令执行（`make_image.sh` 用 chroot + busybox 确实
+能跑，但一个能执行任意文本的修补通道是另一件需要评审的事）。
+
+**实测（2026-10-04，DIR-868L / iid 6630 真实容器）**：
+
+1. QEMU 运行中读出厂镜像：`/firmadyne` 列出 13 个条目，`guest get /firmadyne/init`
+   读出 `infer_init` 的结果 `/sbin/init`——这是此前**任何代码都看不到**的东西；
+2. QEMU 运行中读 `state.raw` 被正确拒绝（`qemu is running as pid 176`）；
+3. 停 QEMU（不删容器）→ `guest put` 改写 `/etc/init.d/iris_net_fix`，在脚本第二行插入
+   一条 `echo` → `guest get` 读回一致；
+4. 重启 QEMU（`Reusing existing state disk`）→ **串口日志出现 `IRIS-REPAIR-PROOF`**，
+   即 guest 自己执行了注入的代码；随后补上首启那一版桥地址后 `curl` 得 **HTTP 200**
+   （见 §9 关于重启不重复首启观测的未修项）。
+
+这构成双重证据：**注入的代码被 guest 执行**（串口），**服务仍然可用**（HTTP 200）。
+
+**边界，如实写明**：通道看到的是**磁盘上的文件**，不是运行中 guest 的视图——内存里
+缓冲的没变、被挂载覆盖掉的（JFFS2 卷、`/proc`、`/sys`）也不是那张文件。值守**仍然
+用不上**这个通道：它要求 QEMU 已停止，而值守的动作都发生在 QEMU 正在跑的时候。
+
 ---
 
 ## 7 治理经验
@@ -594,6 +675,19 @@ ash 直接崩，报 `/etc/init.d/iris_net_fix: line 7: : not found`。`tests/tes
 - **三个修复脚本仍然只能作用于容器可见的对象**（0.3.10 修的是它们**如何汇报**，不是它们
   能修什么）。要真正修 guest 需要能进 guest 的通道。在那之前，探针报 `n=0` 的含义是
   「guest 状态 UNKNOWN」，不是「一切正常」。
+  → **0.3.13 部分收口**：进 guest 文件系统的通道已经有了（`iris guest ls/get/put`，
+  见 6.4），所以「够不到」不再是通道问题。但**值守仍用不上它**——通道要求 QEMU 已停止，
+  而值守的全部动作都发生在 QEMU 正在跑的时候。因此这一条对值守仍然成立：
+  `n=0` 依旧读作 UNKNOWN。
+- **`WEB_SERVER_RESTART` 不重复首启的宿主观测**（0.3.13 实测新发现，**未修**）。首启时
+  orchestrator 会从串口日志认出 guest 自己的子网，把宿主桥地址补进那个子网
+  （0.3.12 的 `Placed host at 192.168.0.254/24 on br6630`），这是 DIR-868L 能拿到
+  HTTP 200 的原因之一；而重启只按 `run_qemu.sh <iid> <arch> <port>` 三个参数重跑，
+  桥地址退回默认的 `192.168.1.254/16`。实测：这样重启后 guest 已按注入的补丁启动
+  （串口出现 `IRIS-REPAIR-PROOF`），但 `curl` 仍是 `HTTP 000`；手动补上
+  `ip addr add 192.168.0.254/24 dev br6630` 后立刻变 `HTTP 200`。
+  根因是**首启检测到的 guest 地址没有被持久化**，重启无从复现；
+  修法是把它和 `arch` 标记一样落盘再由重启读取，本次未做。
 - **`kill -9` 计数是「信号送达数」而非「确认已死的进程数」**：脚本在容器侧无法复验目标是否
   真的消失。计数语义已在脚本注释里写明，读 ledger 时需要知道这一点。
 

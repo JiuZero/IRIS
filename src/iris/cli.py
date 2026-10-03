@@ -21,12 +21,14 @@ corpus_app = typer.Typer(help="firmware corpus manifest operations")
 emulate_app = typer.Typer(help="L2 emulation utilities")
 rules_app = typer.Typer(help="L3 boot-fix rule engine")
 serve_app = typer.Typer(help="L5 API server")
+guest_app = typer.Typer(help="read and write the guest's own filesystem")
 app.add_typer(db_app, name="db")
 app.add_typer(extract_app, name="extract")
 app.add_typer(corpus_app, name="corpus")
 app.add_typer(emulate_app, name="emulate")
 app.add_typer(rules_app, name="rules")
 app.add_typer(serve_app, name="serve")
+app.add_typer(guest_app, name="guest")
 
 #: Progress, results and reports go to stdout; failures go to stderr so that
 #: `iris ... 2>/dev/null` still shows what went wrong. Both render through the
@@ -82,6 +84,70 @@ def db_check() -> None:
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))
     out.info("database connection OK")
+
+
+@db_app.command("cards")
+def db_cards(
+    promote_only: bool = typer.Option(
+        False,
+        "--promote-only",
+        help="only the kinds still seen in the most recent runs -- what a new "
+             "deterministic rule would actually move",
+    ),
+    recent: int = typer.Option(
+        10,
+        help="how many of the most recent failing runs count as live for --promote-only",
+    ),
+) -> None:
+    """Read the failure history back as one root-cause card per failure kind.
+
+    ``iris db stats`` says how often things broke. This says when each kind was
+    last seen and which rules were already applied to it -- so a kind that has
+    dropped out of the recent window is a fix that landed, and a kind still in it
+    is work that has not been done yet.
+
+    ``recovered`` reads 0 across the current corpus, which is a fact about the data
+    and not a finding: no successful run has ever carried a failure row.
+
+    Nothing is applied automatically. The output is a ranked work list.
+    """
+    from iris.db.knowledge import promote_candidates, root_cause_cards
+
+    settings = get_settings()
+    engine = get_engine(settings.database_url)
+    init_db(engine)
+    with make_session(engine) as session:
+        cards = root_cause_cards(session)
+
+    if not cards:
+        out.warning("no failure profiles recorded yet; run `iris emulate run <firmware>` first")
+        return
+
+    shown = promote_candidates(cards, recent=recent) if promote_only else cards
+    rows = [
+        (
+            f"{c.kind} [{c.stage}]",
+            (
+                f"{c.runs} run(s) over {c.images} image(s), "
+                f"arch={','.join(c.archs) or '-'}, "
+                f"last={c.last_seen or 'undated'}, "
+                f"repairs={','.join(c.repairs) or 'none'}"
+            ),
+        )
+        for c in shown
+    ]
+    title = f"root-cause cards (live within the last {recent} failing run(s))" if promote_only \
+        else "root-cause cards"
+    out.block("info", title, _rows(rows))
+
+    if not promote_only:
+        candidates = promote_candidates(cards, recent=recent)
+        dropped = [c.kind for c in cards if c not in candidates]
+        if dropped:
+            out.info(f"no longer seen recently (a fix landed?): {', '.join(dropped)}")
+        out.info("  rerun with --promote-only to see just the live ones")
+    elif not shown:
+        out.info("no failure kind is live in the recent window")
 
 
 @db_app.command("stats")
@@ -668,6 +734,7 @@ def emulate_run(
         timeout_sec=timeout,
         parts_slices_dir=parts_dir,
         partition_mounts=partition_mounts,
+        applied_rule_ids=tuple(prepared.matched_rule_ids),
     )
 
     # The verdict is one record so the result reads as a single outcome; the
@@ -698,6 +765,116 @@ def emulate_stop(
 
     ok = stop_emulation(iid)
     (out.info if ok else err.error)(f"stopped container {iid}: {ok}")
+
+
+@guest_app.command("ls")
+def guest_ls(
+    iid: int = typer.Argument(..., help="image ID of the emulation container"),
+    path: str = typer.Argument("/", help="absolute path inside the guest"),
+    disk: str = typer.Option(
+        "state", "--disk", help="`state` = what the guest booted from and wrote to; "
+                                "`image` = the baked image, never attached to QEMU",
+    ),
+) -> None:
+    """List a directory inside the guest's filesystem.
+
+    The guest's root filesystem is a block image inside the emulation container and
+    nothing in that container mounts it, so `docker exec` cannot see a single guest
+    file. This mounts the image on a loop device instead -- the same operation the
+    image build performs -- which is the first channel that can look at the guest at
+    all rather than inferring it from serial logs.
+
+    `--disk state` needs the emulation stopped: QEMU has that disk open read-write,
+    and mounting it underneath would corrupt it.
+    """
+    from iris.emulate.guestfs import GuestError, guest_path, list_guest
+
+    # Normalised once here so the recovery is reported once and the message shows
+    # the path the guest actually has.
+    shown = guest_path(path)
+    try:
+        names = list_guest(f"iris-qemu-{iid}", iid, shown, disk=disk)
+    except GuestError as exc:
+        err.error(str(exc))
+        raise typer.Exit(code=1) from exc
+    out.block("info", f"{len(names)} entr{'y' if len(names) == 1 else 'ies'} "
+                      f"in {shown} ({disk} disk, iid {iid})", names)
+
+
+@guest_app.command("get")
+def guest_get(
+    iid: int = typer.Argument(..., help="image ID of the emulation container"),
+    path: str = typer.Argument(..., help="absolute path of a file inside the guest"),
+    dest: Path = typer.Option(..., "--out", help="where to write it on the host"),
+    disk: str = typer.Option("state", "--disk", help="`state` or `image`"),
+) -> None:
+    """Copy a file out of the guest's filesystem.
+
+    The evidence channel: a claim about what the guest contains can now be checked
+    against the guest instead of against a serial log line that may well be
+    describing something else.
+    """
+    from iris.emulate.guestfs import GuestError, guest_path, pull_guest_file
+
+    try:
+        written = pull_guest_file(f"iris-qemu-{iid}", iid, guest_path(path), dest, disk=disk)
+    except GuestError as exc:
+        err.error(str(exc))
+        raise typer.Exit(code=1) from exc
+    out.info(f"wrote {written} ({written.stat().st_size} bytes)")
+
+
+@guest_app.command("put")
+def guest_put(
+    iid: int = typer.Argument(..., help="image ID of the emulation container"),
+    source: Path = typer.Argument(..., help="file on the host"),
+    path: str = typer.Argument(..., help="absolute path to write inside the guest"),
+    mode: str = typer.Option(None, "--mode", help="octal mode to set in the guest, e.g. 755"),
+    disk: str = typer.Option("state", "--disk", help="`state` or `image`"),
+) -> None:
+    """Copy a file into the guest's filesystem.
+
+    This is the write half of the only channel that reaches the guest, so it is also
+    the only way to put a repair *into* a guest rather than waiting for one of its own
+    daemons to perform it. Nothing applies one automatically: the evidence that a
+    repair works is the guest running with it, and that is a decision, not a side
+    effect of an earlier run.
+
+    Needs the emulation stopped, and `--disk state` is what makes the change survive
+    the next boot: `image` writes the baked image, which the next `make_image.sh`
+    replaces.
+    """
+    from iris.emulate.guestfs import GuestError, guest_path, push_guest_file
+
+    shown = guest_path(path)
+    try:
+        push_guest_file(f"iris-qemu-{iid}", iid, source, shown, disk=disk, mode=mode)
+    except GuestError as exc:
+        err.error(str(exc))
+        raise typer.Exit(code=1) from exc
+    out.info(f"put {source} at {shown} (iid {iid}, {disk} disk)")
+
+
+@guest_app.command("reset")
+def guest_reset(
+    iid: int = typer.Argument(..., help="image ID of the emulation container"),
+) -> None:
+    """Discard the guest's state disk so the next launch boots the baked image.
+
+    The undo for `guest put --disk state`, and the way out of a state disk left
+    inconsistent by a hard kill.
+    """
+    from iris.emulate.guestfs import GuestError, reset_guest_state
+
+    try:
+        removed = reset_guest_state(f"iris-qemu-{iid}", iid)
+    except GuestError as exc:
+        err.error(str(exc))
+        raise typer.Exit(code=1) from exc
+    if removed:
+        out.info(f"state disk of iid {iid} discarded; the next launch boots the baked image")
+    else:
+        out.info(f"iid {iid} has no state disk; nothing to discard")
 
 
 @emulate_app.command("list")
