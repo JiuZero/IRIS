@@ -179,6 +179,44 @@ export interface EffectiveConfig {
   note: string
 }
 
+/**
+ * `GET /api/v1/system`: what the host is doing right now.
+ *
+ * Every field is `number | null`, and the null is the point. These are live
+ * observations with no record behind them, so "not measured yet" and "measured
+ * zero" must stay distinguishable -- `cpu_pct` is null for exactly one poll
+ * interval after start-up, because the first sample has no window to divide by,
+ * and a page that rendered that as 0 would report an idle machine.
+ */
+export interface SystemReading {
+  host: {
+    /** Share of all host CPU across the window between the two most recent reads.
+     *  Null on a sampler's first read, and null again if the counters did not
+     *  move. */
+    cpu_pct: number | null
+    cpu_cores: number | null
+    mem_used_mb: number | null
+    mem_total_mb: number | null
+    /** `psutil`'s own percentage of physical memory. Not derived from the two
+     *  figures above, so it can disagree with them on a host with a large page
+     *  cache -- which is why it is a separate field rather than a computed one. */
+    mem_pct: number | null
+    /** Seconds since the host booted. Distinct from the service's own uptime. */
+    uptime_sec: number | null
+    /** Free space on the volume holding the scratch directory -- the one that
+     *  fills up, since every container's rootfs tarball lands there. */
+    scratch_free_gb: number | null
+  }
+  service: {
+    version: string
+    /** Seconds since this process started, from its own monotonic clock. */
+    uptime_sec: number
+    /** How long a reading is reused before being re-taken. The page uses it to
+     *  explain why two numbers drawn a moment apart can be identical. */
+    sample_ttl_sec: number
+  }
+}
+
 export interface FirmwareInfo {
   name: string
   path: string

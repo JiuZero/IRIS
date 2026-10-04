@@ -16,7 +16,7 @@
 
 import type { ReactNode } from 'react'
 
-import { classNames, DASH } from '../lib/format'
+import { classNames, DASH, formatBytes, percentPoints } from '../lib/format'
 
 /* ------------------------------------------------------------------ surfaces */
 
@@ -27,6 +27,7 @@ export function Panel({
   children,
   className,
   bodyClassName,
+  id,
 }: {
   title?: ReactNode
   subtitle?: ReactNode
@@ -34,9 +35,13 @@ export function Panel({
   children: ReactNode
   className?: string
   bodyClassName?: string
+  /** An anchor target, for in-page links like the sidebar's "新建实例". On the
+   *  `<section>` rather than inside the body so the scroll lands on the panel's top
+   *  border instead of a few pixels below its header. */
+  id?: string
 }) {
   return (
-    <section className={classNames('glass flex min-h-0 flex-col', className)}>
+    <section id={id} className={classNames('glass flex min-h-0 flex-col', className)}>
       {(title || actions) && (
         <header className="flex shrink-0 items-center justify-between gap-3 border-b border-surface-border px-4 py-3">
           <div className="min-w-0">
@@ -176,7 +181,75 @@ export function StatusDot({ tone = 'success', pulse = false }: { tone?: Tone; pu
   )
 }
 
-/* ---------------------------------------------------------------- stat tiles */
+/* ------------------------------------------------------------------- meters */
+
+/**
+ * A labelled proportion bar, for "how full is it" readings.
+ *
+ * `value` is a fraction in `[0, 1]` or `null`. **`null` draws no fill and no
+ * width at all** rather than an empty track that reads as 0%: the host's CPU share
+ * is genuinely unmeasured on a sampler's first read, and a full-width empty bar
+ * would claim the reading is zero. The caller pairs this with `isPresent` output
+ * so the number beside it is a dash in the same breath.
+ */
+export function Meter({
+  label,
+  value,
+  caption,
+  tone = 'iris',
+  size = 'md',
+}: {
+  label: string
+  value: number | null | undefined
+  /** Shown after the number; the unit, or the window the reading covers. */
+  caption?: ReactNode
+  tone?: Tone
+  size?: 'sm' | 'md'
+}) {
+  const measured = typeof value === 'number' && Number.isFinite(value)
+  const ratio = measured ? Math.min(1, Math.max(0, value)) : 0
+  const fill: Record<Tone, string> = {
+    iris: 'bg-iris-400',
+    success: 'bg-success',
+    warning: 'bg-warning',
+    danger: 'bg-danger',
+    violet: 'bg-violet',
+    cyan: 'bg-cyan',
+    neutral: 'bg-ink-500',
+  }
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="text-2xs font-medium text-ink-500">{label}</span>
+        <span className="tnum shrink-0 text-2xs text-ink-300">
+          {measured ? percentPoints(ratio * 100, 1) : DASH}
+          {caption && <span className="ml-1 text-ink-700">{caption}</span>}
+        </span>
+      </div>
+      <div
+        className={classNames(
+          'overflow-hidden rounded-full bg-surface-hover',
+          size === 'sm' ? 'h-1' : 'h-1.5',
+        )}
+        role="meter"
+        aria-label={label}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        {...(measured ? { 'aria-valuenow': Math.round(ratio * 100) } : {})}
+        aria-valuetext={measured ? percentPoints(ratio * 100, 1) : '未测量'}
+      >
+        {measured && (
+          <span
+            className={classNames('block h-full rounded-full', fill[tone])}
+            style={{ width: `${Math.round(ratio * 100)}%` }}
+          />
+        )}
+      </div>
+    </div>
+  )
+}
+
+/* -------------------------------------------------------------- stat tiles */
 
 export function StatTile({
   label,
@@ -417,21 +490,6 @@ export function Segmented<T extends string>({
   )
 }
 
-/** Bytes as `1.4 MiB`, the same rounding `human_bytes` uses on the server, so a
- *  number the page prints and a number the API returns do not disagree by a
- *  factor of 1024. */
-function formatBytes(count: number): string {
-  if (!Number.isFinite(count) || count < 0) return DASH
-  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
-  let value = count
-  let unit = 0
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024
-    unit += 1
-  }
-  const digits = value >= 100 || unit === 0 ? 0 : 1
-  return `${value.toFixed(digits)} ${units[unit]}`
-}
 
 /** One key/value cell for the small comparison tables. */
 export function InlineStat({ label, value, tone = 'neutral' }: { label: string; value: string; tone?: Tone }) {

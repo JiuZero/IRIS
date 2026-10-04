@@ -392,7 +392,7 @@ function DetailTab({
         {!detail.data && !detail.isLoading && (
           <EmptyState
             title="未选中记录"
-            detail="从 /instances 打开某条记录，或在上表点一条记录（地址形如 /instances/:iid?run=编号）"
+            detail="从「实例记录」页打开某条记录，或在上表点一条记录（地址形如 /instances/:iid?run=编号）"
           />
         )}
       </Panel>

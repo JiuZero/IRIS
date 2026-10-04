@@ -1,38 +1,48 @@
 import { NavLink, useNavigate } from 'react-router-dom'
 import {
+  Activity,
   Cpu,
   Gauge,
   Hexagon,
   PanelLeftClose,
   PanelLeftOpen,
+  Plus,
   Search,
   Settings as SettingsIcon,
   Terminal,
 } from 'lucide-react'
 
-import { Badge, StatusDot } from '../components/ui'
-import { classNames } from '../lib/format'
-import { useCapabilities, useEmulations } from '../hooks/queries'
+import { Badge, Button, StatusDot } from '../components/ui'
+import { classNames, DASH } from '../lib/format'
+import { useCapabilities, useEmulations, useSystem } from '../hooks/queries'
 import { useUiStore } from '../store/ui'
 
 const NAV = [
   { to: '/', label: '总览', icon: Gauge, end: true },
-  { to: '/instances', label: '实例', icon: Cpu, end: false },
+  { to: '/instances', label: '实例记录', icon: Cpu, end: false },
   { to: '/settings', label: '设置', icon: SettingsIcon, end: false },
 ]
 
 /**
- * The left rail: navigation, the running instances, and the capability summary.
+ * The left rail: navigation, the primary action, the live instances, and what this
+ * host is doing right now.
  *
- * Instances are listed here rather than only on the list page because the shortcut
- * that matters most during a demo is "get back to the terminal I was in" -- and
- * that is a click on a name, not three clicks through a table.
+ * Two decisions are load-bearing. The **search box stays at the very top** because
+ * it is the fastest path to anything in the product and moving it down to make room
+ * for an action button would trade a three-keystroke shortcut for a click. And the
+ * **create button sits directly under it**, because in this product creating an
+ * instance is the main thing anyone comes to do; navigation is how you get there.
+ *
+ * The instance list is here rather than only on its own page because the shortcut
+ * that matters during a demo is "get back to the terminal I was in" -- one click on
+ * a name, not three clicks through a table.
  */
 export function Sidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
   const collapsed = useUiStore((state) => state.sidebarCollapsed)
   const toggle = useUiStore((state) => state.toggleSidebar)
   const emulations = useEmulations()
   const capabilities = useCapabilities()
+  const system = useSystem()
   const navigate = useNavigate()
 
   const running = emulations.data ?? []
@@ -62,13 +72,28 @@ export function Sidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
         aria-label="打开命令面板"
       >
         <Search className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-        {!collapsed && (
-          <>
-            <span className="flex-1 text-left">搜索与跳转</span>
-            <kbd className="rounded border border-surface-border px-1 font-mono text-[10px] text-ink-700">Ctrl K</kbd>
-          </>
-        )}
+{!collapsed && (
+            <>
+              <span className="flex-1 text-left">搜索与跳转</span>
+              <kbd className="rounded border border-surface-border px-1 font-mono text-[10px] text-ink-700">Ctrl K</kbd>
+            </>
+          )}
       </button>
+
+      {/* The one action the rail is built around. Anchored at the top because a
+          create button pinned to the bottom of a scrollable rail is the button
+          nobody finds; on a collapsed rail it stays as the icon so the affordance
+          survives at 56px. */}
+      <Button
+        variant="primary"
+        onClick={() => navigate('/#launch')}
+        className={classNames('w-full', collapsed && 'px-0')}
+        title="新建实例（总览页「新建实例」）"
+      >
+        <Plus className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+        {!collapsed && <span>新建实例</span>}
+        {!collapsed && <span className="sr-only">，在总览页的「新建实例」面板</span>}
+      </Button>
 
       <ul className="flex flex-col gap-0.5">
         {NAV.map(({ to, label, icon: Icon, end }) => (
@@ -90,13 +115,13 @@ export function Sidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
         <>
           <div className="nav-card mt-2 flex flex-col gap-1">
             <div className="flex items-center justify-between px-1">
-              <span className="nav-card-title">运行中</span>
+              <span className="nav-card-title">最近实例</span>
               <Badge tone={running.length ? 'success' : 'neutral'}>{running.length}</Badge>
             </div>
             <ul className="scroll-y flex min-h-0 flex-col gap-0.5">
               {running.length === 0 && (
                 <li className="px-1 text-2xs leading-relaxed text-ink-700">
-                  暂无实例，从 /instances 启动一次仿真即会出现在这里
+                  当前没有托管中的实例。在上方「新建实例」启动一次，即会出现在这里
                 </li>
               )}
               {running.map((item) => (
@@ -116,6 +141,42 @@ export function Sidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
                 </li>
               ))}
             </ul>
+          </div>
+
+          {/* What this host is doing right now, in the rail rather than only on the
+              dashboard: two bars narrow enough to read at a glance while a boot is
+              running, which is exactly when the answer matters. Same `useSystem`
+              query as the dashboard strip, so the two can never disagree. */}
+          <div className="nav-card flex flex-col gap-1.5">
+            <div className="flex items-center justify-between px-1">
+              <span className="nav-card-title">性能与内存</span>
+              {system.isFetching && !system.isError && (
+                <Activity className="h-3 w-3 text-iris-400 status-pulse" aria-hidden="true" />
+              )}
+            </div>
+            <RailMeter
+              label="CPU"
+              value={system.data?.host.cpu_pct == null ? null : system.data.host.cpu_pct / 100}
+            />
+            <RailMeter
+              label="内存"
+              value={
+                system.data?.host.mem_total_mb && system.data.host.mem_used_mb != null
+                  ? system.data.host.mem_used_mb / system.data.host.mem_total_mb
+                  : null
+              }
+            />
+            <p className="px-1 text-[10px] leading-relaxed text-ink-700">
+              {system.isError
+                ? '采样不可用'
+                : system.data?.host.cpu_pct == null && !system.data
+                  ? '读取中'
+                  : system.data?.host.cpu_pct == null
+                    ? '首次采样无 CPU 窗口'
+                    : `${system.data.host.cpu_cores ?? DASH} 核 · 内存 ${system.data.host.mem_used_mb ?? DASH} / ${
+                        system.data.host.mem_total_mb ?? DASH
+                      } MB`}
+            </p>
           </div>
 
           <div className="nav-card mt-auto flex flex-col gap-1 pt-2">
@@ -172,7 +233,38 @@ export function Sidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
           </>
         )}
       </button>
-
     </nav>
+  )
+}
+
+/**
+ * A one-line proportion bar for the rail.
+ *
+ * `Meter` would work but it carries a 2xs label/value pair meant for a card; at
+ * 14px of rail width that wraps and pushes the capability census off screen. This
+ * is the same measurement with the label and the number on one baseline.
+ */
+function RailMeter({ label, value }: { label: string; value: number | null }) {
+  const measured = value != null && Number.isFinite(value)
+  const ratio = measured ? Math.min(1, Math.max(0, value)) : 0
+  return (
+    <div className="flex items-center gap-2 px-1">
+      <span className="w-7 shrink-0 text-[10px] text-ink-500">{label}</span>
+      <span className="h-1 flex-1 overflow-hidden rounded-full bg-surface-hover">
+        {measured && (
+          <span
+            className={classNames(
+              'block h-full rounded-full',
+              ratio >= 0.9 ? 'bg-danger' : ratio >= 0.75 ? 'bg-warning' : 'bg-iris-400',
+            )}
+            style={{ width: `${Math.round(ratio * 100)}%` }}
+          />
+        )}
+      </span>
+      {/* `DASH` and not `0.0%`: an unmeasured window is not an idle machine. */}
+      <span className="tnum w-11 shrink-0 text-right text-[10px] text-ink-500">
+        {measured ? `${(ratio * 100).toFixed(0)}%` : DASH}
+      </span>
+    </div>
   )
 }

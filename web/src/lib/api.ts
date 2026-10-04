@@ -30,6 +30,7 @@ import type {
   RunDetail,
   RunsPage,
   Stats,
+  SystemReading,
   UploadLaunchResponse,
 } from './types'
 
@@ -142,6 +143,8 @@ export const api = {
   stats: () => request<Stats>('/api/v1/stats'),
 
   capabilities: () => request<Capabilities>('/api/v1/capabilities'),
+
+  system: () => request<SystemReading>('/api/v1/system'),
 
   evalSet: () => request<EvalSet>('/api/v1/stats/eval-set'),
 

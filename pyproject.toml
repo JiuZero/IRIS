@@ -17,6 +17,12 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn>=0.27",
     "python-multipart>=0.0.9",
+    # Host CPU/memory/disk for the workbench's live strip. Reading these portably
+    # means reading a platform's own counters, which is what psutil wraps;
+    # `os.getloadavg` is unavailable on Windows and does not mean what it means on
+    # Linux, and shelling out to `wmic`/`vmstat` would pin the feature to two
+    # operating systems.
+    "psutil>=5.9",
 ]
 
 [project.optional-dependencies]

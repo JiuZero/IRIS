@@ -229,6 +229,15 @@ class TestDashboardRoutes:
         assert body["available"] is True
         assert {"total", "web_ok", "environment_failures", "web_reach_rate"} <= set(body)
 
+    def test_the_host_reading_is_served_and_states_its_own_lifetime(self, client, db) -> None:
+        """It reports a live observation rather than a record, and says so: a
+        figure the page cannot reproduce later must not be read as a fact."""
+        body = client.get("/api/v1/system").json()
+        assert set(body) == {"host", "service"}
+        assert body["host"]["mem_total_mb"] > 0
+        assert body["host"]["cpu_cores"] and body["host"]["cpu_cores"] > 0
+        assert body["service"]["version"]
+
     def test_capabilities_are_readable_without_a_body(self, client, db) -> None:
         body = client.get("/api/v1/capabilities").json()
         assert len(body["items"]) == 6
@@ -337,9 +346,10 @@ class TestAuthentication:
         monkeypatch.setattr("iris.api.auth.get_settings", lambda: Settings(api_token=TOKEN))
         client = TestClient(app)
         for path in ("/api/v1/stats", "/api/v1/capabilities", "/api/v1/stats/eval-set",
-                     "/api/v1/runs", "/api/v1/runs/export.csv", "/api/v1/runs/1",
-                     "/api/v1/console/7100", "/api/v1/instances/7100/stats",
-                     "/api/v1/knowledge/root-cause", "/api/v1/config"):
+                     "/api/v1/system", "/api/v1/runs", "/api/v1/runs/export.csv",
+                     "/api/v1/runs/1", "/api/v1/console/7100",
+                     "/api/v1/instances/7100/stats", "/api/v1/knowledge/root-cause",
+                     "/api/v1/config"):
             assert client.get(path).status_code == 401, path
 
     def test_a_query_parameter_is_not_accepted_instead_of_a_header(self, app, monkeypatch) -> None:

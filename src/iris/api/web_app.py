@@ -28,7 +28,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from sqlalchemy import select
 
-from iris.api import web_data
+from iris.api import host_metrics, web_data
 from iris.api.server import Caller
 from iris.api.web_terminal import close_all_bridges, notify_shutdown, terminal_endpoint
 from iris.config import get_settings
@@ -135,6 +135,18 @@ def _add_api_routes(app: FastAPI) -> None:
     @app.get("/api/v1/capabilities")
     async def read_capabilities(_caller: Caller) -> dict:
         return web_data.capabilities()
+
+    @app.get("/api/v1/system")
+    async def read_system(_caller: Caller) -> dict:
+        """The live host reading behind the dashboard's top strip and the sidebar.
+
+        Separate from `/api/v1/stats` because the two answer different questions
+        with different lifetimes: stats answers "what happened", which is a record
+        that survives a restart, and this answers "what is happening now", which
+        stops being true the moment it is rendered. Merging them would have made
+        the caching rule for one wrong for the other.
+        """
+        return host_metrics.system_reading()
 
     @app.get("/api/v1/stats/eval-set")
     async def read_eval_set(_caller: Caller) -> dict:

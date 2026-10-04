@@ -28,6 +28,23 @@ export function useCapabilities() {
   return useQuery({ queryKey: ['capabilities'], queryFn: api.capabilities, staleTime: 30_000 })
 }
 
+/**
+ * The live host reading, shared by the dashboard strip and the sidebar meter.
+ *
+ * One query for both, because they are describing the same sample: two requests a
+ * second apart are served from the server's TTL cache anyway, so splitting them
+ * would buy nothing and would let the sidebar disagree with the strip. The poll
+ * interval matches the server's default TTL, so a redraw that arrives just inside
+ * it gets the figure the previous one showed rather than a half-updated pair.
+ */
+export function useSystem() {
+  return useQuery({
+    queryKey: ['system'],
+    queryFn: api.system,
+    refetchInterval: POLL.live,
+  })
+}
+
 export function useEvalSet() {
   return useQuery({ queryKey: ['eval-set'], queryFn: api.evalSet, staleTime: 15_000 })
 }

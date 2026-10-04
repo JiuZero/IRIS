@@ -39,6 +39,26 @@ export function seconds(value: number | null | undefined, digits = 1): string {
   return `${value.toFixed(digits)}s`
 }
 
+/** Bytes as `1.4 MiB`, with the same unit ladder and rounding as the server's
+ *  `human_bytes`, so a number the page prints and a number the API returns do not
+ *  disagree by a factor of 1024.
+ *
+ *  Lives here rather than in the two components that print file sizes so the two
+ *  cannot drift apart: an upload card quoting `12.0 GiB` next to the picker's
+ *  `12 GiB` would look like the same file measured two ways. */
+export function formatBytes(count: number | null | undefined): string {
+  if (!isPresent(count) || count < 0) return DASH
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
+  let value = count
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  const digits = unit === 0 || value >= 100 ? 0 : 1
+  return `${value.toFixed(digits)} ${units[unit]}`
+}
+
 /** An ISO timestamp as local wall time; the dash when there is none. */
 export function dateTime(iso: string | null | undefined): string {
   if (!iso) return DASH

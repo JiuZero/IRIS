@@ -1,30 +1,29 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query'
-import { FileDown, Play, RefreshCw, Square, Terminal as TerminalIcon } from 'lucide-react'
+import { FileDown, Plus, RefreshCw, Square, Terminal as TerminalIcon } from 'lucide-react'
 
-import { Badge, Button, EmptyState, ErrorState, FileInput, Panel, Segmented, Select, Skeleton, StatusDot, TextInput } from '../components/ui'
+import { Badge, Button, EmptyState, ErrorState, Panel, Select, Skeleton, StatusDot, TextInput } from '../components/ui'
 import { api } from '../lib/api'
 import { classNames, DASH, failureLabel, seconds, shortDateTime } from '../lib/format'
-import { useEmulations, useFirmware } from '../hooks/queries'
-import { useTicker } from '../hooks'
-import type { EmulateResponse, RunsPage, UploadLaunchResponse } from '../lib/types'
+import { useEmulations } from '../hooks/queries'
+import type { RunsPage } from '../lib/types'
 
 const PAGE_SIZE = 20
 
-/** Either launch route's answer. `UploadLaunchResponse` extends
- *  `EmulateResponse`, so the boot verdict is read off one field name and the
- *  upload-only extras are narrowed by `'source' in result`. */
-type LaunchOutcome = EmulateResponse | UploadLaunchResponse
-
 /**
- * The instance list: the runs this service is hosting, and the historical runs it
- * has recorded.
+ * The instance record: the runs this service is hosting, and the historical runs
+ * it has recorded.
  *
  * Two tables, because they answer different questions and have different lifetimes.
  * The active table changes when a container starts and stops; the history table
  * only ever grows. Mixing them into one list would mean a row's meaning depends on
  * where you looked.
+ *
+ * Nothing here creates an instance. Creating one is a launch -- three sources of
+ * firmware, a port, a timeout, and a boot that takes tens of seconds -- and it
+ * belongs on the dashboard next to the environment reading that decides whether a
+ * launch is a good idea right now. A page of records is for reading records.
  */
 export function Instances() {
   const emulations = useEmulations()
@@ -46,7 +45,6 @@ export function Instances() {
 
   return (
     <div className="flex flex-col gap-4 p-4">
-      <StartRunPanel />
       <ActiveTable query={emulations} />
       <HistoryTable
         arch={arch}
@@ -65,285 +63,6 @@ export function Instances() {
       />
     </div>
   )
-}
-
-/**
- * Start an emulation from the page, from whichever of the three places the
- * firmware actually happens to be.
- *
- * The source picker exists because "启动一次仿真" was only ever reachable for a
- * rootfs that `iris extract` had already written to the staging directory. Anyone
- * who arrived with a tar of a rootfs, or with the vendor's own `.bin`, had no way
- * in except the command line. All three routes end at the same QEMU run; they
- * differ in how much work happens before it.
- *
- * The honest part is the timing: these endpoints run the whole boot and only then
- * answer -- there is no job id to poll, because `iris.api.server` awaits
- * `emulate_firmware` in a thread and returns its result. So the button shows an
- * elapsed counter and says plainly that the answer takes as long as the boot does
- * (tens of seconds to a few minutes on this corpus). A progress bar over a request
- * that reports nothing would be a lie with a percentage on it.
- */
-function StartRunPanel() {
-  const firmware = useFirmware()
-  const client = useQueryClient()
-  const [source, setSource] = useState<LaunchSource>('ready')
-  const [selected, setSelected] = useState('')
-  const [archive, setArchive] = useState<File | null>(null)
-  const [image, setImage] = useState<File | null>(null)
-  const [arch, setArch] = useState('')
-  const [port, setPort] = useState('0')
-  const [timeoutValue, setTimeoutValue] = useState('200')
-  const [lastResult, setLastResult] = useState<LaunchOutcome | null>(null)
-
-  const shared = {
-    port: Number.parseInt(port, 10) || 0,
-    timeout: Number.parseInt(timeoutValue, 10) || 200,
-  }
-
-  const start = useMutation({
-    mutationFn: async (): Promise<LaunchOutcome> => {
-      if (source === 'ready') {
-        const target = (firmware.data ?? []).find((item) => item.path === selected)
-        if (!target) throw new Error('请先选择一个已提取的 rootfs')
-        return api.emulate({
-          rootfs_path: target.path,
-          // The census reports "unknown" for a rootfs with no ELF in bin/; refusing to
-          // guess here would block a legitimate launch, and the server's preflight is
-          // the authority that actually rejects a wrong architecture.
-          arch: target.arch === 'unknown' ? 'mipsel' : target.arch,
-          port: shared.port,
-          timeout: shared.timeout,
-        })
-      }
-      const file = source === 'rootfs-archive' ? archive : image
-      if (!file) throw new Error(source === 'rootfs-archive' ? '请先选择一个 rootfs 归档' : '请先选择一个固件镜像')
-      // `kind` is stated rather than left to `auto` so the panel's choice is the
-      // request's choice; a mislabelled tar then fails as a firmware image with a
-      // message about the format instead of quietly extracting to the wrong tree.
-      return api.uploadLaunch(file, {
-        kind: source === 'rootfs-archive' ? 'rootfs' : 'firmware',
-        arch: arch.trim() || undefined,
-        port: shared.port,
-        timeout: shared.timeout,
-      })
-    },
-    onSuccess: (result) => {
-      setLastResult(result)
-      void client.invalidateQueries({ queryKey: ['emulations'] })
-      void client.invalidateQueries({ queryKey: ['stats'] })
-      void client.invalidateQueries({ queryKey: ['runs'] })
-    },
-  })
-
-  const elapsed = useTicker(1_000, start.isPending)
-  const file = source === 'rootfs-archive' ? archive : source === 'firmware' ? image : null
-  const ready = source === 'ready' ? Boolean(selected) : Boolean(file)
-
-  return (
-    <Panel
-      title="启动一次仿真"
-      subtitle="来源可选已提取的 rootfs、rootfs 归档或厂商固件镜像；接口会等启动过程结束才返回，通常需要数十秒到数分钟"
-      actions={
-        <Badge tone={start.isPending ? 'iris' : 'neutral'}>
-          {start.isPending ? `已等待 ${elapsed}s` : '空闲'}
-        </Badge>
-      }
-    >
-      <div className="flex flex-col gap-3">
-        <Segmented<LaunchSource>
-          label="固件来源"
-          value={source}
-          onChange={(value) => {
-            setSource(value)
-            // The previous answer describes a different route, so leaving it up
-            // would put an upload's unpack numbers under the "已提取 rootfs" tab.
-            setLastResult(null)
-            start.reset()
-          }}
-          options={[
-            { value: 'ready', label: '已提取 rootfs', hint: '从暂存目录选择 iris extract 已经解出的 rootfs' },
-            { value: 'rootfs-archive', label: 'rootfs 归档', hint: '上传一个 rootfs 的 tar 包，服务器会解包并补修' },
-            { value: 'firmware', label: '厂商 bin', hint: '上传厂商原始固件镜像，先剖分再仿真' },
-          ]}
-        />
-
-        {/* One row, one baseline: every control is `h-8` inside a `flex flex-col`,
-            so `items-end` aligns the boxes themselves rather than the text inside
-            them, and the primary button sits on the same line as the fields it
-            submits. */}
-        <div className="flex flex-wrap items-end gap-2">
-          {source === 'ready' ? (
-            <Select
-              label="rootfs"
-              value={selected}
-              onChange={(event) => setSelected(event.target.value)}
-              className="w-64"
-            >
-              <option value="">
-                {firmware.isLoading
-                  ? '读取中…'
-                  : firmware.data?.length
-                    ? '选择一个已提取的固件'
-                    : '暂存目录中没有 *-rootfs'}
-              </option>
-              {(firmware.data ?? []).map((item) => (
-                <option key={item.path} value={item.path}>
-                  {item.name} · {item.arch}
-                </option>
-              ))}
-            </Select>
-          ) : (
-            <FileInput
-              label={source === 'rootfs-archive' ? 'rootfs 归档' : '固件镜像'}
-              accept={
-                source === 'rootfs-archive'
-                  ? '.tar,.tar.gz,.tgz,.tar.bz2,.tar.xz'
-                  : '.bin,.img,.trx,.squashfs,.fs'
-              }
-              file={file}
-              disabled={start.isPending}
-              onPick={source === 'rootfs-archive' ? setArchive : setImage}
-              hint={
-                source === 'rootfs-archive'
-                  ? 'tar / tar.gz；越界路径与逃逸软链会被拒绝并计数'
-                  : '厂商原始镜像；先剖分出 rootfs 再启动'
-              }
-            />
-          )}
-
-          {source !== 'ready' && (
-            <TextInput
-              label="架构"
-              value={arch}
-              placeholder="留空则自动判定"
-              onChange={(event) => setArch(event.target.value)}
-              className="w-32"
-            />
-          )}
-          <TextInput
-            label="宿主端口"
-            type="number"
-            value={port}
-            hint="0 = 自动选择"
-            onChange={(event) => setPort(event.target.value)}
-            className="w-28"
-          />
-          <TextInput
-            label="启动超时（秒）"
-            type="number"
-            value={timeoutValue}
-            onChange={(event) => setTimeoutValue(event.target.value)}
-            className="w-32"
-          />
-          <Button
-            variant="primary"
-            disabled={start.isPending || !ready}
-            onClick={() => start.mutate()}
-            title="启动（接口会阻塞到仿真结束）"
-          >
-            <Play className="h-3.5 w-3.5" aria-hidden="true" />
-            {start.isPending ? '启动中…' : '启动'}
-          </Button>
-        </div>
-      </div>
-
-      {start.isError && (
-        <p className="mt-2 text-2xs text-danger" role="alert">
-          启动失败：{(start.error as Error).message}
-        </p>
-      )}
-      {lastResult && <LaunchOutcomeRow result={lastResult} />}
-    </Panel>
-  )
-}
-
-type LaunchSource = 'ready' | 'rootfs-archive' | 'firmware'
-
-/** What the page shows after a launch: the boot verdict, plus -- for an upload --
- *  where the input came from and what the unpack did. The upload extras are not
- *  decoration: a skipped symlink is the first thing to look at when a guest that
- *  came out of a tar will not boot. */
-function LaunchOutcomeRow({ result }: { result: LaunchOutcome }) {
-  const upload = 'source' in result ? result : null
-  return (
-    <div className="mt-3 flex flex-col gap-2 border-t border-surface-border pt-2 text-2xs">
-      <div className="flex flex-wrap items-center gap-2">
-        <Badge tone={result.web_ok ? 'success' : 'danger'}>{result.web_ok ? 'Web 可达' : 'Web 不可达'}</Badge>
-        {upload && <Badge tone="violet">{upload.source === 'rootfs' ? 'rootfs 归档' : '厂商固件'}</Badge>}
-        <span className="font-mono text-ink-300">iid {result.iid}</span>
-        <span className="tnum text-ink-500">{seconds(result.duration_sec)}</span>
-        {/* Never 0: the server resolves "pick a free one" before answering, so a 0
-            here would mean the boot timed out probing a port never opened. */}
-        {upload && upload.host_port > 0 && (
-          <span className="tnum text-ink-500" title="容器实际发布的宿主端口">
-            宿主端口 {upload.host_port}
-          </span>
-        )}
-        {result.web_url && result.web_url !== '-' && (
-          <a
-            href={result.web_url}
-            target="_blank"
-            rel="noreferrer noopener"
-            className="font-mono text-cyan hover:underline"
-          >
-            {result.web_url}
-          </a>
-        )}
-        {result.error && <span className="text-danger">{result.error}</span>}
-        <Link to={`/instances/${result.iid}`} className="ml-auto text-iris-400 hover:underline">
-          查看实例详情
-        </Link>
-      </div>
-
-      {upload && (
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-ink-700">
-          <span className="max-w-full truncate font-mono text-ink-500" title={upload.name}>
-            {upload.name}
-          </span>
-          <span className="font-mono">解出 {upload.members} 个成员</span>
-          <span className="font-mono">{formatBytes(upload.total_bytes)}</span>
-          <span className="font-mono">重建软链 {upload.links_created}</span>
-          {upload.links_skipped > 0 && (
-            <Badge tone="warning" title="逃逸或悬空的软链已被跳过；rootfs 主要靠软链，缺失会直接导致启动失败">
-              跳过软链 {upload.links_skipped}
-            </Badge>
-          )}
-          {upload.rejected_members > 0 && (
-            <Badge tone="warning" title="越界路径或特殊文件已被拒绝">
-              拒绝成员 {upload.rejected_members}
-            </Badge>
-          )}
-          {upload.matched_rule_ids.length > 0 && (
-            <span className="font-mono">命中规则 {upload.matched_rule_ids.join('、')}</span>
-          )}
-        </div>
-      )}
-      {upload && upload.notes.length > 0 && (
-        <ul className="flex flex-col gap-0.5 text-ink-700">
-          {upload.notes.map((note, index) => (
-            <li key={`${index}-${note}`} className="leading-relaxed">
-              · {note}
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  )
-}
-
-/** Bytes with the same unit ladder and rounding the server's `human_bytes` uses,
- *  so the number the page prints and the number the API returns agree. */
-function formatBytes(count: number): string {
-  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
-  let value = count
-  let unit = 0
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024
-    unit += 1
-  }
-  const digits = unit === 0 || value >= 100 ? 0 : 1
-  return `${value.toFixed(digits)} ${units[unit]}`
 }
 
 function ActiveTable({ query }: { query: ReturnType<typeof useEmulations> }) {
@@ -376,7 +95,15 @@ function ActiveTable({ query }: { query: ReturnType<typeof useEmulations> }) {
       {query.data?.length === 0 && (
         <EmptyState
           title="当前没有运行中的实例"
-          detail="用下方表单启动一次仿真，或在命令行运行 iris emulate run（命令行启动的实例不受页面管理）"
+          detail="命令行启动的实例不受页面管理；本页只列出本服务托管的那些"
+          action={
+            <Link to="/#launch">
+              <Button size="sm" variant="outline">
+                <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+                去总览页新建实例
+              </Button>
+            </Link>
+          }
         />
       )}
       {query.data && query.data.length > 0 && (
@@ -535,7 +262,10 @@ function HistoryTable({
         <ErrorState title="无法读取运行记录" detail={(result.error as Error).message} onRetry={() => void result.refetch()} />
       )}
       {result.data?.items.length === 0 && (
-        <EmptyState title="没有匹配的记录" detail="放宽筛选条件，或先启动一次仿真" />
+        <EmptyState
+          title="没有匹配的记录"
+          detail="全库中没有符合当前筛选的运行记录；放宽条件或翻页即可看到更早的记录"
+        />
       )}
       {result.data && result.data.items.length > 0 && (
         <table className="w-full text-left text-xs">

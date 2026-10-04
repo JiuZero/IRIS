@@ -5,6 +5,7 @@ import {
   FileDown,
   Gauge,
   Palette,
+  Plus,
   Search,
   Settings as SettingsIcon,
   Rows3,
@@ -59,8 +60,11 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
     }
     const list: Command[] = [
       { id: 'home', label: '总览', group: '导航', shortcut: 'G 然后 H', icon: <Gauge className="h-3.5 w-3.5" />, run: go('/') },
-      { id: 'instances', label: '实例列表', group: '导航', icon: <Cpu className="h-3.5 w-3.5" />, run: go('/instances') },
+      { id: 'instances', label: '实例记录', group: '导航', icon: <Cpu className="h-3.5 w-3.5" />, run: go('/instances') },
       { id: 'settings', label: '设置与能力矩阵', group: '导航', icon: <SettingsIcon className="h-3.5 w-3.5" />, run: go('/settings') },
+      // First among the actions, because it is the one that does the work: the
+      // launch form lives on the dashboard, not on the records page.
+      { id: 'launch', label: '新建实例', hint: '三种固件来源；接口等启动结束才返回', group: '动作', icon: <Plus className="h-3.5 w-3.5" />, run: go('/#launch') },
     ]
 
     // Appearance, cycled rather than listed twelve times: the picker on the settings
@@ -94,7 +98,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
         id: `iid-${item.iid}`,
         label: `实例 ${item.iid}`,
         hint: `${item.arch || '未知架构'} · ${item.web_ok ? 'Web 可达' : 'Web 未达'}`,
-        group: '运行中的实例',
+        group: '最近实例',
         icon: <TerminalIcon className="h-3.5 w-3.5" />,
         run: go(`/instances/${item.iid}`),
       })

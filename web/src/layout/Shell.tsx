@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react'
-import { Outlet, useNavigate, useParams } from 'react-router-dom'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Outlet, useLocation, useNavigate, useParams } from 'react-router-dom'
 
 import { CommandPalette } from '../components/CommandPalette'
 import { useBreakpoint } from '../hooks'
@@ -36,6 +36,21 @@ export function Shell() {
   const routeIid = params.iid ? Number.parseInt(params.iid, 10) : null
   const pinned = useUiStore((state) => state.pinnedInstance)
   const iid = routeIid ?? pinned
+
+  // In-page anchors, scrolled by hand.
+  //
+  // The browser's own `#fragment` handling scrolls the *document*, and the document
+  // here never scrolls -- `main`'s child is an overflow container, so the page sits
+  // still while the panel below the fold stays below it. So `/#launch` would change
+  // the URL and do nothing, which is worse than not offering the link: the sidebar's
+  // "新建实例" button would look broken.
+  const location = useLocation()
+  const scrollRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!location.hash) return
+    const target = scrollRef.current?.querySelector(location.hash)
+    target?.scrollIntoView({ block: 'start' })
+  }, [location.hash, location.pathname])
 
   const collapsed = useUiStore((state) => state.sidebarCollapsed)
   const sidebarWidth = useUiStore((state) => state.sidebarWidth)
@@ -113,7 +128,7 @@ export function Shell() {
               </button>
             )}
           </div>
-          <div className="scroll-y min-h-0 flex-1">
+          <div className="scroll-y min-h-0 flex-1" ref={scrollRef}>
             <Outlet />
           </div>
           <LogPanel />
