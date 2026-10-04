@@ -58,7 +58,7 @@ type ButtonVariant = 'primary' | 'ghost' | 'outline' | 'danger'
 const BUTTON_VARIANTS: Record<ButtonVariant, string> = {
   primary:
     'bg-iris-500 text-white hover:bg-iris-400 disabled:hover:bg-iris-500 shadow-iris disabled:shadow-none',
-  ghost: 'text-ink-300 hover:bg-white/5 hover:text-ink-100',
+  ghost: 'text-ink-300 hover:bg-surface-hover hover:text-ink-100',
   outline: 'border border-surface-border-strong text-ink-300 hover:border-iris-400 hover:text-ink-100',
   danger: 'border border-danger/40 text-danger hover:bg-danger/10 hover:border-danger',
 }
@@ -105,7 +105,7 @@ const TONE_CLASSES: Record<Tone, string> = {
   danger: 'border-danger/35 bg-danger/12 text-danger',
   violet: 'border-violet/35 bg-violet/12 text-violet',
   cyan: 'border-cyan/35 bg-cyan/12 text-cyan',
-  neutral: 'border-surface-border-strong bg-white/5 text-ink-300',
+  neutral: 'border-surface-border-strong bg-surface-hover text-ink-300',
 }
 
 /** The one badge. `tone` picks the colour; the caller always supplies a word. */
@@ -139,9 +139,9 @@ export function Badge({
 
 /* ---------------------------------------------------------------- status dot */
 
-/** A pulsing dot for "live", a steady one for "idle". The pulse is dropped by the
- *  `prefers-reduced-motion` rule in tokens.css, which is why it is an animation
- *  on the element rather than a JS timer. */
+/** A pulsing dot for "live", a steady one for "idle". The pulse is a CSS animation
+ *  rather than a JS timer, so the OS's `prefers-reduced-motion` rule and the
+ *  in-app motion switch can both drop it. */
 export function StatusDot({ tone = 'success', pulse = false }: { tone?: Tone; pulse?: boolean }) {
   const colour: Record<Tone, string> = {
     iris: 'bg-iris-400',
@@ -152,10 +152,26 @@ export function StatusDot({ tone = 'success', pulse = false }: { tone?: Tone; pu
     cyan: 'bg-cyan',
     neutral: 'bg-ink-500',
   }
+  // The halo reads its colour from `currentColor`, so the text utility is not
+  // decoration: it is what tells the ring which state it is ringing for.
+  const textColour: Record<Tone, string> = {
+    iris: 'text-iris-400',
+    success: 'text-success',
+    warning: 'text-warning',
+    danger: 'text-danger',
+    violet: 'text-violet',
+    cyan: 'text-cyan',
+    neutral: 'text-ink-500',
+  }
   return (
     <span
       aria-hidden="true"
-      className={classNames('inline-block h-1.5 w-1.5 shrink-0 rounded-full', colour[tone], pulse && 'animate-pulse-ring')}
+      className={classNames(
+        'inline-block h-1.5 w-1.5 shrink-0 rounded-full',
+        colour[tone],
+        textColour[tone],
+        pulse && 'status-pulse',
+      )}
     />
   )
 }
@@ -221,7 +237,10 @@ export function DataRow({ label, children, mono = false }: { label: string; chil
 
 export function EmptyState({ title, detail, action }: { title: string; detail?: string; action?: ReactNode }) {
   return (
-    <div className="flex h-full min-h-32 flex-col items-center justify-center gap-2 p-6 text-center">
+    // The graph-paper wash is what makes an empty panel read as "nothing here
+    // yet" rather than "this panel failed to draw"; the lines are one to three
+    // percent opacity, so the text over them is unaffected.
+    <div className="panel-grid flex h-full min-h-32 flex-col items-center justify-center gap-2 p-6 text-center">
       <p className="text-xs font-medium text-ink-300">{title}</p>
       {detail && <p className="max-w-md text-2xs leading-relaxed text-ink-500">{detail}</p>}
       {action}
@@ -259,7 +278,7 @@ export function ErrorState({
  *  A skeleton rather than a spinner: a spinner in a tile that is about to hold a
  *  percentage makes the tile look like it is measuring something. */
 export function Skeleton({ className }: { className?: string }) {
-  return <div className={classNames('animate-pulse rounded-card bg-white/5', className)} aria-hidden="true" />
+  return <div className={classNames('animate-pulse rounded-card bg-surface-faint', className)} aria-hidden="true" />
 }
 
 /* -------------------------------------------------------------------- inputs */
@@ -273,7 +292,7 @@ export function TextInput({
     <label className="flex flex-col gap-1">
       {label && <span className="text-2xs font-medium text-ink-500">{label}</span>}
       <input
-        className="h-8 rounded-card border border-surface-border bg-surface-sunken px-2 text-xs text-ink-100 placeholder:text-ink-700 focus:border-iris-400 focus:outline-none"
+        className="h-8 rounded-card border border-surface-border bg-surface-input px-2 text-xs text-ink-100 placeholder:text-ink-700 focus:border-iris-400 focus:outline-none"
         {...rest}
       />
       {hint && <span className="text-2xs text-ink-500">{hint}</span>}
@@ -290,7 +309,7 @@ export function Select({
     <label className="flex flex-col gap-1">
       {label && <span className="text-2xs font-medium text-ink-500">{label}</span>}
       <select
-        className="h-8 rounded-card border border-surface-border bg-surface-sunken px-2 text-xs text-ink-100 focus:border-iris-400 focus:outline-none"
+        className="h-8 rounded-card border border-surface-border bg-surface-input px-2 text-xs text-ink-100 focus:border-iris-400 focus:outline-none"
         {...rest}
       >
         {children}

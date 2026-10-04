@@ -1,11 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Cpu, FileDown, Gauge, Search, Settings as SettingsIcon, Terminal as TerminalIcon } from 'lucide-react'
+import {
+  Cpu,
+  FileDown,
+  Gauge,
+  Palette,
+  Search,
+  Settings as SettingsIcon,
+  Rows3,
+  Terminal as TerminalIcon,
+} from 'lucide-react'
 
 import { Badge, StatusDot } from '../components/ui'
 import { api } from '../lib/api'
 import { classNames } from '../lib/format'
 import { useEmulations } from '../hooks/queries'
+import { DENSITIES, THEMES, useAppearanceStore } from '../store/appearance'
 
 interface Command {
   id: string
@@ -35,6 +45,10 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
   const [notice, setNotice] = useState<string | null>(null)
   const navigate = useNavigate()
   const emulations = useEmulations()
+  const theme = useAppearanceStore((state) => state.theme)
+  const density = useAppearanceStore((state) => state.density)
+  const setTheme = useAppearanceStore((state) => state.setTheme)
+  const setDensity = useAppearanceStore((state) => state.setDensity)
   const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLUListElement>(null)
 
@@ -48,6 +62,32 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
       { id: 'instances', label: '实例列表', group: '导航', icon: <Cpu className="h-3.5 w-3.5" />, run: go('/instances') },
       { id: 'settings', label: '设置与能力矩阵', group: '导航', icon: <SettingsIcon className="h-3.5 w-3.5" />, run: go('/settings') },
     ]
+
+    // Appearance, cycled rather than listed twelve times: the picker on the settings
+    // page is where a theme is *chosen*; this is where a projector is *adapted to*,
+    // which is two keystrokes instead of a navigation.
+    const nextTheme = THEMES[(THEMES.findIndex((item) => item.id === theme) + 1) % THEMES.length]
+    if (nextTheme) {
+      list.push({
+        id: 'cycle-theme',
+        label: `切换主题（当前：${THEMES.find((item) => item.id === theme)?.name ?? theme}）`,
+        hint: `下一个：${nextTheme.name}`,
+        group: '外观',
+        icon: <Palette className="h-3.5 w-3.5" />,
+        run: () => setTheme(nextTheme.id),
+      })
+    }
+    const nextDensity = DENSITIES[(DENSITIES.indexOf(density) + 1) % DENSITIES.length]
+    if (nextDensity) {
+      list.push({
+        id: 'cycle-density',
+        label: `切换界面密度（当前：${density}）`,
+        hint: `下一个：${nextDensity}`,
+        group: '外观',
+        icon: <Rows3 className="h-3.5 w-3.5" />,
+        run: () => setDensity(nextDensity),
+      })
+    }
 
     for (const item of emulations.data ?? []) {
       list.push({
@@ -95,7 +135,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
       },
     })
     return list
-  }, [emulations.data, navigate, onClose])
+  }, [density, emulations.data, navigate, onClose, setDensity, setTheme, theme])
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase()
@@ -151,7 +191,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 p-8 pt-[12vh] backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-surface-scrim p-8 pt-[12vh] backdrop-blur-sm"
       onClick={onClose}
       role="presentation"
     >
@@ -199,7 +239,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
                   onClick={command.run}
                   className={classNames(
                     'flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors',
-                    index === cursor ? 'bg-iris-500/15 text-ink-100' : 'text-ink-300 hover:bg-white/5',
+                    index === cursor ? 'bg-iris-500/15 text-ink-100' : 'text-ink-300 hover:bg-surface-hover',
                   )}
                 >
                   <span className="text-iris-400">{command.icon}</span>

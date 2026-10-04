@@ -156,7 +156,7 @@ function EvalSetPanel({ query }: { query: ReturnType<typeof useEvalSet> }) {
 function ArchBar({ seen, ok }: { seen: number; ok: number }) {
   const ratio = seen > 0 ? ok / seen : 0
   return (
-    <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/5" aria-hidden="true">
+    <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface-hover" aria-hidden="true">
       <span
         className="block h-full rounded-full bg-gradient-to-r from-iris-600 to-iris-400"
         style={{ width: `${Math.round(ratio * 100)}%` }}

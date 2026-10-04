@@ -227,7 +227,7 @@ function ActiveTable({ query }: { query: ReturnType<typeof useEmulations> }) {
           </thead>
           <tbody>
             {query.data.map((item) => (
-              <tr key={item.iid} className="border-b border-surface-border/60 last:border-0 hover:bg-white/[0.02]">
+              <tr key={item.iid} className="border-b border-surface-border/60 last:border-0 hover:bg-surface-faint">
                 <td className="px-3 py-2">
                   <Link
                     to={`/instances/${item.iid}`}
@@ -386,7 +386,7 @@ function HistoryTable({
           </thead>
           <tbody>
             {result.data.items.map((row) => (
-              <tr key={row.id} className="border-b border-surface-border/60 last:border-0 hover:bg-white/[0.02]">
+              <tr key={row.id} className="border-b border-surface-border/60 last:border-0 hover:bg-surface-faint">
                 <td className="px-3 py-2">
                   <Link to={`/instances/${row.iid}?run=${row.id}`} className="font-mono text-xs text-iris-400 hover:underline">
                     #{row.id}

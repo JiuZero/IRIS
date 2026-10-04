@@ -196,7 +196,7 @@ function ConsolePanel({ iid }: { iid: number | null }) {
       )}
       {log.data?.available && (
         <>
-          <pre className="scroll-y max-h-24 whitespace-pre-wrap break-all rounded-card bg-black/30 p-2 font-mono text-[10px] leading-relaxed text-ink-300">
+          <pre className="scroll-y max-h-24 whitespace-pre-wrap break-all rounded-card bg-surface-code p-2 font-mono text-[10px] leading-relaxed text-ink-300">
             {log.data.lines.slice(-12).join('\n') || '(空)'}
           </pre>
           <p className="text-[10px] text-ink-700">

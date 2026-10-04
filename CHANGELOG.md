@@ -33,6 +33,24 @@
   （含深层路由回退与路径穿越防护）。
 - **`GET /api/v1/runs/{id}` 增加 `link` 字段**：由落库的探测摘要还原四层状态与首个
   断点，并带 `note` 声明未落库的部分（见下「诚实边界」）。
+- **外观体系：12 套主题 + 密度/字体/动效三开关**（`web/src/tokens.css`、
+  `web/src/store/appearance.ts`）。一套 CSS 变量、十二个 `:root[data-theme]`
+  覆盖块——`:root` 自身就是默认的 `iris` 主题，所以新增主题只改一处，
+  不可能引入组件读不到的变量。共 12 套：10 套深色（iris / midnight / nord /
+  tokyo-night / dracula / gruvbox / monokai，以及 aurora / sunset / ocean 三套渐变
+  背景）与 2 套浅色（daylight / github-light）。浅色主题的语义色与文字色按浅底
+  重新调过，不是把深色值反转。
+  - **密度**（紧凑/舒适/宽松）缩放 `html` 的字号。Tailwind 的字号与间距刻度是 rem，
+    所以一个声明即可整体生效；面板宽度、终端 80×24 这类 px 值刻意不动。
+  - **字体**（系统无衬线/等宽/衬线）与**动效开关**（关闭后停用文档内全部动画）。
+    系统 `prefers-reduced-motion` 始终优先于界面开关。
+  - 设置页新增「外观」面板（主题网格带三色预览），命令面板新增「切换主题」
+    「切换界面密度」两条命令。
+  - 首屏防白闪：`index.html` 内联脚本在样式加载前套用已保存的外观，
+    与 store 共用同一组 `localStorage` 键与同一套白名单。
+  - xterm 调色板改为从 CSS 变量解析并随主题重绘（此前硬编码 iris 深色，
+    浅色主题下会是一块浅底浅字的方块）；光环动画取 `currentColor`，
+    脉冲状态点不再一律是绿色环。
 
 ### 修复
 

@@ -4,10 +4,12 @@ import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { Keyboard, KeyboardOff, RefreshCw, TriangleAlert } from 'lucide-react'
 
+import type { ITheme } from '@xterm/xterm'
 import { Badge, Button, ErrorState, Panel } from '../components/ui'
 import { terminalSocketUrl } from '../lib/api'
 import { classNames } from '../lib/format'
 import { useInstanceStats } from '../hooks/queries'
+import { useAppearanceStore } from '../store/appearance'
 import type { ClientFrame, HelloFrame, ServerTextFrame } from '../lib/types'
 
 type LinkState = 'connecting' | 'open' | 'closed' | 'refused'
@@ -16,6 +18,29 @@ const CLOSE_REASON: Record<number, string> = {
   4404: '无权访问该实例的终端（不存在，或不属于当前调用方）',
   4403: '该实例没有可接入的串口（可能由命令行启动，或尚未发布端口）',
   1011: '串口通道不可用：容器内 QEMU 未在监听串口端口',
+}
+
+/** Read a token off `<html>`. The fallbacks are the `iris` theme's values, which
+ *  are what an unresolved variable would have been anyway -- xterm rejects an
+ *  empty colour string and renders nothing rather than degrading. */
+function themeColour(name: string, fallback: string): string {
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+  return value || fallback
+}
+
+/** The terminal's palette, resolved from the active theme rather than hard-coded.
+ *  A console left at the dark palette on a light theme is a white rectangle with
+ *  pale grey text in it, which is worse than no theming at all. */
+function readTerminalTheme(): ITheme {
+  return {
+    background: themeColour('--surface-base', '#0a0d14'),
+    foreground: themeColour('--text-primary', '#eef1f6'),
+    cursor: themeColour('--iris-400', '#5b8dff'),
+    selectionBackground: themeColour('--selection-bg', 'rgba(91, 141, 255, 0.3)'),
+    black: themeColour('--surface-base', '#0a0d14'),
+    brightBlack: themeColour('--text-faint', '#4a5162'),
+    white: themeColour('--text-primary', '#eef1f6'),
+  }
 }
 
 /**
@@ -40,6 +65,7 @@ export function TerminalPage() {
   const params = useParams()
   const iid = Number.parseInt(params.iid ?? '', 10)
   const stats = useInstanceStats(Number.isFinite(iid) ? iid : null)
+  const theme = useAppearanceStore((state) => state.theme)
 
   const hostRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<XTerm | null>(null)
@@ -72,15 +98,7 @@ export function TerminalPage() {
       cursorBlink: true,
       convertEol: true,
       scrollback: 5_000,
-      theme: {
-        background: '#0a0d14',
-        foreground: '#eef1f6',
-        cursor: '#5b8dff',
-        selectionBackground: 'rgba(91, 141, 255, 0.3)',
-        black: '#0a0d14',
-        brightBlack: '#4a5162',
-        white: '#eef1f6',
-      },
+      theme: readTerminalTheme(),
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
@@ -210,6 +228,15 @@ export function TerminalPage() {
     // terminal, a clean slate.
   }, [iid, attempt, write])
 
+  // Repaint the existing terminal on a theme change instead of rebuilding it.
+  // Rebuilding would drop the scrollback and close the socket, which is a far
+  // worse price than re-reading four variables. Declared after the effect above so
+  // the first run finds a terminal that has already been created.
+  useEffect(() => {
+    const term = termRef.current
+    if (term) term.options.theme = readTerminalTheme()
+  }, [theme])
+
   const claim = () => socketRef.current?.send(JSON.stringify({ type: 'claim' }))
   const release = () => socketRef.current?.send(JSON.stringify({ type: 'release' }))
 
@@ -272,7 +299,7 @@ export function TerminalPage() {
           aria-live="polite"
           aria-label={`实例 ${iid} 的串口输出`}
           className={classNames(
-            'min-h-[480px] rounded-card border border-surface-border bg-[#0a0d14] p-2',
+            'min-h-[480px] rounded-card border border-surface-border bg-surface-base p-2',
             link === 'closed' && 'opacity-70',
           )}
         />

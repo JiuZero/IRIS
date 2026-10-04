@@ -1,14 +1,46 @@
 <!doctype html>
-<html lang="zh-CN" class="dark">
+<html lang="zh-CN" class="dark" data-density="comfortable" data-font="sans" data-animations="on">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="color-scheme" content="dark light" />
     <title>IRIS 固件仿真工作台</title>
     <meta
       name="description"
       content="IRIS 固件仿真工作台：仿真状态、交互终端、网络链路与资源占用"
     />
+    <script>
+      /* Applied before the first paint, from the same four localStorage keys as
+         store/appearance.ts. Without this the page paints the default theme and
+         then repaints into the saved one, which on a light theme is a full-screen
+         white flash -- the kind of thing a reviewer notices before they read a
+         word. Hand-written rather than shared with the store because a module
+         cannot be imported before the bundle has loaded; the two must be kept in
+         step, and the allowlists below are the contract. */
+      ;(function () {
+        try {
+          var root = document.documentElement
+          var theme = localStorage.getItem('iris.ui.appearance.theme')
+          var themeIds = [
+            'iris', 'midnight', 'nord', 'tokyo-night', 'dracula', 'gruvbox',
+            'monokai', 'daylight', 'github-light', 'aurora', 'sunset', 'ocean',
+          ]
+          if (theme && theme !== 'iris' && themeIds.indexOf(theme) !== -1) root.dataset.theme = theme
+
+          var density = localStorage.getItem('iris.ui.appearance.density')
+          if (density === 'compact' || density === 'spacious') root.dataset.density = density
+
+          var font = localStorage.getItem('iris.ui.appearance.font')
+          if (font === 'mono' || font === 'serif') root.dataset.font = font
+
+          if (localStorage.getItem('iris.ui.appearance.animations') === 'false') {
+            root.dataset.animations = 'off'
+          }
+        } catch (error) {
+          /* Storage blocked: the html attributes already carry the defaults. */
+        }
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

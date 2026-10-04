@@ -1,3 +1,4 @@
+import { useLayoutEffect } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { TooltipProvider } from '@radix-ui/react-tooltip'
 
@@ -7,6 +8,7 @@ import { InstanceDetail } from './pages/InstanceDetail'
 import { Instances } from './pages/Instances'
 import { Settings } from './pages/Settings'
 import { TerminalPage } from './pages/TerminalPage'
+import { applyAppearance, useAppearanceStore } from './store/appearance'
 
 /**
  * The routes.
@@ -21,6 +23,24 @@ import { TerminalPage } from './pages/TerminalPage'
  * and the browser's back button steps out of a tab instead of off the instance.
  */
 export function App() {
+  const theme = useAppearanceStore((state) => state.theme)
+  const density = useAppearanceStore((state) => state.density)
+  const font = useAppearanceStore((state) => state.font)
+  const animations = useAppearanceStore((state) => state.animations)
+
+  // The four attributes on <html> are what the stylesheet themes off; the store is
+  // the only place they are decided. Mounting here rather than in a provider means
+  // the effect runs once for the document rather than once per consumer.
+  //
+  // A layout effect, deliberately: React runs every layout effect before any
+  // passive one, bottom-up, so this writes `data-theme` before a child's passive
+  // effect reads the resolved colours. The terminal page does exactly that --
+  // xterm is repainted from `getComputedStyle`, and as a passive effect it would
+  // otherwise read the *previous* theme's values and repaint with them.
+  useLayoutEffect(() => {
+    applyAppearance({ theme, density, font, animations })
+  }, [theme, density, font, animations])
+
   return (
     <TooltipProvider delayDuration={300} skipDelayDuration={200}>
       <Routes>

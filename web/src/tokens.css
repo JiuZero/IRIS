@@ -13,6 +13,11 @@
  *
  * Surfaces are translucent on purpose: the background gradient and its two radial
  * glows sit behind the cards, and an opaque card would hide them.
+ *
+ * One variable set, twelve themes. `:root` *is* the `iris` theme; every other
+ * theme is a block further down that overrides the same names and nothing else.
+ * A theme therefore cannot introduce a variable the components do not read, and
+ * adding a surface colour means editing one block, not twelve.
  */
 
 /* The three Tailwind layers have to be declared before they are used: `@layer base`
@@ -49,12 +54,56 @@
   --surface-sunken: rgba(10, 13, 20, 0.72);
   --surface-border: rgba(255, 255, 255, 0.07);
   --surface-border-strong: rgba(255, 255, 255, 0.12);
+  /* Inputs are opaque enough to be read as a field rather than as a hole: on a
+     translucent sunken surface a text cursor over the grid lines is hard to place. */
+  --surface-input: rgba(8, 11, 18, 0.85);
+  /* The three remaining surface roles, all of them "a tint of the background".
+     They exist because `bg-white/5` cannot: it is invisible on a light theme, and
+     a theme switch that leaves the hover states and skeletons blank is not a
+     theme switch. */
+  --surface-hover: rgba(255, 255, 255, 0.05);
+  --surface-faint: rgba(255, 255, 255, 0.03);
+  --surface-code: rgba(0, 0, 0, 0.3);
+  --surface-scrim: rgba(0, 0, 0, 0.5);
+
+  /* The two radial glows and the grid are assembled from these three, so a theme
+     re-tints the backdrop by naming three colours instead of rewriting two
+     four-layer `background-image` values. */
+  --glow-a: rgba(53, 99, 255, 0.18);
+  --glow-b: rgba(167, 139, 250, 0.12);
+  --grid-line: rgba(255, 255, 255, 0.015);
+  --grid-size: 48px;
+  --bg-gradient: none;
+
+  /* Chrome that is not part of the content: scrollbars and the selection
+     highlight. A selection painted at 3% opacity reads as "nothing happened"
+     when the user is trying to copy a run id out of a table. */
+  --scroll-thumb: rgba(255, 255, 255, 0.1);
+  --scroll-thumb-hover: rgba(255, 255, 255, 0.18);
+  --selection-bg: rgba(53, 99, 255, 0.42);
+  --selection-text: #ffffff;
+
+  /* The wordmark is the one place a serif is allowed: it is the only text in the
+     product that is a logo rather than a label. */
+  --wordmark: #eef1f6;
+
+  /* Density and font are separate axes from the theme, so they compose with any
+     of the twelve rather than being re-implemented per theme. */
+  --iris-density-scale: 1;
+  --iris-ui-font: Inter, system-ui, -apple-system, 'Segoe UI', sans-serif;
+
+  /* The whole reason the density switch works at all: Tailwind's font and spacing
+     scales are rem-based, so this one declaration rescales every `text-xs`,
+     `p-4` and `gap-2` in the product. The px-valued tokens (header 56px, panel
+     widths) are deliberately unaffected -- chrome keeps its size. */
+  font-size: calc(16px * var(--iris-density-scale));
 
   color-scheme: dark;
 }
 
 @layer base {
   * {
+    box-sizing: border-box;
     border-color: var(--surface-border);
   }
 
@@ -70,19 +119,11 @@
        attachment so the glows do not slide with the content when a long run
        table scrolls -- a background that parallaxes reads as a rendering bug. */
     background-color: var(--surface-base);
-    background-image:
-      radial-gradient(900px 520px at 12% -8%, rgba(53, 99, 255, 0.18), transparent 62%),
-      radial-gradient(760px 480px at 88% 0%, rgba(167, 139, 250, 0.12), transparent 60%),
-      linear-gradient(rgba(255, 255, 255, 0.015) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
-    background-size:
-      auto,
-      auto,
-      48px 48px,
-      48px 48px;
+    background-image: var(--surface-glow), var(--surface-grid), var(--bg-gradient);
+    background-size: var(--grid-size) var(--grid-size);
     background-attachment: fixed;
     color: var(--text-primary);
-    font-family: Inter, system-ui, -apple-system, 'Segoe UI', sans-serif;
+    font-family: var(--iris-ui-font);
     font-feature-settings: 'cv02', 'cv03', 'cv04', 'tnum';
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
@@ -96,7 +137,8 @@
   }
 
   ::selection {
-    background: rgba(53, 99, 255, 0.35);
+    background: var(--selection-bg);
+    color: var(--selection-text);
   }
 
   /* Scrollbars, themed rather than left as the OS default: a bright grey bar in
@@ -109,13 +151,13 @@
     background: transparent;
   }
   ::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.1);
+    background: var(--scroll-thumb);
     border: 2px solid transparent;
     background-clip: content-box;
     border-radius: 8px;
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: rgba(255, 255, 255, 0.18);
+    background: var(--scroll-thumb-hover);
     background-clip: content-box;
   }
 
@@ -140,6 +182,35 @@
     font: inherit;
     color: inherit;
   }
+
+  /* The font switch is a document-wide choice, so it overrides the per-element
+     `font-sans`/`font-mono` utilities rather than relying on them not being
+     there. `font-mono` still wins where a page explicitly asks for monospace
+     (run ids, terminal-adjacent values): that request is about the data, not the
+     chrome. */
+  html[data-font='mono'] body,
+  html[data-font='mono'] button,
+  html[data-font='mono'] input,
+  html[data-font='mono'] textarea,
+  html[data-font='mono'] select {
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Consolas, monospace;
+  }
+  html[data-font='serif'] body,
+  html[data-font='serif'] button,
+  html[data-font='serif'] input,
+  html[data-font='serif'] textarea,
+  html[data-font='serif'] select {
+    font-family: 'Palatino Linotype', 'Book Antiqua', Palatino, Georgia, serif;
+  }
+}
+
+/* The composed backdrop, resolved once here rather than three times at each use.
+   `--surface-glow` and `--surface-grid` are only ever read through these two. */
+:root {
+  --surface-glow: radial-gradient(900px 520px at 12% -8%, var(--glow-a), transparent 62%),
+    radial-gradient(760px 480px at 88% 0%, var(--glow-b), transparent 60%);
+  --surface-grid: linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
 }
 
 @layer components {
@@ -160,6 +231,36 @@
     -webkit-backdrop-filter: blur(12px) saturate(140%);
     border: 1px solid var(--surface-border);
     border-radius: 8px;
+  }
+
+  /* A panel that carries its own 24px graph paper. 24 rather than the body's 48:
+     this one sits behind a table of runs, and the cell rhythm is 24. */
+  .panel-grid {
+    background-image: linear-gradient(var(--grid-line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+    background-size: 24px 24px;
+  }
+
+  /* The live halo. A ring that grows and fades, so "this instance is running" is
+     visible from across a room without reading the label beside it.
+     The ring takes its colour from `currentColor`, so a pulsing *warning* does not
+     wear a green ring; the caller pairs a background utility with a text one for
+     exactly that reason. `color-mix` is what makes the same keyframe work for a
+     yellow ring and a red one, and the fallback in the keyframe covers a browser
+     that lacks it -- a wrong-coloured halo rather than no halo. */
+  .status-pulse {
+    --pulse-ring: color-mix(in srgb, currentColor 45%, transparent);
+    animation: status-pulse 2.2s cubic-bezier(0.22, 0.61, 0.36, 1) infinite;
+  }
+
+  /* The wordmark. The only serif in the product, and the only text allowed a
+     different family from the theme font -- a logotype that renders in the UI
+     font looks like a heading. */
+  .brand-wordmark {
+    font-family: 'Palatino Linotype', 'Book Antiqua', Palatino, Georgia, serif;
+    font-style: italic;
+    letter-spacing: 0.01em;
+    color: var(--wordmark);
   }
 }
 
@@ -186,8 +287,404 @@
   }
 }
 
-/* Motion is decoration. Anyone who asked the OS for less of it gets none of it:
-   the pulsing status dots stop, and the route fade stops with them. */
+/* The halo keyframe, declared at the top level rather than inside a layer: a
+   `@keyframes` inside `@layer components` is emitted inside that layer and is
+   then ordered against the `.status-pulse` rule itself, which makes the ring
+   appear one repaint late.
+   The colour comes from `--pulse-ring`, set by the caller, because a halo that
+   is always green would claim a warning or a failure is healthy. */
+@keyframes status-pulse {
+  0% {
+    box-shadow: 0 0 0 0 var(--pulse-ring, rgba(52, 211, 153, 0.45));
+  }
+  70% {
+    box-shadow: 0 0 0 7px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+/* ------------------------------------------------------------------- themes */
+
+/* Each block overrides the same variable names and nothing else. The three
+   colour knobs that actually change a theme's character are the accent ramp, the
+   surface ramp and the two glow colours; the rest are tuned for contrast against
+   that surface, which is why a light theme cannot simply reuse a dark one's
+   `--text-muted` (see `--text-faint` below, which is deliberately darker than a
+   dark theme's). */
+
+:root[data-theme='midnight'] {
+  --iris-400: #6ea0ff;
+  --iris-500: #3d7dff;
+  --iris-600: #1f5fe0;
+  --success: #3ddc97;
+  --warning: #ffc53d;
+  --danger: #ff6b6b;
+  --violet: #b39dff;
+  --cyan: #4cc9f0;
+  --text-primary: #f2f5fa;
+  --text-secondary: #9fb0c6;
+  --text-muted: #63748c;
+  --text-faint: #4c5c72;
+  --surface-base: #05070c;
+  --surface-raised: rgba(16, 22, 34, 0.58);
+  --surface-sunken: rgba(6, 9, 15, 0.76);
+  --surface-border: rgba(148, 176, 214, 0.12);
+  --surface-border-strong: rgba(148, 176, 214, 0.22);
+  --surface-input: rgba(4, 6, 11, 0.88);
+  --surface-hover: rgba(148, 176, 214, 0.07);
+  --surface-faint: rgba(148, 176, 214, 0.045);
+  --surface-code: rgba(0, 0, 0, 0.35);
+  --surface-scrim: rgba(2, 4, 9, 0.6);
+  --glow-a: rgba(61, 125, 255, 0.2);
+  --glow-b: rgba(76, 201, 240, 0.1);
+  --grid-line: rgba(148, 176, 214, 0.03);
+  --selection-bg: rgba(61, 125, 255, 0.45);
+  color-scheme: dark;
+}
+
+:root[data-theme='nord'] {
+  --iris-400: #88c0d0;
+  --iris-500: #81a1c1;
+  --iris-600: #5e81ac;
+  --success: #a3be8c;
+  --warning: #ebcb8b;
+  --danger: #bf616a;
+  --violet: #b48ead;
+  --cyan: #8fbcbb;
+  --text-primary: #eceff4;
+  --text-secondary: #b9c4d4;
+  --text-muted: #8593a7;
+  --text-faint: #6b7789;
+  --surface-base: #2e3440;
+  --surface-raised: rgba(59, 66, 82, 0.6);
+  --surface-sunken: rgba(46, 52, 64, 0.75);
+  --surface-border: rgba(216, 222, 233, 0.1);
+  --surface-border-strong: rgba(216, 222, 233, 0.18);
+  --surface-input: rgba(46, 52, 64, 0.88);
+  --surface-hover: rgba(236, 239, 244, 0.06);
+  --surface-faint: rgba(236, 239, 244, 0.035);
+  --surface-code: rgba(23, 28, 36, 0.3);
+  --surface-scrim: rgba(30, 35, 43, 0.5);
+  --glow-a: rgba(129, 161, 193, 0.16);
+  --glow-b: rgba(180, 142, 173, 0.12);
+  --grid-line: rgba(236, 239, 244, 0.03);
+  --selection-bg: rgba(129, 161, 193, 0.4);
+  --selection-text: #2e3440;
+  color-scheme: dark;
+}
+
+:root[data-theme='tokyo-night'] {
+  --iris-400: #7aa2f7;
+  --iris-500: #5c7ee8;
+  --iris-600: #3d5fbf;
+  --success: #9ece6a;
+  --warning: #e0af68;
+  --danger: #f7768e;
+  --violet: #bb9af7;
+  --cyan: #7dcfff;
+  --text-primary: #c0caf5;
+  --text-secondary: #a9b1d6;
+  --text-muted: #787fa8;
+  --text-faint: #5b6193;
+  --surface-base: #1a1b26;
+  --surface-raised: rgba(36, 40, 59, 0.62);
+  --surface-sunken: rgba(26, 27, 38, 0.76);
+  --surface-border: rgba(122, 162, 247, 0.14);
+  --surface-border-strong: rgba(122, 162, 247, 0.26);
+  --surface-input: rgba(26, 27, 38, 0.88);
+  --surface-hover: rgba(192, 202, 245, 0.07);
+  --surface-faint: rgba(192, 202, 245, 0.04);
+  --surface-code: rgba(10, 11, 18, 0.34);
+  --surface-scrim: rgba(12, 13, 20, 0.55);
+  --glow-a: rgba(122, 162, 247, 0.18);
+  --glow-b: rgba(187, 154, 247, 0.12);
+  --grid-line: rgba(192, 202, 245, 0.03);
+  --selection-bg: rgba(122, 162, 247, 0.4);
+  --selection-text: #1a1b26;
+  color-scheme: dark;
+}
+
+:root[data-theme='dracula'] {
+  --iris-400: #bd93f9;
+  --iris-500: #a879f0;
+  --iris-600: #8f5fd8;
+  --success: #50fa7b;
+  --warning: #f1fa8c;
+  --danger: #ff5555;
+  --violet: #ff79c6;
+  --cyan: #8be9fd;
+  --text-primary: #f8f8f2;
+  --text-secondary: #c8c2e0;
+  --text-muted: #8b87a8;
+  --text-faint: #6c6788;
+  --surface-base: #282a36;
+  --surface-raised: rgba(68, 71, 90, 0.6);
+  --surface-sunken: rgba(40, 42, 54, 0.76);
+  --surface-border: rgba(189, 147, 249, 0.16);
+  --surface-border-strong: rgba(189, 147, 249, 0.3);
+  --surface-input: rgba(40, 42, 54, 0.88);
+  --surface-hover: rgba(248, 248, 242, 0.07);
+  --surface-faint: rgba(248, 248, 242, 0.04);
+  --surface-code: rgba(20, 21, 28, 0.32);
+  --surface-scrim: rgba(20, 21, 28, 0.55);
+  --glow-a: rgba(189, 147, 249, 0.18);
+  --glow-b: rgba(80, 250, 123, 0.08);
+  --grid-line: rgba(248, 248, 242, 0.03);
+  --selection-bg: rgba(189, 147, 249, 0.4);
+  --selection-text: #282a36;
+  color-scheme: dark;
+}
+
+:root[data-theme='gruvbox'] {
+  --iris-400: #fabd2f;
+  --iris-500: #d8a028;
+  --iris-600: #b58900;
+  --success: #b8bb26;
+  --warning: #fe8019;
+  --danger: #fb4934;
+  --violet: #d3869b;
+  --cyan: #8ec07c;
+  --text-primary: #ebdbb2;
+  --text-secondary: #bdae93;
+  --text-muted: #928374;
+  --text-faint: #7c6f64;
+  --surface-base: #282828;
+  --surface-raised: rgba(60, 56, 54, 0.62);
+  --surface-sunken: rgba(40, 40, 40, 0.78);
+  --surface-border: rgba(235, 219, 178, 0.12);
+  --surface-border-strong: rgba(235, 219, 178, 0.2);
+  --surface-input: rgba(40, 40, 40, 0.88);
+  --surface-hover: rgba(235, 219, 178, 0.06);
+  --surface-faint: rgba(235, 219, 178, 0.035);
+  --surface-code: rgba(20, 20, 20, 0.32);
+  --surface-scrim: rgba(20, 20, 20, 0.5);
+  --glow-a: rgba(250, 189, 47, 0.14);
+  --glow-b: rgba(211, 134, 155, 0.1);
+  --grid-line: rgba(235, 219, 178, 0.03);
+  --selection-bg: rgba(250, 189, 47, 0.35);
+  --selection-text: #282828;
+  color-scheme: dark;
+}
+
+:root[data-theme='monokai'] {
+  /* Orange accent rather than Monokai's usual green: green is already `--success`
+     here, and a product whose primary button reads as "ok" is a product whose
+     primary button is not obviously a button. */
+  --iris-400: #ffa657;
+  --iris-500: #fd971f;
+  --iris-600: #e07b12;
+  --success: #a6e22e;
+  --warning: #e6db74;
+  --danger: #f92672;
+  --violet: #ae81ff;
+  --cyan: #66d9ef;
+  --text-primary: #f8f8f2;
+  --text-secondary: #cfcfc2;
+  --text-muted: #9a9787;
+  --text-faint: #7a7669;
+  --surface-base: #272822;
+  --surface-raised: rgba(56, 56, 48, 0.62);
+  --surface-sunken: rgba(39, 40, 34, 0.78);
+  --surface-border: rgba(248, 248, 242, 0.12);
+  --surface-border-strong: rgba(248, 248, 242, 0.2);
+  --surface-input: rgba(39, 40, 34, 0.88);
+  --surface-hover: rgba(248, 248, 242, 0.07);
+  --surface-faint: rgba(248, 248, 242, 0.04);
+  --surface-code: rgba(15, 16, 12, 0.32);
+  --surface-scrim: rgba(15, 16, 12, 0.55);
+  --glow-a: rgba(253, 151, 31, 0.14);
+  --glow-b: rgba(174, 129, 255, 0.1);
+  --grid-line: rgba(248, 248, 242, 0.03);
+  --selection-bg: rgba(253, 151, 31, 0.35);
+  --selection-text: #272822;
+  color-scheme: dark;
+}
+
+/* The first light theme. Everything on it is darkened relative to a dark theme's
+   equivalent: 4.5:1 on `--surface-raised` is a floor for body text and 3:1 for
+   the focus ring and the accent, and the dark-theme values do not clear either
+   once the background is light instead of near-black. */
+:root[data-theme='daylight'] {
+  --iris-400: #3563ff;
+  --iris-500: #2a4fe0;
+  --iris-600: #1f3bbd;
+  --success: #0b8a5b;
+  --warning: #a75a06;
+  --danger: #d32626;
+  --violet: #6d28d9;
+  --cyan: #0e7490;
+  --text-primary: #1b2029;
+  --text-secondary: #454e5d;
+  --text-muted: #61697a;
+  --text-faint: #8b93a1;
+  --surface-base: #fbf6ec;
+  --surface-raised: rgba(255, 253, 245, 0.78);
+  --surface-sunken: rgba(246, 239, 228, 0.8);
+  --surface-border: rgba(27, 32, 41, 0.12);
+  --surface-border-strong: rgba(27, 32, 41, 0.22);
+  --surface-input: rgba(255, 255, 255, 0.92);
+  --surface-hover: rgba(27, 32, 41, 0.05);
+  --surface-faint: rgba(27, 32, 41, 0.035);
+  --surface-code: rgba(27, 32, 41, 0.06);
+  --surface-scrim: rgba(27, 32, 41, 0.35);
+  --glow-a: rgba(53, 99, 255, 0.14);
+  --glow-b: rgba(124, 58, 237, 0.1);
+  --grid-line: rgba(27, 32, 41, 0.035);
+  --scroll-thumb: rgba(27, 32, 41, 0.16);
+  --scroll-thumb-hover: rgba(27, 32, 41, 0.28);
+  --selection-bg: rgba(53, 99, 255, 0.28);
+  --selection-text: #0b1020;
+  --wordmark: #1b2029;
+  color-scheme: light;
+}
+
+:root[data-theme='github-light'] {
+  --iris-400: #0969da;
+  --iris-500: #0757ba;
+  --iris-600: #044c9e;
+  --success: #1a7f37;
+  --warning: #9a6700;
+  --danger: #cf222e;
+  --violet: #8250df;
+  --cyan: #1b7c83;
+  --text-primary: #1f2328;
+  --text-secondary: #454c56;
+  --text-muted: #616a76;
+  --text-faint: #8b949e;
+  --surface-base: #ffffff;
+  --surface-raised: rgba(255, 255, 255, 0.82);
+  --surface-sunken: rgba(246, 248, 250, 0.85);
+  --surface-border: rgba(31, 35, 40, 0.12);
+  --surface-border-strong: rgba(31, 35, 40, 0.22);
+  --surface-input: rgba(255, 255, 255, 0.95);
+  --surface-hover: rgba(31, 35, 40, 0.05);
+  --surface-faint: rgba(31, 35, 40, 0.035);
+  --surface-code: rgba(31, 35, 40, 0.06);
+  --surface-scrim: rgba(31, 35, 40, 0.35);
+  --glow-a: rgba(9, 105, 218, 0.1);
+  --glow-b: rgba(130, 80, 223, 0.08);
+  --grid-line: rgba(31, 35, 40, 0.03);
+  --scroll-thumb: rgba(31, 35, 40, 0.16);
+  --scroll-thumb-hover: rgba(31, 35, 40, 0.28);
+  --selection-bg: rgba(9, 105, 218, 0.26);
+  --selection-text: #0b1020;
+  --wordmark: #1f2328;
+  color-scheme: light;
+}
+
+/* The three gradient themes keep a dark surface ramp and change the backdrop
+   instead. Panels stay translucent on purpose: the gradient is the reason to run
+   one of these, and an opaque panel would hide it. */
+
+:root[data-theme='aurora'] {
+  --iris-400: #7dd3fc;
+  --iris-500: #38bdf8;
+  --iris-600: #0ea5e9;
+  --success: #4ade80;
+  --warning: #fbbf24;
+  --danger: #fb7185;
+  --violet: #c084fc;
+  --cyan: #22d3ee;
+  --text-primary: #e8f4fb;
+  --text-secondary: #a8c4d4;
+  --text-muted: #6f8b9c;
+  --text-faint: #556e7d;
+  --surface-base: #0f2027;
+  --surface-raised: rgba(32, 58, 67, 0.6);
+  --surface-sunken: rgba(15, 32, 39, 0.76);
+  --surface-border: rgba(125, 211, 252, 0.16);
+  --surface-border-strong: rgba(125, 211, 252, 0.28);
+  --surface-input: rgba(15, 32, 39, 0.88);
+  --surface-hover: rgba(232, 244, 251, 0.07);
+  --surface-faint: rgba(232, 244, 251, 0.04);
+  --surface-code: rgba(4, 14, 18, 0.32);
+  --surface-scrim: rgba(8, 20, 25, 0.55);
+  --glow-a: rgba(56, 189, 248, 0.16);
+  --glow-b: rgba(192, 132, 252, 0.12);
+  --grid-line: rgba(232, 244, 251, 0.03);
+  --selection-bg: rgba(56, 189, 248, 0.38);
+  --bg-gradient: linear-gradient(135deg, #0f2027 0%, #203a43 55%, #2c5364 100%);
+  color-scheme: dark;
+}
+
+:root[data-theme='sunset'] {
+  --iris-400: #fdba74;
+  --iris-500: #fb923c;
+  --iris-600: #ea580c;
+  --success: #4ade80;
+  --warning: #fcd34d;
+  --danger: #fb7185;
+  --violet: #e879f9;
+  --cyan: #22d3ee;
+  --text-primary: #fbeee6;
+  --text-secondary: #d9b9ad;
+  --text-muted: #a1818a;
+  --text-faint: #7f6670;
+  --surface-base: #1a0a2e;
+  --surface-raised: rgba(74, 25, 66, 0.6);
+  --surface-sunken: rgba(26, 10, 46, 0.76);
+  --surface-border: rgba(251, 146, 60, 0.18);
+  --surface-border-strong: rgba(251, 146, 60, 0.32);
+  --surface-input: rgba(26, 10, 46, 0.88);
+  --surface-hover: rgba(251, 238, 230, 0.07);
+  --surface-faint: rgba(251, 238, 230, 0.04);
+  --surface-code: rgba(12, 4, 22, 0.32);
+  --surface-scrim: rgba(16, 6, 32, 0.55);
+  --glow-a: rgba(251, 146, 60, 0.16);
+  --glow-b: rgba(232, 121, 249, 0.12);
+  --grid-line: rgba(251, 238, 230, 0.03);
+  --selection-bg: rgba(251, 146, 60, 0.36);
+  --bg-gradient: linear-gradient(135deg, #1a0a2e 0%, #4a1942 55%, #c84b31 100%);
+  color-scheme: dark;
+}
+
+:root[data-theme='ocean'] {
+  --iris-400: #7dd3fc;
+  --iris-500: #38bdf8;
+  --iris-600: #0284c7;
+  --success: #34d399;
+  --warning: #fbbf24;
+  --danger: #f87171;
+  --violet: #c084fc;
+  --cyan: #67e8f9;
+  --text-primary: #e6efff;
+  --text-secondary: #a3b6d8;
+  --text-muted: #6b7fa6;
+  --text-faint: #536487;
+  --surface-base: #020111;
+  --surface-raised: rgba(32, 18, 77, 0.62);
+  --surface-sunken: rgba(2, 1, 17, 0.78);
+  --surface-border: rgba(125, 211, 252, 0.16);
+  --surface-border-strong: rgba(125, 211, 252, 0.3);
+  --surface-input: rgba(2, 1, 17, 0.88);
+  --surface-hover: rgba(230, 239, 255, 0.07);
+  --surface-faint: rgba(230, 239, 255, 0.04);
+  --surface-code: rgba(1, 0, 10, 0.34);
+  --surface-scrim: rgba(2, 1, 15, 0.55);
+  --glow-a: rgba(56, 189, 248, 0.18);
+  --glow-b: rgba(99, 232, 249, 0.1);
+  --grid-line: rgba(230, 239, 255, 0.03);
+  --selection-bg: rgba(56, 189, 248, 0.4);
+  --bg-gradient: linear-gradient(135deg, #020111 0%, #20124d 55%, #005b96 100%);
+  color-scheme: dark;
+}
+
+/* ------------------------------------------------------- density and motion */
+
+:root[data-density='compact'] {
+  --iris-density-scale: 0.92;
+}
+:root[data-density='comfortable'] {
+  --iris-density-scale: 1;
+}
+:root[data-density='spacious'] {
+  --iris-density-scale: 1.08;
+}
+
+/* Motion is decoration. Three ways to say no, all honoured:
+   the OS setting, the in-app switch, and neither being available. */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -197,4 +694,11 @@
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+html[data-animations='off'] *,
+html[data-animations='off'] *::before,
+html[data-animations='off'] *::after {
+  animation: none !important;
+  transition: none !important;
 }

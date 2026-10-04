@@ -5,6 +5,10 @@
  *  product's identity and the semantic five are how a state is read at a glance.
  *  Both are fixed by the design, and a `blue-500` that happens to be close is a
  *  colour that will drift the first time someone adjusts a shade.
+ *
+ *  The same indirection is what makes the twelve themes possible: a `text-ink-300`
+ *  here resolves against whichever theme is on `:root`, so switching a theme is a
+ *  `data-theme` attribute and not a re-render of the tree.
  */
 export default {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
@@ -32,14 +36,22 @@ export default {
           raised: 'var(--surface-raised)',
           sunken: 'var(--surface-sunken)',
           border: 'var(--surface-border)',
+          input: 'var(--surface-input)',
+          hover: 'var(--surface-hover)',
+          faint: 'var(--surface-faint)',
+          code: 'var(--surface-code)',
+          scrim: 'var(--surface-scrim)',
         },
       },
       fontFamily: {
         sans: ['Inter', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif'],
         mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'Consolas', 'monospace'],
       },
+      /* rem, not px. The density switch rescales `html`'s font-size, and every
+         `text-*` below the stock scale follows it; a px value here would be the
+         one step that stayed put and made "compact" a lie. */
       fontSize: {
-        '2xs': ['11px', { lineHeight: '16px' }],
+        '2xs': ['0.6875rem', { lineHeight: '1rem' }],
       },
       borderRadius: {
         card: '8px',
@@ -48,6 +60,7 @@ export default {
       backdropBlur: {
         glass: '20px',
       },
+      /* Chrome sizes, deliberately px: a sidebar is a sidebar at every density. */
       spacing: {
         header: '56px',
         footer: '32px',
@@ -67,14 +80,9 @@ export default {
           from: { opacity: '0', transform: 'translateY(4px)' },
           to: { opacity: '1', transform: 'translateY(0)' },
         },
-        'pulse-ring': {
-          '0%, 100%': { opacity: '1' },
-          '50%': { opacity: '0.45' },
-        },
       },
       animation: {
         'fade-up': 'fade-up 180ms cubic-bezier(0.22, 0.61, 0.36, 1) both',
-        'pulse-ring': 'pulse-ring 1.8s ease-in-out infinite',
       },
     },
   },

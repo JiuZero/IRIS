@@ -31,7 +31,10 @@ export function Header({ onOpenPalette }: { onOpenPalette: () => void }) {
     <header className="flex h-header shrink-0 items-center gap-3 border-b border-surface-border bg-surface-sunken/70 px-3 backdrop-blur-glass">
       <div className="flex items-center gap-2">
         <Server className="h-4 w-4 text-iris-400" aria-hidden="true" />
-        <h1 className="text-sm font-semibold tracking-tight">固件仿真工作台</h1>
+        {/* The one serif in the product: a logotype set in the UI font reads as a
+            heading, and this row already has a heading next to it. */}
+        <h1 className="brand-wordmark text-base">IRIS</h1>
+        <span className="text-sm font-medium tracking-tight text-ink-300">固件仿真工作台</span>
         <Badge tone="neutral" className="hidden sm:inline-flex" title="后端与工作台共用的版本号">
           {capabilities.data ? `v${capabilities.data.version}` : '—'}
         </Badge>

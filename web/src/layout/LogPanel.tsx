@@ -49,7 +49,7 @@ export function LogPanel() {
         <button
           type="button"
           onClick={() => setOpen(false)}
-          className="ml-auto rounded p-1 text-ink-500 transition-colors hover:bg-white/5 hover:text-ink-100"
+          className="ml-auto rounded p-1 text-ink-500 transition-colors hover:bg-surface-hover hover:text-ink-100"
           aria-label="关闭失败抽屉 (Ctrl+J)"
         >
           <X className="h-3.5 w-3.5" aria-hidden="true" />

@@ -55,7 +55,7 @@ export function Sidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
         type="button"
         onClick={onOpenPalette}
         className={classNames(
-          'flex h-8 items-center gap-2 rounded-card border border-surface-border bg-white/[0.03] text-2xs text-ink-500 transition-colors hover:border-iris-400/50 hover:text-ink-300',
+          'flex h-8 items-center gap-2 rounded-card border border-surface-border bg-surface-faint text-2xs text-ink-500 transition-colors hover:border-iris-400/50 hover:text-ink-300',
           collapsed ? 'justify-center px-0' : 'px-2',
         )}
         title="命令面板 (Ctrl+K)"
@@ -83,7 +83,7 @@ export function Sidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
                   collapsed && 'justify-center px-0',
                   isActive
                     ? 'bg-iris-500/15 font-medium text-iris-400'
-                    : 'text-ink-300 hover:bg-white/5 hover:text-ink-100',
+                    : 'text-ink-300 hover:bg-surface-hover hover:text-ink-100',
                 )
               }
             >
@@ -111,7 +111,7 @@ export function Sidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
                 <button
                   type="button"
                   onClick={() => navigate(`/instances/${item.iid}`)}
-                  className="flex w-full items-center gap-2 rounded-card px-2 py-1.5 text-left transition-colors hover:bg-white/5"
+                  className="flex w-full items-center gap-2 rounded-card px-2 py-1.5 text-left transition-colors hover:bg-surface-hover"
                 >
                   <StatusDot tone={item.web_ok ? 'success' : 'warning'} pulse={item.web_ok} />
                   <span className="tnum flex-1 truncate font-mono text-2xs text-ink-100">{item.iid}</span>
@@ -159,7 +159,7 @@ export function Sidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
         type="button"
         onClick={toggle}
         className={classNames(
-          'mt-1 flex h-8 items-center gap-2 rounded-card px-2 text-2xs text-ink-500 transition-colors hover:bg-white/5 hover:text-ink-300',
+          'mt-1 flex h-8 items-center gap-2 rounded-card px-2 text-2xs text-ink-500 transition-colors hover:bg-surface-hover hover:text-ink-300',
           collapsed && 'justify-center px-0',
         )}
         title={collapsed ? '展开侧栏 (Ctrl+B)' : '收起侧栏 (Ctrl+B)'}

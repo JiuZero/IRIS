@@ -188,7 +188,7 @@ function LinkTab({
                       ? 'border-success/25 bg-success/5'
                       : row.state === 'blocked'
                         ? 'border-danger/25 bg-danger/5'
-                        : 'border-surface-border bg-white/[0.02]',
+                        : 'border-surface-border bg-surface-faint',
                   )}
                 >
                   <StatusDot
@@ -286,7 +286,7 @@ function ConsoleTab({ iid }: { iid: number }) {
       )}
       {log.data?.available && (
         <>
-          <pre className="scroll-y max-h-[60vh] whitespace-pre-wrap break-words bg-black/30 p-3 font-mono text-[11px] leading-relaxed text-ink-300">
+          <pre className="scroll-y max-h-[60vh] whitespace-pre-wrap break-words bg-surface-code p-3 font-mono text-[11px] leading-relaxed text-ink-300">
             {log.data.lines.join('\n') || '(空)'}
           </pre>
           <p className="border-t border-surface-border px-3 py-1.5 text-[10px] text-ink-700">

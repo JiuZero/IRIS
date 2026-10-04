@@ -14,6 +14,9 @@ build/
 node_modules/
 web/.vite/
 
+# 外部设计参考（Wails 应用，含 node_modules 与 dist，只读不入库）
+前端设计参考/
+
 # 仿真产物（体积大，禁止入库）
 images/
 scratch/

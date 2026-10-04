@@ -84,11 +84,18 @@ iris web                                  # http://127.0.0.1:9000/
 - 布局：Header 56 / 侧栏 264（可折叠）/ 主区 / 检查器 340（可关）/ Footer 32。
   ≥1440 三栏并排，1024–1199 检查器改为抽屉，<1024 两者都是抽屉。
 - 快捷键：`Ctrl/Cmd+K` 命令面板、`Ctrl/Cmd+\`` 终端、`Ctrl/Cmd+B` 侧栏、
-  `Ctrl/Cmd+J` 失败抽屉。面板宽度记在 localStorage。
+  `Ctrl/Cmd+J` 失败抽屉、`Ctrl/Cmd+I` 检查器。面板宽度记在 localStorage。
 - 鉴权：除 `/api/v1/health` 外全需 token，与 `iris serve start` 同一套。
   WebSocket 因为浏览器不能加头，token 走 query（`?token=`），服务端用同一套
   `hmac.compare_digest` 比较。非 loopback 绑定且无 token 时同样拒绝启动（退出码 2）。
 - 端口、host、token 的配置沿用 `IRIS_` 前缀的环境变量，`iris web` 不接受 `--config`。
+
+**外观**：设置页的「外观」面板可选 **12 套主题**（10 套深色含 aurora / sunset / ocean
+三套渐变背景，2 套浅色），另有界面密度（紧凑/舒适/宽松）、界面字体
+（系统无衬线/等宽/衬线）与动效开关。命令面板里 `切换主题`、`切换界面密度` 两条命令
+可以两步换到下一套。所有偏好只存在浏览器 `localStorage`，**服务端不保存任何界面偏好**，
+换浏览器或用无痕窗口会回到默认值。系统的 `prefers-reduced-motion`（减弱动态效果）
+始终优先于界面里的动效开关。
 
 **终端的诚实边界**（页面上也逐条写着）：
 
