@@ -193,6 +193,50 @@ README 还写着「服务起、VLAN 路由不通」。本版让声明可被核�
   记录器，只重写 `WORK_DIR` 一个路径）。12 项变异验证全部捕获，含"两侧各自改名"、
   "读端退回默认"、"去掉 `|| true`"、"把假定值当实测写盘"、"写失败仍报成功"。
 
+### 对比语料扩充：4 台厂商固件（vendor buildroot）加入双侧实测
+
+- **新增语料**：Tenda G1V31si（mipsel）、Tenda i27V11br（加密 FIT）、Tenda RP3V30
+  （armel 多分区）、Tenda US 版 TES7002（**arm64**）。此前 6 台语料里 5 台是 OpenWrt
+  24.10 官方快照，对厂商 buildroot 变体的覆盖不够——本节把这条局限往回推了一格。
+- **IRIS 侧 6 台串行实测**（timeout 300s，iid 7001-7006），数据来自 `emulation_run`
+  真实落库而非手工快照：`link-no-service` × 2（G1V31si、RP3V30）、`link-no-arp` × 2
+  （WRT1200AC、R7800）、**成功 × 1（US 版 TES7002，HTTP 200 @96.8s，`arch=arm64`）**、
+  提取失败 × 1（i27V11br，rc=2 / 1s 早退）。这正是 0.3.13 分层判定的价值：旧口径
+  只有「HTTP 000」，现在能区分「二层不通」与「二层通但 guest 内无服务」。
+- **修正 0.3.12 的两条表述**（`docs/08-与FirmAE对比.md` §3.1(b-1)）：WRT1200AC /
+  R7800 的 `HTTP 000` **不代表 web 服务没起来**——串口里 `uhttpd` 三次
+  `inet_bind ... port:80/443` 真实发生（t=131.3s / 123.4s），兜底自己也判定
+  「vendor web server is already running, leaving :80 to it」。失败位置是
+  **地址丢失后的二层不通**（`link-no-arp`），不是服务未启动。根因（重宿主内核
+  `validate_nla` BUG，`pc=c01abe18`）不变，变的只是失败位置的精确描述。
+- **新增失败分类 `link-no-service` 的含义**：G1V31si / RP3V30 的网络层是健康的
+  （IRIS 自己配的 `192.168.1.1` 被内核接受，RP3V30 上兜底 telnetd:7002 甚至完全
+  跑通），失败在**固件里根本没有 web 服务**，而兜底的 `no web server fallback
+  available` 说明它也补不上。这是语料属性 + 有意的能力边界，**不是缺陷**。
+  **兜底范围按实码写清**（`scripts/emulate/iris_net_fix.sh:659-688`）：它是一条
+  `if/elif` 链，只认 `/opt/goahead/goahead` + `route.txt` 与 `/usr/bin/boa` +
+  `/etc/boa/boa.conf` 两种硬编码组合，**不扫 `/bin`、不找 busybox 的 httpd applet**；
+  US 版 TES7002 能成正是因为它是 Tenda 固件、带 `/opt/goahead`。
+- **新发现、未修的真实缺陷**（详见 `docs/08` §9）：`_infer_arch()`
+  （`src/iris/extract/firmware.py:290-291`）把「squashfs 容器端序 → mipsel/mipseb」
+  当成通用兜底，丢掉了「必须先是 MIPS」的前提，于是裸 squashfs 的 **arm64** 固件被
+  `extract inspect` 误报为 mipsel；`emulate --arch auto` 因走解压后 ELF census
+  （实测 640 个 ELF 条目中 aarch64 × 639）判对并跑出 HTTP 302。**两端不一致**，
+  `/pipeline` API 与 `extract add --no-verify` 会消费到错误值，而
+  `tests/test_firmware.py:215` 把这个错误行为写成了期望值。本轮只记录不修。
+- **如实记录的口径限制**：提取失败**不落 `emulation_run`**（i27v11br 在库里没有对应
+  行），因此「跑了几台」不能只查该表——这条也记为待改进项。
+
+### 对比文档更新（`docs/08-与FirmAE对比.md`）
+
+- §2 补上 arm64 的**同语料直接对照**：US 版 TES7002 在 IRIS 侧 HTTP 200 @96.8s，
+  FirmAE 侧无法仿真——不再只是「IRIS 历史上跑通过 arm64」。
+- §3.1 新增 (c) `link-no-service` 分类（含逐台串口证据表）与 (b-1) 修正。
+- §4 改为「提取能力边界」，新增 §4.2 厂商加密 FIT（i27v11br）——**两侧都做不到**，
+  是语料属性而非任何一方的短板。
+- §9 新增「本轮新发现：**未修**的代码缺陷」，含根因精确到行、5 个消费方的影响面、
+  修正方向（证据分级的单一判定函数）与 FirmAE 的对照数据。
+
 ## [0.3.12] - 2026-10-03
 
 按 0.3.11 与 FirmAE 的实测对比结论回头修缺陷。**同语料仿真成功率从 2/5 变为 3/5：

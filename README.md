@@ -113,6 +113,32 @@ python iris.py emulate run ./rootfs_out --arch mipsel --port 8080
 | Tenda US_i29 / TES7002（aarch64） | arm64 | ✅ TES7002 走 arm64 通道：厂商 init + `iris_net_fix` 兜底网络，Web 登录页 HTTP 200（两次实测 289s / 258s，`--timeout` 需 ≥480）；US_i29 仍需 arm64 内核镜像 |
 | YZTenda 加密固件 | — | 明确失败画像："FIT + 加密无法提取"（不再误报 no squashfs） |
 
+### 0.3.13 扩样批次（厂商固件，iid 7001–7006，`--timeout 300s`）
+
+上表是 0.3.12 的 5 台 M0 语料。0.3.13 把语料扩到 10 台（新增 4 台 Tenda 厂商固件）
+并与 FirmAE 做同批对照，明细见 [`docs/08-与FirmAE对比.md`](docs/08-与FirmAE对比.md)。
+**新增的两条判定维度是 `result_kind` 分层结论**——旧的单一「HTTP 000」把
+「服务没起来」和「服务起来了但二层不通」压成了同一个符号：
+
+| 固件 | arch | 结果 |
+|---|---|---|
+| Tenda US TES7002（29 MB） | **arm64** | ✅ Web 可达（**HTTP 302，96.8s**）；架构由解压后 ELF census 判定（640 个 ELF 条目中 aarch64 × 639；唯一异类是固件里混进的 `bin/dbg_tool`（mipseb）） |
+| Tenda G1V31si | mipsel | ❌ `link-no-service`（308.8s）：二层通、地址已配好，但**固件内无 web 服务**，兜底报 `no web server fallback available` |
+| Tenda RP3V30 | armel | ❌ `link-no-service`（309.1s）：同上；兜底的 telnetd:7002 命令通道**跑通了**，缺的只有 web |
+| Tenda i27V11br | unknown | ❌ 提取阶段失败（rc=2，1s 早退）：FIT 内 38 个 `YZTenda` 加密段，无厂商密钥不可解 |
+| Linksys WRT1200AC | armel | ❌ `link-no-arp`（317.4s）：**`uhttpd` 确实 bind 了 `:80`/`:443`**（t=131.3s），失败在地址丢失后的二层不通 |
+| Netgear R7800 | armel | ❌ `link-no-arp`（310.8s）：同一根因（`uhttpd` t=123.4s） |
+
+两条边界写在这里，不假装覆盖：**「固件无 web 服务」IRIS 兜不出来**——兜底只认
+`/opt/goahead/goahead` 与 `/usr/bin/boa` 两种硬编码的厂商组合
+（`scripts/emulate/iris_net_fix.sh:659-688`），不扫 `/bin`、不找 busybox 的 httpd
+applet，也不自带 httpd 注入（那会改变被测设备行为）；厂商加密固件属于语料属性，
+**两侧都解不开**。
+
+**关于上表 TES7002 的 302 与旧表的 200**：不是同一台服务。0.3.13 这次是兜底
+`launching goahead` 拉起服务后返回的重定向（旧表那两次 200 走的是厂商自己的服务，
+iid 9017 / `--timeout ≥480`）。两者都算「Web 可达」，**具体差异本文未逐项比对**。
+
 **DIR-868L 的结论曾被推翻两次**，这里记录最终状态以免旧结论再次流传：最初记为「服务起、VLAN 路由不通」，0.3.11 记为「宿主与 guest 不同子网导致全网失败」，两者都被推翻。真实根因在宿主侧——`run_qemu.sh` 把宿主桥放在 `192.168.1.254/16`，而目标网络是 `192.168.0.0/24`，宿主地址不在 guest 子网内被静默丢弃。修复是在宿主桥上补一个落在 guest 子网内的地址（`.254`，guest 占用时退 `.253`）。**这是宿主基础设施缺陷，不是固件缺陷，也不是 VLAN 问题。**
 
 明细与日志指纹见 `docs/eval-log.md`。

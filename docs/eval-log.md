@@ -47,6 +47,12 @@ M0 当时的记录，不再随后续运行自动更新。
 
 **说明**：M1 L1 固件识别模块（`src/iris/extract/firmware.py`）通过 uImage header 解析、squashfs magic 检测（bytes_used 校验）、UBI magic 检测、gzip/zip 递归解压、ELF census 多信号综合推断架构。arch 识别 6/6 正确。
 
+> **限定的适用范围（2026-10-04 补）**：「6/6 正确」只覆盖 M0 这六款——它们要么带
+> uImage header（1/2/3/4/6），要么有真实 ELF 证据（5），**从未测过「裸 squashfs
+> 没有任何架构线索时靠容器端序猜架构」这条路径**。0.3.13 用 US 版 TES7002
+> （raw squashfs、无 uImage）测到了：那条路径会把 arm64 误判成 mipsel。
+> 详见 [`08-与FirmAE对比.md`](08-与FirmAE对比.md) §9.1（已定位，本轮未修）。
+
 ## rootfs 提取与 arch 验证
 
 | # | 固件 | rootfs 格式 | 提取状态 | ELF 数 | ELF arch | arch 验证 |
@@ -100,6 +106,43 @@ M0 当时的记录，不再随后续运行自动更新。
 （G1 V3.1si / i27 V1.1br / RP3 V3.0ac / TES7002，id 7/8/10/11）不在本表内，
 其运行结果以 `iris db stats` 为准。已知的一例：TES7002（aarch64）2026-10-02 实测
 72s 起来、Web 可达（HTTP 302），已落库为 `emulation_run` 第 1 行。
+
+## 2026-10-04 扩样实测（0.3.13 批次，iid 7001-7006）
+
+> 这一批把 4 台厂商固件（Tenda 系）纳入与 FirmAE 的同批对照，语料从 6 台扩到 10 台。
+> 全部 `--timeout 300s` 串行跑（06:59-07:23 UTC），数据来自 `emulation_run`
+> 真实落库（id 76-80），不是手工快照。
+> 分层判定 `result_kind` 是 0.3.13 新增的列，**旧的单一「HTTP 000」口径无法区分
+> 下面第 7/10 行（二层通但无服务）与第 3/4 行（服务就绪但二层不通）**。
+
+| image id | 固件 | arch | 提取 | 服务启动（串口证据） | Web | guest IP | 耗时 | `result_kind` | 失败原因 |
+|-----------|------|------|------|----------------------|-----|----------|------|---------------|---------|
+| 7 | G1V31si | mipsel | ✅ | ❌ 无（telnetd 起了但 `:7002` 无应答，`pidof: not found`） | ❌ | 192.168.1.1（兜底 `ifconfig` 配出） | 308.8s | `link-no-service` | **固件内无 web 服务**，兜底报 `no web server fallback available` |
+| 8 | i27V11br | unknown | ❌ | — | — | — | 1s 早退（rc=2） | *（不落库）* | FIT 内 38 个 `YZTenda` 加密段，无厂商密钥不可解 |
+| 10 | RP3V30 | armel | ✅ tarball 10,898,954 B | ❌ 无（但兜底 `telnetd` bind `:7002` **成功**） | ❌ | 192.168.1.1（兜底 `ifconfig` 配出） | 309.1s | `link-no-service` | 同上；网络层与命令通道都正常 |
+| 11 | TES7002 (US 版) | **arm64** | ✅ 29 MB | ✅ 兜底拉起 goahead（`web not listening on :80, launching goahead`） | ✅ **HTTP 302** | 192.168.1.1 | **96.8s** | *（成功）* | — |
+| 3 | WRT1200AC | armel | ✅ | ✅ `uhttpd` bind `:80`/`:443`（t=131.3s） | ❌ | 无（BUG 后 eth0 地址丢失） | 317.4s | `link-no-arp` | 重宿主内核 `validate_nla` BUG（`pc=c01abe18`） |
+| 4 | R7800 | armel | ✅ | ✅ `uhttpd` bind `:80`/`:443`（t=123.4s） | ❌ | 无（同上） | 310.8s | `link-no-arp` | 同一根因（`pc` 与行号完全相同） |
+
+**说明**：
+
+- **arm64 通道再次跑通**：US 版 TES7002 `HTTP 302 @96.8s`，`emulation_run.arch=arm64`
+  （由解压后 ELF census 得到，`iris.extract.rootfs_extract._census_elfs` 实测
+  **640 个 ELF 条目：aarch64 × 639、mipseb × 1**；640 里含 196 个「符号链接指向
+  ELF」的条目，只数 tar 普通文件则是 444。唯一异类是 `bin/dbg_tool`（mipseb，
+  厂商 SDK 的交叉编译产物），1:639 的少数，不影响取多数的判定）。
+  同时 `recorded 4 repair(s) on run 77`：`dev-extended-nodes`、`generic-diag-crash-fix`、
+  `tenda-web-server-forced-start`、`vendor-watchdog-monitor`——L3 规则记账在真实批次上生效。
+- **WRT1200AC / R7800 的失败位置被更正**：**web 服务是起来了的**（`uhttpd` 三次
+  `inet_bind`，兜底自己也判定 `vendor web server is already running, leaving :80 to it`），
+  失败在地址丢失后的二层。上一版「`uhttpd` 虽绑 `:80` 但不可达」的措辞把重点放在
+  不可达上，容易读成服务没起来；根因（内核 BUG）不变。
+- **两条 `link-no-service` 是语料属性，不是网络层缺陷**：G1V31si / RP3V30 的地址都由
+  兜底 `ifconfig` 配出并被内核接受，RP3V30 上兜底命令通道（telnetd:7002）甚至完全
+  跑通。IRIS 不自带 httpd 注入（那会改变被测设备行为），因此在「固件无 web 服务」时
+  无路可走——这是**有意的能力边界**。
+- **i27v11br 提取失败不落 `emulation_run`**，因此本表 6 行对应库里 5 行
+  （id 76-80，iid 7001/7002/7003/7005/7006）。批次级统计不能只查该表。
 
 ## FirmAE baseline 仿真结果
 
