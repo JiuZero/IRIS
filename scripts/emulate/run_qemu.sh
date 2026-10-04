@@ -8,6 +8,28 @@ WORK_DIR=/work/scratch/${IID}
 IMAGE=${WORK_DIR}/image.raw
 BINARIES=/work/binaries
 
+# The serial port is the one QEMU channel that carries bytes in both directions,
+# so it cannot be the plain one-way `file:` sink it used to be -- nothing could
+# ever be written into the guest. It is now a chardev socket on a TCP port the
+# orchestrator publishes, with the same log path kept on the side via logfile=.
+# Keeping the file is what lets this change stay small: every reader of
+# qemu.serial.log (the orchestrator's three reads, the reboot counter, the copy
+# back to the host, and the 2000-character tail in EmulationResult) keeps working
+# against an unchanged path, and a browser that drops mid-boot can still backfill
+# from the file.
+#
+# The port is required rather than defaulted to something plausible: a silent
+# fallback would leave the run looking exactly like the old one-way one -- boots
+# fine, logs land on disk, no way to type at it -- which reads as a working
+# emulation with a broken terminal instead of a launch that never happened.
+# 0 is the one value QEMU would take as "any free port", and it is exactly the
+# case that leaves a published port unknowable, so it is rejected with the rest.
+SERIAL_PORT=${IRIS_SERIAL_PORT:-0}
+if [ "${SERIAL_PORT}" -lt 1024 ] || [ "${SERIAL_PORT}" -gt 65535 ]; then
+  echo "Error: IRIS_SERIAL_PORT must be a published TCP port (1024-65535); got '${SERIAL_PORT}'"
+  exit 1
+fi
+
 # The guest address everything below is built around: an explicit $4, else the
 # address a previous boot measured, else the 192.168.1.1 assumption.
 #
@@ -156,6 +178,7 @@ APPEND="firmadyne.syscall=1 root=${QEMU_ROOTFS} console=${CONSOLE} nandsim.parts
 echo "Starting QEMU: ${QEMU} ${QEMU_MACHINE} kernel=${KERNEL}"
 echo "Disk: ${IMAGE}"
 echo "Network: TAP ${TAP_IFACE} -> bridge ${BR_IFACE} (${HOST_IP}/24)"
+echo "Serial: chardev socket on :${SERIAL_PORT} (log: ${WORK_DIR}/qemu.serial.log)"
 
 # The virt machine's virtio-mmio bus defaults to force-legacy=true, which pins
 # every device on it to the legacy transport. zImage.armel has virtio_net built in
@@ -169,7 +192,8 @@ ${QEMU} -m ${MEMORY} -M ${QEMU_MACHINE} ${QEMU_CPU} \
     -kernel ${KERNEL} ${QEMU_INITRD} \
     ${QEMU_DISK} \
     -append "${APPEND}" \
-    -serial file:${WORK_DIR}/qemu.serial.log \
+    -chardev socket,id=iris_serial,host=0.0.0.0,port=${SERIAL_PORT},server=on,wait=off,logfile=${WORK_DIR}/qemu.serial.log \
+    -serial chardev:iris_serial \
     -display none \
     ${QEMU_NET} &
 

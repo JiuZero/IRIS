@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from iris.arch import census_to_runnable, is_little_endian, normalize_arch
+from iris.emulate.auto import pick_serial_port
 from iris.emulate.linkprobe import LinkProfile, probe_link, render_table
 from iris.emulate.qemu_config import get_config, supported_archs
 from iris.failures import BootDiagnosis, Failure, FailureKind
@@ -43,6 +44,23 @@ REBOOT_LOOP_THRESHOLD = 3
 #: guest-side list in iris_net_fix.sh's web_running(); a server this module
 #: cannot name is one it cannot report as "running but on the wrong port".
 _KNOWN_WEB_SERVERS = ("goahead", "boa", "lighttpd", "uhttpd", "thttpd", "nginx", "httpd")
+
+#: Where the serial port published for each running emulation lives.
+#:
+#: A published port is not derivable from anything already stored: the database
+#: records the instance but not which host port its console ended up on, and
+#: guessing it from the instance id would collide as soon as two runs overlapped.
+#: So it is kept in memory for exactly as long as the container it points at --
+#: added when the console is published, dropped by ``stop_emulation``. That makes
+#: it the same lifetime as the process-owned runtime state the web console reads
+#: to answer "which instance is running", which is also why it is not a column:
+#: after a restart there is no console to connect to anyway, only a leftover row.
+_SERIAL_PORTS: dict[int, int] = {}
+
+
+def serial_port_of(iid: int) -> int | None:
+    """The host port this instance's serial console is published on, if any."""
+    return _SERIAL_PORTS.get(iid)
 
 #: Driver names whose registration means the guest really has a network device.
 #: Absence of these plus absence of any eth* mention is what separates "the NIC
@@ -832,9 +850,16 @@ def _emulate_firmware(
     _run(["docker", "rm", "-f", container_name])
 
     logger.info(f"Starting emulation container {container_name}...")
+    # Picked before the container exists so the probe sees a free port, and
+    # published on loopback only: the serial chardev is writable, so unlike the
+    # read-only web forward it would hand anyone who can reach this port a
+    # keyboard on the guest. The web forward above keeps its wider bind because
+    # that is the pre-existing behaviour and its own exposure is deliberate.
+    serial_port = pick_serial_port()
     create_cmd = [
         "docker", "create", "--privileged",
         "-p", f"{host_port}:{host_port}",
+        "-p", f"127.0.0.1:{serial_port}:{serial_port}",
         "--name", container_name,
         docker_image, "sleep", "3600",
     ]
@@ -881,9 +906,14 @@ def _emulate_firmware(
         return result
     logger.debug(f"image build output: {make_result.stdout[-200:]}")
 
-    logger.info(f"Starting QEMU (port {host_port} -> guest:80)...")
+    logger.info(f"Starting QEMU (port {host_port} -> guest:80, serial on :{serial_port})...")
+    # IRIS_SERIAL_PORT goes in through the environment rather than a fourth
+    # positional argument: run_qemu.sh's positional contract is (iid, arch,
+    # host_port) and every caller of it -- including the ones that only want the
+    # web forward -- would otherwise have to know a console port it never uses.
     qemu_result = _run(
-        ["docker", "exec", "-d", container_name, "bash", "/work/scripts/run_qemu.sh", str(iid), arch, str(host_port)],
+        ["docker", "exec", "-d", "-e", f"IRIS_SERIAL_PORT={serial_port}",
+         container_name, "bash", "/work/scripts/run_qemu.sh", str(iid), arch, str(host_port)],
         timeout=15,
     )
     if qemu_result.returncode != 0:
@@ -893,6 +923,11 @@ def _emulate_firmware(
         result.duration_sec = time.time() - start_time
         _run(["docker", "rm", "-f", container_name])
         return result
+
+    # Recorded here, not at container create: until QEMU is running there is no
+    # listener on the port, and a console advertised for a chardev that never
+    # came up would hand the web UI a connection that can only fail.
+    _SERIAL_PORTS[iid] = serial_port
 
     logger.info(f"Waiting for firmware to boot (timeout {timeout_sec}s)...")
     boot_deadline = time.time() + timeout_sec
@@ -1079,5 +1114,9 @@ def container_exists(name: str, *, timeout: int = 10) -> bool:
 
 def stop_emulation(iid: int) -> bool:
     env = _env()
+    # Dropped before the container goes, not after: once the container is gone
+    # the port cannot be connected to either way, and clearing first means a
+    # caller racing this cannot be handed a port that is already on its way out.
+    _SERIAL_PORTS.pop(iid, None)
     result = subprocess.run(["docker", "rm", "-f", f"iris-qemu-{iid}"], capture_output=True, text=True, env=env, timeout=15, check=False)
     return result.returncode == 0

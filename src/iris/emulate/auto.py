@@ -41,8 +41,16 @@ class PreparedRootfs:
         return cls(rootfs_dir=Path("."), failure_reason=reason, arch="")
 
 
-def pick_host_port(preferred: int = 0, start: int = 8080, stop: int = 8199) -> int:
-    """Find an unused TCP port in [start,stop); prefer preferred if given."""
+def pick_host_port(preferred: int = 0, start: int = 8080, stop: int = 8199,
+                   bind_host: str = "") -> int:
+    """Find an unused TCP port in [start,stop); prefer preferred if given.
+
+    ``bind_host`` has to match how the port will actually be published, and the
+    two do not probe the same set of ports. Binding ``0.0.0.0`` on Windows does
+    not fail when something already holds ``127.0.0.1`` on that port, so a
+    loopback-only publish probed with ``0.0.0.0`` looks free and gets handed out
+    twice. Pass the address the publish will use.
+    """
     candidates: list[int] = []
     if preferred and start <= preferred <= stop:
         candidates.append(preferred)
@@ -53,12 +61,30 @@ def pick_host_port(preferred: int = 0, start: int = 8080, stop: int = 8199) -> i
     for p in candidates:
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.bind(("", p))
+            s.bind((bind_host, p))
             s.close()
             return p
         except OSError:
             pass
     raise RuntimeError(f"no free port found in [{start}, {stop}]")
+
+
+#: Serial ports live in their own range so a serial allocation can never pick the
+#: port a web forward is about to take, or the other way round. Both are found by
+#: probing for a free port before the container is created, and a container that
+#: already published one holds it for as long as it runs, so the two ranges have
+#: to be disjoint rather than merely unlikely to collide.
+SERIAL_PORT_RANGE = (46000, 46999)
+
+
+def pick_serial_port(preferred: int = 0) -> int:
+    """Find an unused TCP port for QEMU's bidirectional serial chardev.
+
+    Probed on ``127.0.0.1`` because that is how the console is published -- and
+    unlike the web forward it has to be, since a published console accepts input.
+    """
+    start, stop = SERIAL_PORT_RANGE
+    return pick_host_port(preferred=preferred, start=start, stop=stop, bind_host="127.0.0.1")
 
 
 def _pick_arch_from_counter(counter) -> str:

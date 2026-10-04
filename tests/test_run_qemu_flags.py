@@ -61,6 +61,71 @@ class TestVirtioTransport:
         assert "virtio_net built in" in TEXT
 
 
+class TestSerialChardev:
+    """The console is a socket now, and the log file stays where it was.
+
+    Both halves are load-bearing and neither is visible from the other. Drop the
+    ``logfile=`` and every reader of ``qemu.serial.log`` -- the orchestrator's
+    three reads, the reboot counter, the copy back to the host -- finds nothing,
+    while the console keeps working perfectly, so the run still reports a normal
+    failure. Drop ``server=on``/``wait=off`` and QEMU either refuses the port or
+    blocks the whole boot waiting for a browser that has not connected yet, which
+    is a hang rather than a boot. So each option is asserted on its own.
+    """
+
+    def _chardev(self) -> str:
+        found = [inv for inv in _qemu_invocations() if "-chardev" in inv]
+        assert found, _qemu_invocations()
+        return found[0]
+
+    def test_the_console_is_the_chardev_not_a_file_sink(self):
+        assert "-serial chardev:iris_serial" in self._chardev()
+
+    def test_the_one_way_file_sink_is_gone(self):
+        """`-serial file:` accepts bytes but has no way to send any, so a console
+        built on it can never be typed into."""
+        assert "-serial file:" not in TEXT
+
+    def test_the_same_log_path_is_still_written(self):
+        assert "logfile=${WORK_DIR}/qemu.serial.log" in self._chardev()
+
+    def test_the_chardev_serves_without_waiting_for_a_client(self):
+        """`wait=on` holds the boot until something connects; nothing connects
+        until the boot has produced something to look at."""
+        chardev = self._chardev()
+        assert "server=on" in chardev
+        assert "wait=off" in chardev
+
+    def test_it_binds_every_interface_inside_the_container(self):
+        """A chardev on 127.0.0.1 in the container is unreachable through the
+        published port, so the console would connect and then see nothing."""
+        assert "host=0.0.0.0" in self._chardev()
+
+    def test_the_port_is_taken_from_the_environment(self):
+        """A fourth positional argument would make every caller that only wants the
+        web forward invent a console port it never uses."""
+        assert 'SERIAL_PORT=${IRIS_SERIAL_PORT:-0}' in TEXT
+        assert "port=${SERIAL_PORT}" in self._chardev()
+
+
+class TestTheSerialPortIsRefusedWhenAbsent:
+    """No port means no console, and a run without a console is not a degraded
+    run: it looks identical to a working one. Booting anyway would report a
+    normal-looking emulation whose terminal cannot be typed into, so an absent or
+    nonsensical port has to stop the launch instead.
+    """
+
+    def test_an_unset_port_is_rejected(self):
+        assert 'if [ "${SERIAL_PORT}" -lt 1024 ] || [ "${SERIAL_PORT}" -gt 65535 ]; then' in TEXT
+
+    def test_the_rejection_exits_before_qemu(self):
+        guard = TEXT.split('if [ "${SERIAL_PORT}" -lt 1024 ]')[1]
+        assert "exit 1" in guard.split("${QEMU} -m")[0]
+
+    def test_the_message_says_which_variable_to_set(self):
+        assert "IRIS_SERIAL_PORT must be a published TCP port" in TEXT
+
+
 class TestNetworkDevice:
     def test_armel_gets_a_net_device(self):
         block = TEXT.split("armel", 1)

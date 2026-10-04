@@ -176,7 +176,12 @@ export -f _record ip tunctl brctl socat e2fsck qemu-system-arm
                 [bash, "-c", self._PRELUDE + 'bash "$1" "$2" "$3" "${4}" "${5}"',
                  "_", _posix(script), "6630", "armel", "8080", guest_ip],
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
-                env={**os.environ, "IRIS_STUB_LOG": _posix(log)},
+                env={**os.environ, "IRIS_STUB_LOG": _posix(log),
+                     # run_qemu.sh refuses to launch without a published console
+                     # port, and this harness is a caller: it has to supply one the
+                     # way the orchestrator does. QEMU is stubbed, so nothing binds
+                     # it -- the value only has to be a legal port.
+                     "IRIS_SERIAL_PORT": "46000"},
                 timeout=120, check=False,
             )
             return proc.returncode, proc.stdout + proc.stderr, log.read_text(encoding="utf-8").splitlines()

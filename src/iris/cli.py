@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -1064,6 +1065,147 @@ def serve_start(
     out.info(f"IRIS API server starting on {host}:{port}{bind_note}")
     out.info(f"docs: http://{host}:{port}/docs")
     uvicorn.run("iris.api.server:app", host=host, port=port, reload=reload)
+
+
+@app.command("web")
+def web_workbench(
+    host: str = typer.Option(
+        "127.0.0.1",
+        help="bind address; 0.0.0.0 exposes the workbench to the network and requires a token",
+    ),
+    port: int = typer.Option(9000, help="workbench port"),
+    api_token: str = typer.Option(
+        "",
+        help="API token; falls back to $IRIS_API_TOKEN, and is mandatory for non-loopback binds",
+    ),
+    no_browser: bool = typer.Option(False, "--no-browser", help="do not open a browser on startup"),
+    reload: bool = typer.Option(False, help="auto-reload Python changes (the frontend is not rebuilt)"),
+) -> None:
+    """Start the IRIS firmware emulation workbench and open it in a browser.
+
+    One command, no arguments, no configuration file: the point is that a judge can
+    see the thing working. Everything it needs comes from the same .env and IRIS_*
+    environment the rest of the CLI already reads, so this command adds no settings
+    of its own -- a second place to configure the same server is a second thing to
+    get wrong.
+
+    Stops with Ctrl+C. The shutdown handler installed by the web assembly tells open
+    consoles the server is going away, closes their sockets, then stops every
+    instance this process is hosting, so quitting does not leave privileged
+    containers running with no way to stop them from a UI that no longer exists.
+    """
+    import uvicorn
+
+    from iris.api import web_app as web_assembly
+    from iris.api.auth import configured_token, is_loopback_host
+    from iris.api.server import app as api_app
+
+    token = api_token.strip() or configured_token()
+    if not is_loopback_host(host) and not token:
+        # Same gate as ``iris serve start``, and for the same reason: this process
+        # can upload a firmware, start a privileged container and stop one by id.
+        # A workbench is the more dangerous of the two to expose, because it is
+        # the one a person is tempted to bind to 0.0.0.0 to show a colleague.
+        err.warning(
+            f"refusing to bind {host}: no API token configured. "
+            "Set IRIS_API_TOKEN, pass --api-token, or bind a loopback address."
+        )
+        raise typer.Exit(code=2)
+
+    if api_token.strip():
+        # Exported, not just passed in-process: ``--reload`` re-imports the app in
+        # a child process, and a token that only lived in this one would leave the
+        # worker serving unauthenticated. ``setdefault`` semantics would be wrong
+        # here -- an explicit flag has to win over an inherited value.
+        os.environ["IRIS_API_TOKEN"] = api_token.strip()
+
+    web_assembly.install(api_app)
+    browser_url = f"http://{_browser_host(host)}:{port}/"
+    out.block("info", "IRIS workbench starting", _rows(_web_banner_rows(host, port, token, browser_url)))
+    if not (web_assembly.dist_dir() / "index.html").is_file():
+        err.warning(
+            f"frontend not built at {web_assembly.dist_dir()} - the API works but "
+            "the pages will answer 503. Build it with: cd web && npm install && npm run build"
+        )
+    if not no_browser:
+        _open_browser_soon(browser_url)
+    out.info("press Ctrl+C to stop; running instances will be stopped and their consoles closed")
+
+    if reload:
+        # uvicorn refuses to reload an application object (it re-executes an import
+        # string in a child process), so the reload path goes through the factory.
+        uvicorn.run(_WEB_APP_TARGET, host=host, port=port, reload=True)
+    else:
+        # The object, not the import string: ``install`` has already mutated it, and
+        # a string would hand uvicorn the un-installed app and a 404 for every page.
+        uvicorn.run(api_app, host=host, port=port)
+
+
+#: Import-string target for ``iris web --reload``. Resolved by path, so it has to
+#: live at module scope in a module uvicorn's child process can import.
+_WEB_APP_TARGET = "iris.cli:_web_app"
+
+
+def _web_app():
+    """The assembled app, for ``iris web --reload``'s worker process."""
+    from iris.api.server import app as api_app
+    from iris.api.web_app import install
+
+    return install(api_app)
+
+
+def _browser_host(host: str) -> str:
+    """The address to put in a browser for a server bound to ``host``.
+
+    ``0.0.0.0`` is a bind address, not a destination: opening it works on some
+    machines and refuses to connect on others, and the wildcard listener is
+    reachable at loopback anyway.
+    """
+    return "127.0.0.1" if host.strip() in {"0.0.0.0", "::", "*"} else host.strip()
+
+
+def _open_browser_soon(url: str, delay: float = 1.2) -> None:
+    """Open ``url`` after the listener is up.
+
+    On a timer rather than before ``uvicorn.run``: opening first is a race the
+    browser usually loses, and the user sees a connection error on a server that is
+    about to work. Daemon so an exit during the delay cannot hold the process open.
+    """
+    import threading
+    import webbrowser
+
+    def open_it() -> None:
+        try:
+            webbrowser.open(url)
+        except Exception as exc:  # noqa: BLE001 - a browser is never worth a traceback
+            err.warning(f"could not open a browser at {url}: {exc}; open it manually")
+
+    timer = threading.Timer(delay, open_it)
+    timer.daemon = True
+    timer.start()
+
+
+def _web_banner_rows(host: str, port: int, token: str, browser_url: str) -> list[tuple[str, str]]:
+    """What the operator needs to know before the first page loads."""
+    from iris import __version__
+    from iris.api.web_app import redact_database_url
+    from iris.api.web_data import serial_console_available
+    from iris.config import get_settings
+
+    settings = get_settings()
+    console = serial_console_available()
+    return [
+        ("version", __version__),
+        ("mode", "token required" if token else "local mode (no token, loopback only)"),
+        ("workbench", browser_url),
+        # FastAPI mounts its OpenAPI UI at /docs and it survives the SPA catch-all,
+        # because those routes are registered when the app is created.
+        ("api", f"http://{host}:{port}/api/v1  (docs at /docs)"),
+        ("console", "interactive serial console available" if console
+         else "serial is one-way in this build (run_qemu.sh has no chardev socket)"),
+        ("database", redact_database_url(settings.database_url)),
+        ("scratch", str(settings.scratch_dir)),
+    ]
 
 
 @emulate_app.command("guardian-start")

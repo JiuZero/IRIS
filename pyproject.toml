@@ -29,6 +29,13 @@ iris = "iris.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# The built frontend is not source: it is produced by `cd web && npm run build:pkg`
+# into `src/iris/web/dist`, and this is what carries it into the wheel. Without the
+# entry, an installed `iris web` finds no `index.html` and every page is a 503 with
+# an `expected` path pointing at a directory that was never packaged.
+[tool.setuptools.package-data]
+iris = ["web/dist/**/*"]
+
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]

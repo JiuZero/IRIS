@@ -10,6 +10,10 @@ venv/
 dist/
 build/
 
+# 前端依赖（web/package-lock.json 入库，node_modules 不入库）
+node_modules/
+web/.vite/
+
 # 仿真产物（体积大，禁止入库）
 images/
 scratch/
