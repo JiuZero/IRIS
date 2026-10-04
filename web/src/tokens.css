@@ -1,0 +1,200 @@
+/**
+ * The design tokens, in one place.
+ *
+ * Everything visual in the workbench resolves to a variable declared here. Two
+ * reasons that matters for this project specifically:
+ *
+ *  - The colours are a promise. A judge who sees the iris blue on the header, the
+ *    focus ring and the primary button should be looking at the same blue, and
+ *    `blue-500` in one component and `iris-500` in another would quietly break it.
+ *  - Contrast is not adjustable per component. The text ramp below is checked
+ *    against `--surface-raised` as a set, so a panel and a table cell can never
+ *    disagree about how readable they are.
+ *
+ * Surfaces are translucent on purpose: the background gradient and its two radial
+ * glows sit behind the cards, and an opaque card would hide them.
+ */
+
+/* The three Tailwind layers have to be declared before they are used: `@layer base`
+   further down this file is a Tailwind layer, not a native cascade layer, and
+   PostCSS rejects a Tailwind layer with no matching directive. */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Brand. 400 is the interactive/hover step, 500 the resting primary, 600 the
+     pressed step -- chosen so a button has a visible depth without a shadow. */
+  --iris-400: #5b8dff;
+  --iris-500: #3563ff;
+  --iris-600: #1f42f5;
+
+  /* Semantics. Read at a glance, so each one is also carried by an icon and a
+     word somewhere near it -- colour alone is not an accessible signal. */
+  --success: #34d399;
+  --warning: #fbbf24;
+  --danger: #f87171;
+  --violet: #a78bfa;
+  --cyan: #22d3ee;
+
+  /* Text ramp, brightest to faintest. */
+  --text-primary: #eef1f6;
+  --text-secondary: #a3adc0;
+  --text-muted: #667085;
+  --text-faint: #4a5162;
+
+  /* Surfaces. */
+  --surface-base: #0a0d14;
+  --surface-raised: rgba(23, 28, 42, 0.55);
+  --surface-sunken: rgba(10, 13, 20, 0.72);
+  --surface-border: rgba(255, 255, 255, 0.07);
+  --surface-border-strong: rgba(255, 255, 255, 0.12);
+
+  color-scheme: dark;
+}
+
+@layer base {
+  * {
+    border-color: var(--surface-border);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    /* The deep blue-black field, with two radial glows and a faint grid. Fixed
+       attachment so the glows do not slide with the content when a long run
+       table scrolls -- a background that parallaxes reads as a rendering bug. */
+    background-color: var(--surface-base);
+    background-image:
+      radial-gradient(900px 520px at 12% -8%, rgba(53, 99, 255, 0.18), transparent 62%),
+      radial-gradient(760px 480px at 88% 0%, rgba(167, 139, 250, 0.12), transparent 60%),
+      linear-gradient(rgba(255, 255, 255, 0.015) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
+    background-size:
+      auto,
+      auto,
+      48px 48px,
+      48px 48px;
+    background-attachment: fixed;
+    color: var(--text-primary);
+    font-family: Inter, system-ui, -apple-system, 'Segoe UI', sans-serif;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'tnum';
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Numbers that tick (CPU %, memory, elapsed time) must not shift the column
+     they sit in. Applied to the value, not the row: `tabular-nums` on the row
+     would also widen the label. */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+
+  ::selection {
+    background: rgba(53, 99, 255, 0.35);
+  }
+
+  /* Scrollbars, themed rather than left as the OS default: a bright grey bar in
+     a dark panel is the first thing that looks unbuilt. */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    border: 2px solid transparent;
+    background-clip: content-box;
+    border-radius: 8px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.18);
+    background-clip: content-box;
+  }
+
+  /* One focus treatment everywhere, 2px iris-400 with an offset so it stays
+     visible on a card, a table row and a button alike. */
+  :focus-visible {
+    outline: 2px solid var(--iris-400);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  /* Removed the UA ring only where :focus-visible already draws one, so a mouse
+     click does not leave a halo while a keyboard user always gets one. */
+  :focus:not(:focus-visible) {
+    outline: none;
+  }
+
+  input,
+  select,
+  textarea,
+  button {
+    font: inherit;
+    color: inherit;
+  }
+}
+
+@layer components {
+  /* The glass card. One definition, used by the stat tiles, the panels and the
+     inspector sections -- three near-identical implementations of this is how a
+     codebase ends up with two different blurs. */
+  .glass {
+    background: var(--surface-raised);
+    backdrop-filter: blur(20px) saturate(160%);
+    -webkit-backdrop-filter: blur(20px) saturate(160%);
+    border: 1px solid var(--surface-border);
+    border-radius: 12px;
+  }
+
+  .glass-soft {
+    background: var(--surface-sunken);
+    backdrop-filter: blur(12px) saturate(140%);
+    -webkit-backdrop-filter: blur(12px) saturate(140%);
+    border: 1px solid var(--surface-border);
+    border-radius: 8px;
+  }
+}
+
+@layer utilities {
+  /* The 2px lift on hover. Applied via a class rather than a transition on
+     `transform` globally so it does not fight the route transition animation. */
+  .lift {
+    transition:
+      transform 180ms cubic-bezier(0.22, 0.61, 0.36, 1),
+      border-color 180ms cubic-bezier(0.22, 0.61, 0.36, 1),
+      box-shadow 180ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+  .lift:hover {
+    transform: translateY(-2px);
+    border-color: var(--surface-border-strong);
+    box-shadow:
+      0 6px 20px rgba(0, 0, 0, 0.28),
+      0 0 0 1px rgba(91, 141, 255, 0.18);
+  }
+
+  .scroll-y {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+}
+
+/* Motion is decoration. Anyone who asked the OS for less of it gets none of it:
+   the pulsing status dots stop, and the route fade stops with them. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

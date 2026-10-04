@@ -1,0 +1,198 @@
+/**
+ * Talking to the IRIS API.
+ *
+ * Three decisions live here rather than in the components that call them:
+ *
+ *  - **Root-absolute URLs.** The workbench and the API are served from the same
+ *    origin by the same process, so every path starts at `/`. A relative
+ *    `api/v1/...` would resolve against the *current page*, and `/instances/7100`
+ *    would turn it into `/instances/api/v1/stats` -- a 404 that looks like a
+ *    backend problem on exactly the pages people navigate to most.
+ *  - **The token is a header, never a query string.** `iris.api.auth` accepts
+ *    `X-IRIS-Token` precisely so a browser can authenticate without putting a
+ *    credential in a URL that ends up in history and logs. The one exception is
+ *    the websocket, which cannot set headers at all -- see `terminalSocketUrl`.
+ *  - **Errors keep the status code.** A 404 and a 401 mean different things to the
+ *    person looking at the screen, and a client that flattens both to "request
+ *    failed" cannot tell them apart either.
+ */
+
+import type {
+  ActiveEmulation,
+  Capabilities,
+  ConsoleLog,
+  EffectiveConfig,
+  EmulateResponse,
+  EvalSet,
+  FirmwareInfo,
+  InstanceStats,
+  RootCauseCard,
+  RunDetail,
+  RunsPage,
+  Stats,
+} from './types'
+
+/** Where the token lives between page loads. Not a cookie: the API takes a header,
+ *  and a cookie would add a CSRF surface the server does not need. */
+const TOKEN_KEY = 'iris.api.token'
+
+export class ApiError extends Error {
+  readonly status: number
+  readonly detail: string
+
+  constructor(status: number, detail: string) {
+    super(detail)
+    this.name = 'ApiError'
+    this.status = status
+    this.detail = detail
+  }
+
+  /** True when the token is missing or wrong -- the one error with a fix the
+   *  person on screen can apply without reading the server logs. */
+  get isAuth() {
+    return this.status === 401
+  }
+
+  get isMissing() {
+    return this.status === 404
+  }
+}
+
+export function readToken(): string {
+  try {
+    return window.localStorage.getItem(TOKEN_KEY) ?? ''
+  } catch {
+    // Private browsing modes can refuse localStorage outright. An empty token
+    // means "local mode", which is the right fallback: the server decides.
+    return ''
+  }
+}
+
+export function writeToken(token: string): void {
+  try {
+    if (token) {
+      window.localStorage.setItem(TOKEN_KEY, token)
+    } else {
+      window.localStorage.removeItem(TOKEN_KEY)
+    }
+  } catch {
+    /* Nothing to do: the token simply will not persist across reloads. */
+  }
+}
+
+type Query = Record<string, string | number | undefined>
+
+function withQuery(path: string, query?: Query): string {
+  if (!query) return path
+  const search = new URLSearchParams()
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined && value !== '') search.set(key, String(value))
+  }
+  const suffix = search.toString()
+  return suffix ? `${path}?${suffix}` : path
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = readToken()
+  const headers = new Headers(init?.headers)
+  if (token) headers.set('X-IRIS-Token', token)
+  if (init?.body !== undefined && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
+  }
+
+  let response: Response
+  try {
+    response = await fetch(path, { ...init, headers })
+  } catch (cause) {
+    // A network-level failure has no status. Reporting it as one keeps the UI's
+    // "server unreachable" panel from having to catch a different exception type.
+    throw new ApiError(0, `无法连接到 IRIS 服务：${(cause as Error).message}`)
+  }
+
+  if (response.status === 204) return undefined as T
+
+  const text = await response.text()
+  let payload: unknown = null
+  if (text) {
+    try {
+      payload = JSON.parse(text)
+    } catch {
+      payload = text
+    }
+  }
+
+  if (!response.ok) {
+    const detail =
+      typeof payload === 'string'
+        ? payload
+        : ((payload as { detail?: string } | null)?.detail ?? response.statusText)
+    throw new ApiError(response.status, detail || `HTTP ${response.status}`)
+  }
+  return payload as T
+}
+
+export const api = {
+  health: () => request<{ status: string; version: string }>('/api/v1/health'),
+
+  stats: () => request<Stats>('/api/v1/stats'),
+
+  capabilities: () => request<Capabilities>('/api/v1/capabilities'),
+
+  evalSet: () => request<EvalSet>('/api/v1/stats/eval-set'),
+
+  rootCauses: (recent = 10) =>
+    request<{ cards: RootCauseCard[] }>(withQuery('/api/v1/knowledge/root-cause', { recent })),
+
+  config: () => request<EffectiveConfig>('/api/v1/config'),
+
+  runs: (params: { limit?: number; offset?: number; arch?: string; result_kind?: string; query?: string } = {}) =>
+    request<RunsPage>(withQuery('/api/v1/runs', params)),
+
+  run: (id: number) => request<RunDetail>(`/api/v1/runs/${id}`),
+
+  /** The CSV is fetched rather than linked so a 401 can be reported in place; a
+   *  plain `<a href>` would navigate the tab to a JSON error body. */
+  exportCsvUrl: () => '/api/v1/runs/export.csv',
+
+  async exportCsv(): Promise<Blob> {
+    const token = readToken()
+    const headers = new Headers()
+    if (token) headers.set('X-IRIS-Token', token)
+    const response = await fetch(api.exportCsvUrl(), { headers })
+    if (!response.ok) {
+      throw new ApiError(response.status, `导出失败：HTTP ${response.status}`)
+    }
+    return await response.blob()
+  },
+
+  console: (iid: number, startLine = 0, maxLines = 2000) =>
+    request<ConsoleLog>(withQuery(`/api/v1/console/${iid}`, { start_line: startLine, max_lines: maxLines })),
+
+  instanceStats: (iid: number) => request<InstanceStats>(`/api/v1/instances/${iid}/stats`),
+
+  listEmulations: () => request<ActiveEmulation[]>('/api/v1/emulate'),
+
+  firmware: () => request<FirmwareInfo[]>('/api/v1/firmware'),
+
+  emulate: (body: { rootfs_path: string; arch: string; iid?: number; port?: number; timeout?: number }) =>
+    request<EmulateResponse>('/api/v1/emulate', { method: 'POST', body: JSON.stringify(body) }),
+
+  stopEmulation: (iid: number) => request<Record<string, unknown>>(`/api/v1/emulate/${iid}`, { method: 'DELETE' }),
+}
+
+/**
+ * The terminal socket for one instance.
+ *
+ * The token rides in the query string here and nowhere else: a browser's
+ * `WebSocket` constructor cannot set headers, which is why the server checks
+ * `?token=` with the same constant-time comparison the REST routes use. The cost
+ * is that the URL can end up in a proxy log on a shared host -- accepted for the
+ * console, avoided everywhere else.
+ */
+export function terminalSocketUrl(iid: number): string {
+  const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws'
+  const params = new URLSearchParams({ iid: String(iid) })
+  const token = readToken()
+  if (token) params.set('token', token)
+  return `${scheme}://${window.location.host}/ws/terminal?${params.toString()}`
+}
