@@ -4,6 +4,77 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.14] - 2026-10-04
+
+浏览器工作台。动机是评审路径太长：看仿真状态要查 SQLite、看串口要 `docker exec`、
+看链路要读 `failure_profile` 的 JSON、看资源要 `docker stats`。本版把四者搬到一屏，
+并且**不新增第二条数据口径**——所有数字都来自既有表与既有函数。
+
+### 新增
+
+- **`iris web` 子命令**（`src/iris/cli.py`）。一条命令起工作台并打开浏览器：
+  `--host` / `--port` / `--api-token` / `--no-browser` / `--reload`。不接受 `--config`
+  （配置沿用 `.env` + `IRIS_` 前缀，多一个入口就多一处不一致）。非 loopback 绑定且
+  无 token 时拒绝启动（exit 2），与 `serve start` 同一道门禁。
+- **前端 `web/`**（React 18 + TypeScript + Vite + Tailwind + Zustand + TanStack Query
+  + Radix + xterm.js）。路由 `/`、`/instances`、`/instances/:id`（链路/串口日志/
+  运行记录/操作四 tab）、`/instances/:id/terminal`、`/settings`。
+  字体自托管（`@fontsource/*`），无外网 CDN。
+- **交互式串口通道**（`src/iris/api/serial_bridge.py`、`web_terminal.py`）。
+  `run_qemu.sh` 改用 `-chardev socket,...,logfile=` + `-serial chardev:iris_serial`
+  （`IRIS_SERIAL_PORT` 必填，1024–65535 越界即拒），编排器在回环地址上发布串口并把
+  `iid → 端口` 落库；WebSocket 桥做扇出、输入权仲裁与背压。guest 字节走二进制帧，
+  控制帧走 JSON 文本帧（服务端按首字节判别）。
+- **容器资源采样**（`src/iris/emulate/container_stats.py`）：CPU%、内存、内存上限、
+  串口端口与通道可用性，2 秒 TTL 缓存避免多个面板各起一次 `docker stats`。
+- **工作台 API**（`src/iris/api/web_app.py`、`web_data.py`）：`/api/v1/stats`、
+  `/stats/eval-set`、`/knowledge/root-cause`、`/config`、`/console/{iid}`、
+  `/instances/{iid}/stats`、`/runs/export.csv`、`/capabilities`，以及 SPA 静态服务
+  （含深层路由回退与路径穿越防护）。
+- **`GET /api/v1/runs/{id}` 增加 `link` 字段**：由落库的探测摘要还原四层状态与首个
+  断点，并带 `note` 声明未落库的部分（见下「诚实边界」）。
+
+### 修复
+
+- **`/api/v1/runs/export.csv` 422**：路由声明顺序错误，`{run_id}` 把 `export.csv`
+  当成 run id 匹配掉了。改为 `/api/v1/runs/export.csv` 并**声明在 `{run_id}` 之前**。
+- **工作台路由漏挂鉴权依赖**：`/capabilities`、`/runs`、`/console/{iid}`、`/config`
+  等新增路由未声明 `Caller`，任何人都能读。全部改为强制鉴权依赖（不需要的命名为
+  `_caller: Caller`）。
+- **评测集口径与统计卡不一致**：分子原先取自 `runs_page(limit=500)`，超过 500 条后
+  分子冻结而分母继续增长。改用 `run_stats` 同源统计，并新增 `scope`、`web_reach_rate`、
+  `by_arch`、`items_note` 字段把口径写在返回值里。
+- **SPA 静态目录在 install 时被固定**：`dist_dir()` 原在注册路由时求值，`npm run build`
+  发生在服务启动之后时就永远 503。改为每请求解析。
+- **`dist_dir()` 只认源码树布局**：`parents[3]/web/dist` 在安装后的 wheel 里不存在，
+  注释却写着「安装后也在同一相对位置」。改为按候选顺序探测（包内 `iris/web/dist`
+  优先于仓库根 `web/dist`），支持 `IRIS_WEB_DIST` 覆盖；`pyproject.toml` 增加
+  package-data，`npm run build:pkg` 把产物暂存进包内（wheel 实测携带 66 项）。
+- **打包里出现空 chunk**：`manualChunks` 配了 `echarts` 与 `@xterm/addon-web-links`，
+  但源码从未 import 两者（架构图用的是 CSS 宽度条）。删除该依赖与该配置。
+- **前端指向 `/docs` 的链接走客户端路由**：命中 router 的 catch-all 后回到仪表盘。
+  改为普通 `<a href="/docs">`（后端 FastAPI 的 OpenAPI 页真实存在，200）。
+
+### 诚实边界
+
+- **终端尺寸固定 80×24**，页面的 resize 请求会收到 `applied: false` 的说明而不是被
+  悄悄忽略：QEMU 串口没有窗口尺寸通道。
+- **输入权需显式 claim**：hello 帧里的 holder 是对端主机名，浏览器标签页无法区分，
+  所以「谁能打字」是仲裁结果。
+- **四层链路覆盖率有限**：只有四层中出现阻断、且探测跑完的运行才落库三键摘要。
+  当前库 81 条记录中 4 条可还原。全通的运行不探测，探测不可用的运行不记证据；
+  每层原始探测文案与「探测不可用」原因从未落库，因此这些字段恒为空，`note` 字段
+  在页面上逐条说明。
+- **`ai-guardian` 能力声明为 `unavailable`**：它是确定性自愈器，进程内不含任何模型
+  调用。徽章文案与证据由测试钉住。
+
+### 兼容
+
+- 数据库 schema 未变更（`run_detail` 只是多读一次已有的 `detail` JSON）。
+- `run_qemu.sh` 的串口参数需要 `IRIS_SERIAL_PORT`；编排器已同步提供，直接跑脚本的
+  人需自行导出该变量，否则脚本拒绝启动而不是静默丢日志。
+- 环境变量新增 `IRIS_WEB_DIST`（前端产物位置覆盖），其余沿用既有 `IRIS_` 前缀。
+
 ## [0.3.13] - 2026-10-03
 
 产品化改造，优先级 P0–P3。核心动机是实测记录已经在**两次**推翻自己的结论后没人

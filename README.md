@@ -66,6 +66,47 @@ iris serve start                                   # docs: http://127.0.0.1:9000
 curl -F "file=@firmware.bin" http://127.0.0.1:9000/api/v1/pipeline
 ```
 
+### Web 工作台（`iris web`）
+
+一条命令起工作台，浏览器打开即用，不需要另跑前端：
+
+```bash
+cd web && npm install && npm run build   # 首次一次；已构建过可跳过
+iris web                                  # http://127.0.0.1:9000/
+```
+
+工作台把四件事摆在同一屏：**仿真状态**（托管实例、历史运行、按架构与失败聚类统计）、
+**终端交互**（接入 guest 串口）、**网络连接**（四层链路 route/arp/icmp/service）、
+**资源占用**（容器 CPU/内存采样）。
+
+- 前端在 `web/`（React + TypeScript + Vite + Tailwind），由 `iris web` 同源提供；
+  开发时用 `npm run dev`（5173 端口，API 与 WebSocket 代理到 9000）。
+- 布局：Header 56 / 侧栏 264（可折叠）/ 主区 / 检查器 340（可关）/ Footer 32。
+  ≥1440 三栏并排，1024–1199 检查器改为抽屉，<1024 两者都是抽屉。
+- 快捷键：`Ctrl/Cmd+K` 命令面板、`Ctrl/Cmd+\`` 终端、`Ctrl/Cmd+B` 侧栏、
+  `Ctrl/Cmd+J` 失败抽屉。面板宽度记在 localStorage。
+- 鉴权：除 `/api/v1/health` 外全需 token，与 `iris serve start` 同一套。
+  WebSocket 因为浏览器不能加头，token 走 query（`?token=`），服务端用同一套
+  `hmac.compare_digest` 比较。非 loopback 绑定且无 token 时同样拒绝启动（退出码 2）。
+- 端口、host、token 的配置沿用 `IRIS_` 前缀的环境变量，`iris web` 不接受 `--config`。
+
+**终端的诚实边界**（页面上也逐条写着）：
+
+- 尺寸固定 80×24。QEMU 串口没有窗口尺寸通道，页面的 resize 只会收到一条
+  `applied: false` 的说明，而不是被悄悄忽略。
+- 输入权需要显式 claim。hello 帧里的 holder 是对端主机名，无法区分浏览器标签页，
+  所以「谁能打字」是显式仲裁的结果，不是自动的。
+- guest 字节走**二进制帧**，控制帧走 JSON 文本帧。用 JSON 包一层按键会被服务端
+  以 `BAD_FRAME` 拒绝。
+- 关闭码 4404（无权/不存在）、4403（没有可接入的串口）、1011（通道不可用）各有含义，
+  页面直接写出原因。
+
+**四层链路的口径**：详情页的链路表由落库的探测摘要还原（`probe` / `first_break` /
+`table` 三键）。因此四层状态与首个断点完整，**每层原始探测文案与「探测不可用」原因
+未落库**；且只有四层中出现阻断的运行才有这份摘要——全通的运行不探测，探测不可用的
+运行不记证据。库里 81 条记录中只有 4 条能画出链路表，页面对其余记录直接说明原因，
+而不是画一张空的四行表。
+
 ### API 交付面
 
 默认**只监听本机**。要让局域网访问，必须显式配 token，否则 `serve start` 会拒绝启动（退出码 2）：
@@ -182,6 +223,7 @@ IRIS/
 ├── scripts/emulate/   # L2 运行脚本：make_image / run_qemu / iris_net_fix /
 │                     # arm64 initramfs 构建与资产下载（get_arm64_assets.py）
 ├── docker/emulate/   # iris-emulate（基础）与 iris-emulate-baked（脚本+资产烘焙）
+├── web/              # 工作台前端（React+TS+Vite）；构建产物 dist/ 不入库
 ├── binaries/         # 内核镜像、console、libnvram、arm64 initramfs 等资产
 ├── tools/            # QEMU fork 管理、镜像构建等辅助脚本（规划中）
 ├── tests/            # 单元测试与评测集回归
