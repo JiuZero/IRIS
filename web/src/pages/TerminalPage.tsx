@@ -244,7 +244,7 @@ export function TerminalPage() {
     return (
       <div className="p-4">
         <Panel title="无效的实例号">
-          <ErrorState title="缺少实例号" detail="终端需要一个 /instances/:iid/terminal 形式的地址。" />
+          <ErrorState title="缺少实例号" detail="终端需要一个 /instances/:iid/terminal 形式的地址" />
         </Panel>
       </div>
     )

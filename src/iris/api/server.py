@@ -26,7 +26,7 @@ import hashlib
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 
 from iris import __version__
@@ -57,12 +57,68 @@ app = FastAPI(
 _UPLOAD_CHUNK = 1024 * 1024
 
 
+def _resolve_port(port: int) -> int:
+    """Turn a requested port into one docker can actually publish.
+
+    ``0`` means "pick a free one" on the CLI and in the workbench's own form, but it
+    was passed straight through to ``docker create -p 0:0``, which binds nothing
+    usable -- the run then spent its whole boot timeout probing a port that was
+    never open and reported ``web-unreachable``, pointing at the guest when the
+    fault was the request. Resolving it here means every caller gets the meaning
+    they asked for.
+    """
+    if port != 0:
+        return port
+    from iris.emulate.auto import pick_host_port
+
+    try:
+        return pick_host_port()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 class EmulateRequest(BaseModel):
     rootfs_path: str = Field(..., description="path to extracted rootfs directory")
     arch: str = Field(..., description="target architecture (mipsel/mipseb/armel)")
     iid: int = Field(0, description="image ID (auto-assigned if 0)")
-    port: int = Field(8080, description="host port for web access")
+    port: int = Field(8080, description="host port for web access (0 picks a free one)")
     timeout: int = Field(120, description="boot timeout in seconds")
+
+
+class UploadLaunchResponse(BaseModel):
+    """What one launch-from-upload produced.
+
+    ``extra="forbid"`` for the reason :class:`HealthResponse` gives: pydantic drops
+    unknown fields by default, so a response that quietly stopped carrying a field
+    would still type-check and the page would render blanks.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    iid: int
+    #: Which input the run came from. The two paths fail differently -- a rootfs
+    #: archive can be unpacked but hold no runnable ELF, while a firmware image can
+    #: extract into a tree whose only problem is arch -- and a page that cannot tell
+    #: them apart shows the same message for both.
+    source: str
+    name: str
+    arch: str
+    rootfs_path: str
+    host_port: int
+    members: int
+    total_bytes: int
+    links_created: int
+    links_skipped: int
+    rejected_members: int
+    matched_rule_ids: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    success: bool
+    web_ok: bool
+    web_url: str
+    duration_sec: float
+    error: str
+    container_id: str
+    link: LinkProfileView | None = None
 
 
 
@@ -244,7 +300,7 @@ async def emulate(req: EmulateRequest, caller: Caller) -> EmulateResponse:
         arch=arch,
         iid=iid,
         scratch_dir=scratch,
-        host_port=req.port,
+        host_port=_resolve_port(req.port),
         timeout_sec=req.timeout,
     )
 
@@ -470,7 +526,7 @@ async def pipeline(
         arch=detected_arch,
         iid=iid,
         scratch_dir=scratch,
-        host_port=port,
+        host_port=_resolve_port(port),
         timeout_sec=timeout,
     )
 
@@ -492,4 +548,220 @@ async def pipeline(
         web_url=result.web_url or "-",
         duration_sec=result.duration_sec,
         error=result.error or "",
+    )
+
+
+#: How long to wait for the blocking body of a launch. The emulation itself is
+#: bounded by the caller's ``timeout`` (default 120s) plus the fixed docker step
+#: timeouts, so this is only the ceiling on the whole request. Long enough that a
+#: slow boot is never cut off mid-way -- a cancelled launch leaves a container
+#: nobody registered -- and short enough that a hung read cannot hold the worker.
+_UPLOAD_LAUNCH_TIMEOUT_SEC = 900
+
+
+@app.post("/api/v1/emulate/upload", response_model=UploadLaunchResponse)
+async def emulate_upload(
+    caller: Caller,
+    file: UploadFile = File(..., description="a rootfs tar archive or a firmware image"),
+    kind: str = Query("auto", pattern="^(auto|rootfs|firmware)$"),
+    arch: str = Query("", description="target arch; empty or 'auto' infers it"),
+    port: int = Query(0, ge=0, le=65535, description="0 picks a free port"),
+    timeout: int = Query(120, ge=1, le=1800),
+) -> UploadLaunchResponse:
+    """Start an emulation from an uploaded file: a rootfs archive or a firmware image.
+
+    The workbench's own form only ever listed rootfs trees that already happened to
+    be in the scratch directory, which left the two inputs people actually have --
+    "the tar of a rootfs I extracted by hand" and "the .bin from the vendor
+    download page" -- reachable only from the command line.
+
+    It blocks for the whole boot, exactly like ``POST /api/v1/emulate`` does. There
+    is no job id to poll, and inventing a progress percentage over a request that
+    reports nothing would be a lie with a number on it; the form shows an elapsed
+    counter instead.
+    """
+    from iris.extract.rootfs_archive import is_rootfs_archive
+
+    settings = get_settings()
+    scratch = settings.scratch_dir
+    limit_bytes = max(1, settings.api_max_upload_mb) * 1024 * 1024
+
+    content = await _read_upload(file, limit_bytes)
+    if not content:
+        raise HTTPException(status_code=400, detail="uploaded file is empty")
+    safe_name = Path(file.filename or "upload.bin").name
+    if safe_name.lower().endswith(".zip") or content[:4] == b"PK\x03\x04":
+        raise HTTPException(
+            status_code=415,
+            detail="zip containers are not accepted (unpredictable internal layout); "
+            "unpack it locally and upload the rootfs tar or the firmware .bin",
+        )
+
+    scratch.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.md5(content).hexdigest()[:8]
+    # Derived from the content, not the filename: two uploads of the same bytes
+    # must land on the same iid so a repeat launch replaces its own previous
+    # container instead of leaving an orphan nobody owns.
+    iid = int(digest, 16) % 10000
+    staged = scratch / f"upload-{iid}-{safe_name}"
+    staged.write_bytes(content)
+
+    if kind == "auto":
+        source = "rootfs" if is_rootfs_archive(staged) else "firmware"
+    else:
+        source = kind
+    if source == "rootfs" and not is_rootfs_archive(staged):
+        raise HTTPException(
+            status_code=415,
+            detail=f"{safe_name} is not a tar archive; a rootfs upload must be a "
+            "tar/tar.gz/tar.xz of an already-extracted root filesystem",
+        )
+
+    try:
+        return await asyncio.wait_for(
+            _launch_from_upload(
+                source=source,
+                staged=staged,
+                scratch=scratch,
+                caller=caller,
+                iid=iid,
+                name=safe_name,
+                arch=arch,
+                port=port,
+                timeout=timeout,
+                settings=settings,
+            ),
+            timeout=_UPLOAD_LAUNCH_TIMEOUT_SEC,
+        )
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=504,
+            detail=f"launch exceeded {_UPLOAD_LAUNCH_TIMEOUT_SEC}s and was abandoned; "
+            "check `docker ps` for a leftover container named iris-qemu-"
+            f"{iid}",
+        ) from exc
+
+
+async def _launch_from_upload(
+    *,
+    source: str,
+    staged: Path,
+    scratch: Path,
+    caller: str,
+    iid: int,
+    name: str,
+    arch: str,
+    port: int,
+    timeout: int,
+    settings: Any,
+) -> UploadLaunchResponse:
+    """Prepare the uploaded bytes, then run the same boot the CLI runs."""
+    from iris.emulate.auto import prepare_from_firmware, prepare_from_rootfs
+    from iris.extract.rootfs_archive import unpack_rootfs_archive
+
+    notes: list[str] = []
+    matched_rules: list[str] = []
+    members = total_bytes = links_created = links_skipped = rejected = 0
+
+    if source == "rootfs":
+        dest = scratch / f"{staged.stem}-rootfs"
+        unpack = await asyncio.to_thread(unpack_rootfs_archive, staged, dest)
+        if unpack.failure is not None or unpack.rootfs_dir is None:
+            raise HTTPException(status_code=422, detail=unpack.failure_reason)
+        rootfs_dir = unpack.rootfs_dir
+        members = unpack.members
+        total_bytes = unpack.total_bytes
+        links_created = unpack.links_created
+        links_skipped = unpack.links_skipped
+        rejected = unpack.rejected_count
+        notes.extend(unpack.notes)
+        # Repairs are *applied*, not just reported: the tree is a disposable upload
+        # and a boot-fix that was only observed does not boot anything.
+        prepared = await asyncio.to_thread(
+            lambda: prepare_from_rootfs(
+                rootfs_dir=rootfs_dir, rules_dir=settings.rules_dir, dry_run_rules=False
+            )
+        )
+    else:
+        prepared = await asyncio.to_thread(
+            lambda: prepare_from_firmware(
+                staged,
+                scratch_dir=scratch,
+                arch_hint="" if arch in ("", "auto") else arch,
+                apply_rules_flag=True,
+                rules_dir=settings.rules_dir,
+                dry_run_rules=False,
+            )
+        )
+        if prepared.failure_reason:
+            raise HTTPException(status_code=422, detail=prepared.failure_reason)
+        rootfs_dir = prepared.rootfs_dir
+        notes.extend(prepared.notes)
+
+    if prepared.failure_reason:
+        raise HTTPException(status_code=422, detail=prepared.failure_reason)
+    # `prepared.notes[0]` restates the source ("pre-extracted rootfs"), which the
+    # response already carries in its own `source` field.
+    notes.extend(prepared.notes[1:])
+    matched_rules = list(prepared.matched_rule_ids)
+
+    wanted = arch if arch not in ("", "auto") else prepared.arch
+    selected = normalize_arch(wanted) if wanted else ""
+    if selected and selected not in _SUPPORTED_ARCHS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported arch: {wanted} (supported: {', '.join(_SUPPORTED_ARCHS)})",
+        )
+    if not selected:
+        raise HTTPException(
+            status_code=400,
+            detail=f"the ELF census named no architecture this host can run; pass one "
+            f"explicitly (supported: {', '.join(_SUPPORTED_ARCHS)})",
+        )
+
+    problem = await asyncio.to_thread(preflight_arch, rootfs_dir, selected)
+    if problem:
+        raise HTTPException(status_code=400, detail=f"preflight: {problem.message}")
+
+    host_port = _resolve_port(port)
+    result = await asyncio.to_thread(
+        emulate_firmware,
+        rootfs_dir=rootfs_dir,
+        arch=selected,
+        iid=iid,
+        scratch_dir=scratch,
+        host_port=host_port,
+        timeout_sec=timeout,
+        applied_rule_ids=tuple(matched_rules),
+    )
+
+    _remember(
+        iid=iid,
+        caller=caller,
+        arch=selected,
+        rootfs_path=rootfs_dir,
+        result=result,
+    )
+
+    return UploadLaunchResponse(
+        iid=iid,
+        source=source,
+        name=name,
+        arch=selected,
+        rootfs_path=str(rootfs_dir),
+        host_port=host_port,
+        members=members,
+        total_bytes=total_bytes,
+        links_created=links_created,
+        links_skipped=links_skipped,
+        rejected_members=rejected,
+        matched_rule_ids=matched_rules,
+        notes=notes,
+        success=result.success,
+        web_ok=result.web_ok,
+        web_url=result.web_url or "-",
+        duration_sec=result.duration_sec,
+        error=result.error or "",
+        container_id=result.container_id,
+        link=_link_view(result.link_profile),
     )

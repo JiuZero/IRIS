@@ -28,7 +28,7 @@ export function Dashboard() {
             title={error?.isAuth ? '需要 API 令牌' : 'IRIS 服务不可用'}
             detail={
               error?.isAuth
-                ? '当前服务配置了 IRIS_API_TOKEN。请在设置页填入同一个令牌，或用 iris web 启动而不配置令牌（仅回环地址）。'
+                ? '当前服务配置了 IRIS_API_TOKEN。请在设置页填入同一个令牌，或用 iris web 启动而不配置令牌（仅回环地址）'
                 : error?.message
             }
             hint={
@@ -171,11 +171,11 @@ function ArchPanel({ stats }: { stats: ReturnType<typeof useStats>['data'] }) {
   return (
     <Panel title="按架构" subtitle="各架构的记录数与 Web 可达数">
       {rows.length === 0 ? (
-        <EmptyState title="暂无记录" detail="启动一次仿真后这里会出现分布。" />
+        <EmptyState title="暂无记录" detail="启动一次仿真后这里会出现分布" />
       ) : (
         <table className="w-full text-left text-xs">
           <thead>
-            <tr className="border-b border-surface-border text-2xs text-ink-700">
+            <tr className="border-b border-surface-border text-2xs text-ink-500">
               <th className="py-1 font-medium">架构</th>
               <th className="py-1 text-right font-medium">记录</th>
               <th className="py-1 text-right font-medium">可达</th>
@@ -252,7 +252,7 @@ function FailurePanel({ causes }: { causes: ReturnType<typeof useRootCauses> }) 
     >
       {causes.isLoading && <Skeleton className="h-24 w-full" />}
       {!causes.isLoading && cards.length === 0 && (
-        <EmptyState title="暂无失败聚类" detail="所有已记录的仿真都没有留下失败信号。" />
+        <EmptyState title="暂无失败聚类" detail="所有已记录的仿真都没有留下失败信号" />
       )}
       <ul className="flex flex-col gap-1.5">
         {cards.slice(0, 6).map((card) => (
@@ -278,10 +278,10 @@ function FailurePanel({ causes }: { causes: ReturnType<typeof useRootCauses> }) 
  *  any setup. Each links somewhere that exists, rather than describing a command. */
 function QuickStart() {
   const steps = [
-    { title: '启动一次仿真', detail: '从已提取的 rootfs 启动，页面会在实例列表出现它。', to: '/instances', icon: <Boxes className="h-4 w-4" /> },
-    { title: '接入交互式终端', detail: 'QEMU 串口为可写 chardev，可回车执行命令。', to: '/instances', icon: <Terminal className="h-4 w-4" /> },
-    { title: '看四层链路证据', detail: '路由/ARP/ICMP/服务逐层给出结论与依据。', to: '/instances', icon: <Gauge className="h-4 w-4" /> },
-    { title: '核对这个构建能做什么', detail: '每条能力都带判定依据，不含模型调用的部分如实标注。', to: '/settings', icon: <Wrench className="h-4 w-4" /> },
+    { title: '启动一次仿真', detail: '从已提取的 rootfs 启动，页面会在实例列表出现它', to: '/instances', icon: <Boxes className="h-4 w-4" /> },
+    { title: '接入交互式终端', detail: 'QEMU 串口为可写 chardev，可回车执行命令', to: '/instances', icon: <Terminal className="h-4 w-4" /> },
+    { title: '看四层链路证据', detail: '路由/ARP/ICMP/服务逐层给出结论与依据', to: '/instances', icon: <Gauge className="h-4 w-4" /> },
+    { title: '核对这个构建能做什么', detail: '每条能力都带判定依据，不含模型调用的部分如实标注', to: '/settings', icon: <Wrench className="h-4 w-4" /> },
   ]
   return (
     <Panel title="快速开始" subtitle="无需额外配置；数据来自本机已记录的仿真">

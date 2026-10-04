@@ -237,10 +237,11 @@ export function DataRow({ label, children, mono = false }: { label: string; chil
 
 export function EmptyState({ title, detail, action }: { title: string; detail?: string; action?: ReactNode }) {
   return (
-    // The graph-paper wash is what makes an empty panel read as "nothing here
-    // yet" rather than "this panel failed to draw"; the lines are one to three
-    // percent opacity, so the text over them is unaffected.
-    <div className="panel-grid flex h-full min-h-32 flex-col items-center justify-center gap-2 p-6 text-center">
+    // A sunken well with a dashed rim, rather than the graph paper this used to
+    // paint: "nothing here yet" is carried by the recess and the rim, so the
+    // empty panel reads as part of the surface instead of as a hatched overlay
+    // sitting on top of it.
+    <div className="m-3 flex h-full min-h-32 flex-col items-center justify-center gap-2 rounded-card border border-dashed border-surface-border-strong bg-surface-faint p-6 text-center">
       <p className="text-xs font-medium text-ink-300">{title}</p>
       {detail && <p className="max-w-md text-2xs leading-relaxed text-ink-500">{detail}</p>}
       {action}
@@ -283,39 +284,153 @@ export function Skeleton({ className }: { className?: string }) {
 
 /* -------------------------------------------------------------------- inputs */
 
-export function TextInput({
+/** Every editable field, one shell. The field itself is `.field` in `tokens.css`
+ *  -- radius, border, focus ring and the number-spinner removal all live there,
+ *  because a search box that is a slightly different shape from the port box is
+ *  the most visible sign that a form was assembled page by page. */
+function FieldShell({
   label,
   hint,
-  ...rest
-}: { label?: string; hint?: ReactNode } & React.InputHTMLAttributes<HTMLInputElement>) {
+  className,
+  children,
+}: {
+  label?: ReactNode
+  hint?: ReactNode
+  className?: string
+  children: ReactNode
+}) {
   return (
-    <label className="flex flex-col gap-1">
+    <label className={classNames('flex flex-col gap-1', className)}>
       {label && <span className="text-2xs font-medium text-ink-500">{label}</span>}
-      <input
-        className="h-8 rounded-card border border-surface-border bg-surface-input px-2 text-xs text-ink-100 placeholder:text-ink-700 focus:border-iris-400 focus:outline-none"
-        {...rest}
-      />
+      {children}
       {hint && <span className="text-2xs text-ink-500">{hint}</span>}
     </label>
   )
 }
 
+export function TextInput({
+  label,
+  hint,
+  className,
+  ...rest
+}: { label?: string; hint?: ReactNode } & React.InputHTMLAttributes<HTMLInputElement>) {
+  return (
+    <FieldShell label={label} hint={hint} className={className}>
+      <input className="field" {...rest} />
+    </FieldShell>
+  )
+}
+
 export function Select({
   label,
+  className,
   children,
   ...rest
 }: { label?: string } & React.SelectHTMLAttributes<HTMLSelectElement>) {
   return (
-    <label className="flex flex-col gap-1">
-      {label && <span className="text-2xs font-medium text-ink-500">{label}</span>}
-      <select
-        className="h-8 rounded-card border border-surface-border bg-surface-input px-2 text-xs text-ink-100 focus:border-iris-400 focus:outline-none"
-        {...rest}
-      >
+    <FieldShell label={label} className={className}>
+      <select className="field field-select" {...rest}>
         {children}
       </select>
-    </label>
+    </FieldShell>
   )
+}
+
+/** The file picker. The visible filename is the page's own text next to a themed
+ *  button, so the browser's untranslated "Choose File" -- which is also the
+ *  platform's grey, and cannot be themed -- never appears. */
+export function FileInput({
+  label,
+  hint,
+  file,
+  accept,
+  disabled,
+  onPick,
+}: {
+  label?: string
+  hint?: ReactNode
+  file: File | null
+  accept?: string
+  disabled?: boolean
+  onPick: (file: File | null) => void
+}) {
+  return (
+    <FieldShell label={label} hint={hint} className="min-w-56 flex-1">
+      <span className="flex items-center gap-2">
+        <input
+          type="file"
+          accept={accept}
+          disabled={disabled}
+          className="field field-file w-auto flex-none"
+          onChange={(event) => {
+            const picked = event.target.files?.[0] ?? null
+            onPick(picked)
+            // Reset so picking the same file twice in a row still fires `change`;
+            // without this, the second selection is silently ignored.
+            event.target.value = ''
+          }}
+        />
+        {file && (
+          <span className="min-w-0 truncate font-mono text-2xs text-ink-300" title={file.name}>
+            {file.name}
+            <span className="ml-1.5 text-ink-500">{formatBytes(file.size)}</span>
+          </span>
+        )}
+      </span>
+    </FieldShell>
+  )
+}
+
+/** A row of mutually exclusive choices that reads as one control. `aria-pressed`
+ *  on a plain button rather than a radio group, because the launch panel's three
+ *  sources each change how many inputs exist, and a radio group does not read
+ *  correctly when picking one of them swaps the form underneath it. */
+export function Segmented<T extends string>({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label?: string
+  value: T
+  options: { value: T; label: string; hint?: string }[]
+  onChange: (value: T) => void
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      {label && <span className="text-2xs font-medium text-ink-500">{label}</span>}
+      <div className="segment-group" role="group" aria-label={typeof label === 'string' ? label : undefined}>
+        {options.map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            className="segment flex items-center gap-1.5"
+            aria-pressed={value === option.value}
+            title={option.hint}
+            onClick={() => onChange(option.value)}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** Bytes as `1.4 MiB`, the same rounding `human_bytes` uses on the server, so a
+ *  number the page prints and a number the API returns do not disagree by a
+ *  factor of 1024. */
+function formatBytes(count: number): string {
+  if (!Number.isFinite(count) || count < 0) return DASH
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
+  let value = count
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  const digits = value >= 100 || unit === 0 ? 0 : 1
+  return `${value.toFixed(digits)} ${units[unit]}`
 }
 
 /** One key/value cell for the small comparison tables. */

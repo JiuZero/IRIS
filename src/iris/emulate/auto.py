@@ -162,8 +162,19 @@ def prepare_from_firmware(
     return prepared
 
 
-def prepare_from_rootfs(rootfs_dir: Path, rules_dir: Path | None = None) -> PreparedRootfs:
-    """Wrap a pre-extracted rootfs dir for emulation; just apply rules."""
+def prepare_from_rootfs(
+    rootfs_dir: Path,
+    rules_dir: Path | None = None,
+    dry_run_rules: bool = True,
+) -> PreparedRootfs:
+    """Wrap a pre-extracted rootfs dir for emulation.
+
+    ``dry_run_rules`` mirrors :func:`prepare_from_firmware` and defaults to True so
+    the existing ``iris emulate run <rootfs-dir>`` keeps only *reporting* which
+    rules match. It is a parameter rather than a fixed value because a caller that
+    received the tree over the network wants the repairs written: the tree is
+    theirs, disposable, and a boot-fix that was only observed does not boot.
+    """
     if not safe_is_dir(rootfs_dir):
         return PreparedRootfs.from_error(f"rootfs dir not found: {rootfs_dir}")
 
@@ -183,13 +194,18 @@ def prepare_from_rootfs(rootfs_dir: Path, rules_dir: Path | None = None) -> Prep
     # Apply L3 rules
     rules_dir = rules_dir or Path("rules")
     if rules_dir.is_dir():
-        reports = apply_rules(rootfs_dir, load_rules(rules_dir), dry_run=True)
+        reports = apply_rules(rootfs_dir, load_rules(rules_dir), dry_run=dry_run_rules)
         for r in reports:
             if r.matched:
                 prepared.matched_rule_ids.append(r.rule_id)
+                for warning in r.warnings:
+                    prepared.notes.append(f"rule {r.rule_id}: {warning}")
+            else:
+                prepared.failed_rule_ids.append(r.rule_id)
 
         prepared.notes.append(
             f"L3 rules matched: {', '.join(prepared.matched_rule_ids) or 'none'}"
+            + ("" if dry_run_rules else " (applied)")
         )
 
     return prepared

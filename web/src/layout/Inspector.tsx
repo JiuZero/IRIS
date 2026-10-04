@@ -71,7 +71,7 @@ function InstancePanel({ iid }: { iid: number | null }) {
   if (iid === null) {
     return (
       <Section icon={<Boxes className="h-3.5 w-3.5" aria-hidden="true" />} title="实例">
-        <EmptyState title="未选择实例" detail="打开一个实例后，这里显示它的容器与归属信息。" />
+        <EmptyState title="未选择实例" detail="打开一个实例后，这里显示它的容器与归属信息" />
       </Section>
     )
   }
@@ -80,7 +80,7 @@ function InstancePanel({ iid }: { iid: number | null }) {
       <Section icon={<Boxes className="h-3.5 w-3.5" aria-hidden="true" />} title={`实例 ${iid}`}>
         <EmptyState
           title="此实例不在本进程的托管列表中"
-          detail="由 iris emulate run 在命令行启动的仿真不经过 API，因此无法从页面停止或接入终端。"
+          detail="命令行启动的仿真不经过 API，页面无法停止它或接入它的终端"
           action={
             <Link to="/instances" className="text-2xs text-iris-400 hover:underline">
               查看实例列表
@@ -191,7 +191,7 @@ function ConsolePanel({ iid }: { iid: number | null }) {
         <p className="text-2xs leading-relaxed text-ink-500">
           {log.data.reason ?? '没有快照'}
           <br />
-          <span className="text-ink-700">快照在运行结束时落盘；运行中的输出走终端通道。</span>
+          <span className="text-ink-700">快照在运行结束时落盘；运行中的输出走终端通道</span>
         </p>
       )}
       {log.data?.available && (
@@ -228,7 +228,7 @@ function CorpusPanel() {
         </>
       )}
       <p className="text-[10px] leading-relaxed text-ink-700">
-        配置只读，来自 .env 与 IRIS_* 环境变量；修改后需重启 iris web。
+        配置只读，来自 .env 与 IRIS_* 环境变量，修改后需重启 iris web
       </p>
     </Section>
   )
@@ -250,7 +250,7 @@ function KnowledgePanel() {
       title="失败知识"
       aside={<Badge tone="neutral">{cards.length}</Badge>}
     >
-      {cards.length === 0 && <p className="text-2xs text-ink-700">尚无失败聚类。</p>}
+      {cards.length === 0 && <p className="text-2xs text-ink-700">尚无失败聚类</p>}
       <ul className="flex flex-col gap-1">
         {cards.map((card) => (
           <li key={`${card.stage}-${card.kind}`} className="flex items-center gap-2 text-2xs">
@@ -289,7 +289,7 @@ function BuildPanel() {
         ))}
       </ul>
       <p className="text-[10px] leading-relaxed text-ink-700">
-        状态由后端探测构建内容得出，不是写死的文案。
+        状态由后端探测构建内容得出，不是写死的文案
       </p>
     </Section>
   )

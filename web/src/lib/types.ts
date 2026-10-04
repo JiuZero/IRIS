@@ -196,6 +196,29 @@ export interface EmulateResponse {
   link: LinkProfile | null
 }
 
+/** `POST /api/v1/emulate/upload`. Shares the boot verdict with `EmulateResponse`
+ *  and adds what only an upload knows: which input it came from, the port actually
+ *  published, and how the unpack went. */
+export interface UploadLaunchResponse extends EmulateResponse {
+  /** `rootfs` (an archive of an extracted tree) or `firmware` (a vendor image).
+   *  The two fail differently, so the page says which one it tried. */
+  source: 'rootfs' | 'firmware'
+  name: string
+  arch: string
+  rootfs_path: string
+  /** Never 0 -- the server resolves "pick a free one" before answering. */
+  host_port: number
+  members: number
+  total_bytes: number
+  /** Links present in the archive that were recreated. A rootfs is mostly links,
+   *  so a low number here is the first explanation for a guest that cannot boot. */
+  links_created: number
+  links_skipped: number
+  rejected_members: number
+  matched_rule_ids: string[]
+  notes: string[]
+}
+
 /**
  * The terminal socket's protocol, as `iris.api.web_terminal` actually speaks it.
  *

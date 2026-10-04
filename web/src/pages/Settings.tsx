@@ -48,7 +48,7 @@ export function Settings() {
     try {
       await api.stats()
       setProbe('ok')
-      setDetail('令牌可用，统计已可读取。')
+      setDetail('令牌可用，统计已可读取')
     } catch (error) {
       setProbe('bad')
       setDetail(error instanceof ApiError ? error.message : String(error))
@@ -146,8 +146,8 @@ export function Settings() {
           </p>
         )}
         <ul className="mt-3 flex flex-col gap-1 border-t border-surface-border pt-2 text-[10px] leading-relaxed text-ink-700">
-          <li>· 令牌保存在本浏览器的 localStorage，仅作为 X-IRIS-Token 请求头发送。</li>
-          <li>· 终端 WebSocket 例外：浏览器无法自定义头，该通道用查询参数传令牌，服务端用同一套常量时间比较校验。</li>
+          <li>· 令牌保存在本浏览器的 localStorage，仅作为 X-IRIS-Token 请求头发送</li>
+          <li>· 终端 WebSocket 例外：浏览器无法自定义头，该通道用查询参数传令牌，服务端用同一套常量时间比较校验</li>
           <li>· 服务端永远不会通过 API 返回令牌本身，/api/v1/config 只报告"是否已配置"。</li>
         </ul>
       </Panel>
@@ -160,7 +160,7 @@ export function Settings() {
         {capabilities.isLoading && <Skeleton className="h-40 w-full" />}
         <table className="w-full text-left text-xs">
           <thead>
-            <tr className="border-b border-surface-border text-2xs text-ink-700">
+            <tr className="border-b border-surface-border text-2xs text-ink-500">
               <th className="py-2 font-medium">能力</th>
               <th className="py-2 font-medium">状态</th>
               <th className="py-2 font-medium">说明</th>
@@ -198,13 +198,13 @@ export function Settings() {
 
       <Panel title="已知限制" subtitle="如实标注，而不是留给评审去发现" className="xl:col-span-2">
         <ul className="flex flex-col gap-1.5 text-2xs leading-relaxed text-ink-300">
-          <li>· 终端尺寸固定 80×24：QEMU 串口没有窗口尺寸通道，guest 永远不会知道浏览器窗口更宽。</li>
-          <li>· 终端通道的安全等级等于 guest shell：拿到输入权就能在 guest 里执行命令，这是设计如此。</li>
-          <li>· 日志视图与终端视图数据源不同：日志走运行结束时落盘的快照（不含终端输入），实时输出走终端通道。</li>
-          <li>· 由命令行（iris emulate run）启动的仿真不在 API 的托管表里，因此页面无法停止它或接入它的终端。</li>
+          <li>· 终端尺寸固定 80×24：QEMU 串口没有窗口尺寸通道，guest 永远不会知道浏览器窗口更宽</li>
+          <li>· 终端通道的安全等级等于 guest shell：拿到输入权就能在 guest 里执行命令，这是设计如此</li>
+          <li>· 日志视图与终端视图数据源不同：日志走运行结束时落盘的快照（不含终端输入），实时输出走终端通道</li>
+          <li>· 由命令行（iris emulate run）启动的仿真不在 API 的托管表里，因此页面无法停止它或接入它的终端</li>
           <li>· 资源占用来自 docker stats 采样；容器刚启动时可能尚无样本，此时显示为「未采样」而不是 0%。</li>
-          <li>· 统计卡与评测集使用全库累计口径（含同一固件的多次运行），与任何单批次实验数字不同。</li>
-          <li>· 主题与密度只保存在当前浏览器：换一台机器或换一个无痕窗口会回到默认值，服务端不保存任何界面偏好。</li>
+          <li>· 统计卡与评测集使用全库累计口径（含同一固件的多次运行），与任何单批次实验数字不同</li>
+          <li>· 主题与密度只保存在当前浏览器：换一台机器或换一个无痕窗口会回到默认值，服务端不保存任何界面偏好</li>
         </ul>
       </Panel>
     </div>
@@ -326,7 +326,7 @@ function AppearancePanel() {
       <div className="mt-4 flex flex-col gap-3">
         <Choice<Density>
           label="界面密度"
-          hint="缩放字号与间距。面板宽度、终端 80×24 等固定尺寸不受影响。"
+          hint="缩放字号与间距。面板宽度、终端 80×24 等固定尺寸不受影响"
           options={DENSITIES}
           value={density}
           labels={DENSITY_LABELS}
@@ -334,7 +334,7 @@ function AppearancePanel() {
         />
         <Choice<UiFont>
           label="界面字体"
-          hint="显式标注等宽或衬线的区域（运行 ID、终端旁注）始终保持等宽。"
+          hint="显式标注等宽或衬线的区域（运行 ID、终端旁注）始终保持等宽"
           options={UI_FONTS}
           value={font}
           labels={FONT_LABELS}

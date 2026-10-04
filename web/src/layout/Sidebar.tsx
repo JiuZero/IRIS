@@ -77,15 +77,7 @@ export function Sidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
               to={to}
               end={end}
               title={collapsed ? label : undefined}
-              className={({ isActive }) =>
-                classNames(
-                  'flex h-8 items-center gap-2 rounded-card px-2 text-xs transition-colors',
-                  collapsed && 'justify-center px-0',
-                  isActive
-                    ? 'bg-iris-500/15 font-medium text-iris-400'
-                    : 'text-ink-300 hover:bg-surface-hover hover:text-ink-100',
-                )
-              }
+              className={() => classNames('nav-item', collapsed && 'justify-center px-0')}
             >
               <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
               {!collapsed && <span className="truncate">{label}</span>}
@@ -96,37 +88,39 @@ export function Sidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
 
       {!collapsed && (
         <>
-          <div className="mt-2 flex items-center justify-between px-1">
-            <span className="text-2xs font-medium uppercase tracking-wider text-ink-700">运行中</span>
-            <Badge tone={running.length ? 'success' : 'neutral'}>{running.length}</Badge>
-          </div>
-          <ul className="scroll-y flex min-h-0 flex-col gap-0.5">
-            {running.length === 0 && (
-              <li className="px-1 text-2xs leading-relaxed text-ink-700">
-                暂无实例。从 /instances 启动一次仿真，它会出现在这里。
-              </li>
-            )}
-            {running.map((item) => (
-              <li key={item.iid}>
-                <button
-                  type="button"
-                  onClick={() => navigate(`/instances/${item.iid}`)}
-                  className="flex w-full items-center gap-2 rounded-card px-2 py-1.5 text-left transition-colors hover:bg-surface-hover"
-                >
-                  <StatusDot tone={item.web_ok ? 'success' : 'warning'} pulse={item.web_ok} />
-                  <span className="tnum flex-1 truncate font-mono text-2xs text-ink-100">{item.iid}</span>
-                  <span className="truncate text-2xs text-ink-500">{item.arch || '?'}</span>
-                  {item.web_url && (
-                    <Terminal className="h-3 w-3 shrink-0 text-ink-700" aria-label="可接入终端" />
-                  )}
-                </button>
-              </li>
-            ))}
-          </ul>
-
-          <div className="mt-auto flex flex-col gap-1 pt-2">
+          <div className="nav-card mt-2 flex flex-col gap-1">
             <div className="flex items-center justify-between px-1">
-              <span className="text-2xs font-medium uppercase tracking-wider text-ink-700">能力</span>
+              <span className="nav-card-title">运行中</span>
+              <Badge tone={running.length ? 'success' : 'neutral'}>{running.length}</Badge>
+            </div>
+            <ul className="scroll-y flex min-h-0 flex-col gap-0.5">
+              {running.length === 0 && (
+                <li className="px-1 text-2xs leading-relaxed text-ink-700">
+                  暂无实例，从 /instances 启动一次仿真即会出现在这里
+                </li>
+              )}
+              {running.map((item) => (
+                <li key={item.iid}>
+                  <button
+                    type="button"
+                    onClick={() => navigate(`/instances/${item.iid}`)}
+                    className="flex w-full items-center gap-2 rounded-card px-2 py-1.5 text-left transition-colors hover:bg-surface-hover"
+                  >
+                    <StatusDot tone={item.web_ok ? 'success' : 'warning'} pulse={item.web_ok} />
+                    <span className="tnum flex-1 truncate font-mono text-2xs text-ink-100">{item.iid}</span>
+                    <span className="truncate text-2xs text-ink-500">{item.arch || '?'}</span>
+                    {item.web_url && (
+                      <Terminal className="h-3 w-3 shrink-0 text-ink-700" aria-label="可接入终端" />
+                    )}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <div className="nav-card mt-auto flex flex-col gap-1 pt-2">
+            <div className="flex items-center justify-between px-1">
+              <span className="nav-card-title">能力</span>
               {capabilities.isLoading && <span className="text-2xs text-ink-700">读取中</span>}
             </div>
             <ul className="flex flex-col gap-0.5">
@@ -148,7 +142,7 @@ export function Sidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
             </ul>
             {unavailable.length > 0 && (
               <p className="px-1 text-[10px] leading-relaxed text-ink-700">
-                徽章状态由构建内容探测得出，详情见 /settings。
+                徽章状态由构建内容探测得出，详情见 /settings
               </p>
             )}
           </div>

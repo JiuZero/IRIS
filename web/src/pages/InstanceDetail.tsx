@@ -61,7 +61,7 @@ export function InstanceDetail() {
     return (
       <div className="p-4">
         <Panel title="无效的实例号">
-          <ErrorState title="地址中缺少实例号" detail="使用 /instances/:iid 形式的地址。" />
+          <ErrorState title="地址中缺少实例号" detail="使用 /instances/:iid 形式的地址" />
         </Panel>
       </div>
     )
@@ -101,23 +101,18 @@ export function InstanceDetail() {
           </div>
         }
       >
-        <nav aria-label="实例视图" className="flex gap-1 border-b border-surface-border">
+        <nav aria-label="实例视图" className="segment-group">
           {TABS.map(({ key, label, icon: Icon }) => (
             <button
               key={key}
               type="button"
-              aria-current={tab === key}
+              className="segment flex items-center gap-1.5"
+              aria-current={tab === key ? 'page' : undefined}
               onClick={() => {
                 const next = new URLSearchParams(search)
                 next.set('tab', key)
                 setSearch(next, { replace: true })
               }}
-              className={classNames(
-                'flex items-center gap-1.5 border-b-2 px-3 py-1.5 text-xs transition-colors',
-                tab === key
-                  ? 'border-iris-400 text-ink-100'
-                  : 'border-transparent text-ink-500 hover:text-ink-300',
-              )}
             >
               <Icon className="h-3.5 w-3.5" aria-hidden="true" />
               {label}
@@ -173,7 +168,7 @@ function LinkTab({
         {!detail.isLoading && !hasLayers && (
           <EmptyState
             title="这次运行没有链路摘要"
-            detail="链路表只在四层中出现阻断、且探测跑完时落库三键摘要。全通的运行不探测，探测不可用的运行不记证据，因此大多数记录看不到这张表——这不是「没发现问题」，是「没有这次测量的记录」。"
+            detail="链路表只在四层出现阻断且探测跑完时落库摘要；全通或探测不可用的运行不记证据，看到空表不是「没问题」，是没有这次测量"
           />
         )}
         {link && hasLayers && (
@@ -228,7 +223,7 @@ function LinkTab({
         {!record ? (
           <EmptyState
             title="本进程未托管该实例"
-            detail="命令行启动的仿真不写入 API 的托管表，因此页面无法读取它的实时状态。"
+            detail="命令行启动的仿真不写入 API 的托管表，因此页面无法读取它的实时状态"
           />
         ) : (
           <>
@@ -282,7 +277,7 @@ function ConsoleTab({ iid }: { iid: number }) {
       {log.isLoading && <div className="p-3"><Skeleton className="h-64 w-full" /></div>}
       {log.isError && <ErrorState title="无法读取日志" detail={(log.error as Error).message} />}
       {log.data?.available === false && (
-        <EmptyState title="没有该实例的日志快照" detail={log.data.reason ?? '快照在运行结束时才落盘。'} />
+        <EmptyState title="没有该实例的日志快照" detail={log.data.reason ?? '快照在运行结束时才落盘'} />
       )}
       {log.data?.available && (
         <>
@@ -312,11 +307,11 @@ function DetailTab({
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
       <Panel title="该 iid 的历史运行" bodyClassName="p-0">
         {runs.isLoading && <div className="p-3"><Skeleton className="h-32 w-full" /></div>}
-        {rows.length === 0 && <EmptyState title="没有记录" detail="这个 iid 在库里没有仿真记录。" />}
+        {rows.length === 0 && <EmptyState title="没有记录" detail="这个 iid 在库里没有仿真记录" />}
         {rows.length > 0 && (
           <table className="w-full text-left text-xs">
             <thead>
-              <tr className="border-b border-surface-border text-2xs text-ink-700">
+              <tr className="border-b border-surface-border text-2xs text-ink-500">
                 <th className="px-3 py-2 font-medium">记录</th>
                 <th className="px-3 py-2 font-medium">Web</th>
                 <th className="px-3 py-2 font-medium">耗时</th>
@@ -362,7 +357,7 @@ function DetailTab({
             </DataRow>
             <div className="mt-2">
               <h3 className="text-2xs font-semibold uppercase tracking-wider text-ink-700">失败信号</h3>
-              {detail.data.failures.length === 0 && <p className="py-1 text-2xs text-ink-700">无。</p>}
+              {detail.data.failures.length === 0 && <p className="py-1 text-2xs text-ink-700">无</p>}
               <ul className="mt-1 flex flex-col gap-1">
                 {detail.data.failures.map((failure, index) => (
                   <li key={`${failure.stage}-${index}`} className="rounded-card border border-surface-border px-2 py-1">
@@ -379,7 +374,7 @@ function DetailTab({
             </div>
             <div className="mt-2">
               <h3 className="text-2xs font-semibold uppercase tracking-wider text-ink-700">修复动作</h3>
-              {detail.data.repairs.length === 0 && <p className="py-1 text-2xs text-ink-700">无。</p>}
+              {detail.data.repairs.length === 0 && <p className="py-1 text-2xs text-ink-700">无</p>}
               <ul className="mt-1 flex flex-col gap-1">
                 {detail.data.repairs.map((repair, index) => (
                   <li key={`${repair.rule_id}-${index}`} className="rounded-card border border-surface-border px-2 py-1">
@@ -397,7 +392,7 @@ function DetailTab({
         {!detail.data && !detail.isLoading && (
           <EmptyState
             title="未选中记录"
-            detail="从 /instances 打开某条记录，或在上表点一条记录（地址形如 /instances/:iid?run=编号）。"
+            detail="从 /instances 打开某条记录，或在上表点一条记录（地址形如 /instances/:iid?run=编号）"
           />
         )}
       </Panel>
@@ -416,8 +411,8 @@ function ActionsTab({
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
       <Panel title="停止">
         <p className="text-2xs leading-relaxed text-ink-500">
-          停止会删除容器并从托管表移除该行。这个动作不可撤销，页面上没有任何"撤销"入口
-          —— 停止之后要重新跑一次仿真。
+          停止会删除容器并从托管表移除该行。此动作不可撤销，页面上没有撤销入口，
+          停止之后要重新跑一次仿真
         </p>
         <div className="mt-2">
           <Link to="/instances">
@@ -433,8 +428,8 @@ function ActionsTab({
           {record?.container_id || DASH}
         </DataRow>
         <p className="mt-2 text-[10px] leading-relaxed text-ink-700">
-          guest 的 Web 服务由 QEMU 内的网络转发到宿主端口；串口只在回环地址上发布，
-          页面通过本服务的 WebSocket 接入，而不是直接连 guest。
+          guest 的 Web 服务由 QEMU 内的网络转发到宿主端口，串口只在回环地址上发布，
+          页面通过本服务的 WebSocket 接入，不直接连 guest
         </p>
         <p className="mt-2 flex items-center gap-1 text-[10px] text-ink-700">
           <CircleDot className="h-3 w-3" aria-hidden="true" />

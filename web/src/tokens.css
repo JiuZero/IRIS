@@ -66,13 +66,14 @@
   --surface-code: rgba(0, 0, 0, 0.3);
   --surface-scrim: rgba(0, 0, 0, 0.5);
 
-  /* The two radial glows and the grid are assembled from these three, so a theme
-     re-tints the backdrop by naming three colours instead of rewriting two
-     four-layer `background-image` values. */
+  /* The two radial glows are assembled from these, so a theme re-tints the
+     backdrop by naming two colours instead of rewriting a three-layer
+     `background-image` value. There is deliberately no grid layer: graph paper
+     behind the panels read as "this is a wireframe", not as an engineering
+     surface, and it made every table look like it was sitting on a spreadsheet.
+     A gradient with two soft glows carries the depth on its own. */
   --glow-a: rgba(53, 99, 255, 0.18);
   --glow-b: rgba(167, 139, 250, 0.12);
-  --grid-line: rgba(255, 255, 255, 0.015);
-  --grid-size: 48px;
   --bg-gradient: none;
 
   /* Chrome that is not part of the content: scrollbars and the selection
@@ -115,12 +116,11 @@
 
   body {
     margin: 0;
-    /* The deep blue-black field, with two radial glows and a faint grid. Fixed
-       attachment so the glows do not slide with the content when a long run
-       table scrolls -- a background that parallaxes reads as a rendering bug. */
+    /* The deep blue-black field with two radial glows. Fixed attachment so the
+       glows do not slide with the content when a long run table scrolls -- a
+       background that parallaxes reads as a rendering bug. */
     background-color: var(--surface-base);
-    background-image: var(--surface-glow), var(--surface-grid), var(--bg-gradient);
-    background-size: var(--grid-size) var(--grid-size);
+    background-image: var(--surface-glow), var(--bg-gradient);
     background-attachment: fixed;
     color: var(--text-primary);
     font-family: var(--iris-ui-font);
@@ -204,25 +204,25 @@
   }
 }
 
-/* The composed backdrop, resolved once here rather than three times at each use.
-   `--surface-glow` and `--surface-grid` are only ever read through these two. */
+/* The composed backdrop, resolved once here rather than at each use.
+   `--surface-glow` is only ever read through this. */
 :root {
   --surface-glow: radial-gradient(900px 520px at 12% -8%, var(--glow-a), transparent 62%),
     radial-gradient(760px 480px at 88% 0%, var(--glow-b), transparent 60%);
-  --surface-grid: linear-gradient(var(--grid-line) 1px, transparent 1px),
-    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
 }
 
 @layer components {
   /* The glass card. One definition, used by the stat tiles, the panels and the
      inspector sections -- three near-identical implementations of this is how a
-     codebase ends up with two different blurs. */
+     codebase ends up with two different blurs. The radius is the same token the
+     `rounded-panel` utility resolves, because a card with a 12px corner and a
+     10px control inside it reads as two products in one screen. */
   .glass {
     background: var(--surface-raised);
     backdrop-filter: blur(20px) saturate(160%);
     -webkit-backdrop-filter: blur(20px) saturate(160%);
     border: 1px solid var(--surface-border);
-    border-radius: 12px;
+    border-radius: 14px;
   }
 
   .glass-soft {
@@ -230,15 +230,204 @@
     backdrop-filter: blur(12px) saturate(140%);
     -webkit-backdrop-filter: blur(12px) saturate(140%);
     border: 1px solid var(--surface-border);
-    border-radius: 8px;
+    border-radius: 10px;
   }
 
-  /* A panel that carries its own 24px graph paper. 24 rather than the body's 48:
-     this one sits behind a table of runs, and the cell rhythm is 24. */
-  .panel-grid {
-    background-image: linear-gradient(var(--grid-line) 1px, transparent 1px),
-      linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
-    background-size: 24px 24px;
+  /* Every editable field, in one place: the search box, the number boxes, the
+     architecture box and the file picker are the same control to the eye, and
+     four hand-written className strings are four chances for one of them to end
+     up with a squarer corner than the rest. `appearance: none` is what removes
+     the platform's own bevel on a select and the default arrow on a search
+     input -- the ones that are what actually makes a form look dated. */
+  .field {
+    appearance: none;
+    width: 100%;
+    height: 2rem;
+    border-radius: 10px;
+    border: 1px solid var(--surface-border);
+    background-color: var(--surface-input);
+    padding: 0 0.5rem;
+    font-size: 0.75rem;
+    color: var(--text-primary);
+    transition:
+      border-color 140ms cubic-bezier(0.22, 0.61, 0.36, 1),
+      box-shadow 140ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+  .field::placeholder {
+    color: var(--text-faint);
+  }
+  .field:hover:not(:disabled) {
+    border-color: var(--surface-border-strong);
+  }
+  .field:focus,
+  .field:focus-visible {
+    outline: none;
+    border-color: var(--iris-400);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--iris-400) 22%, transparent);
+  }
+  .field:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  .field[type='number'] {
+    /* The spinner steals horizontal room from a 112px-wide port box and its
+       arrows are the platform's, not the theme's. */
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+  .field[type='number']::-webkit-outer-spin-button,
+  .field[type='number']::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  /* A select still needs an affordance saying "there is a list under here" once
+     its own arrow is gone, so the arrow is drawn here from the text ramp. */
+  .field-select {
+    padding-right: 1.5rem;
+    background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+      linear-gradient(135deg, currentColor 50%, transparent 50%);
+    background-position:
+      right 0.85rem center,
+      right 0.6rem center;
+    background-size:
+      5px 5px,
+      5px 5px;
+    background-repeat: no-repeat;
+  }
+  /* The native file button is the one control a theme cannot restyle with a
+     border, so it is replaced with the product's own button. The visible text
+     next to it comes from the page, not from the browser's "Choose File". */
+  .field-file {
+    padding: 0 0.25rem;
+    cursor: pointer;
+  }
+  .field-file::file-selector-button {
+    margin-right: 0.5rem;
+    cursor: pointer;
+    border-radius: 8px;
+    border: 1px solid var(--surface-border-strong);
+    background: var(--surface-hover);
+    padding: 0.25rem 0.625rem;
+    font-size: 0.6875rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    transition:
+      border-color 140ms cubic-bezier(0.22, 0.61, 0.36, 1),
+      color 140ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+  .field-file::file-selector-button:hover {
+    border-color: var(--iris-400);
+    color: var(--text-primary);
+  }
+
+  /* A group of mutually exclusive choices that reads as one control: the launch
+     panel's source picker and the instance page's four tabs are the same widget,
+     so they share the class. The selected one reads as pressed because of the
+     surface and the border rather than a colour chip, which keeps it legible on
+     all twelve themes -- a tab whose only active signal is an accent underline
+     disappears the moment the theme's accent is close to its border colour.
+     Both `aria-pressed` (a button that toggles) and `aria-current` (a link to
+     the view being shown) are accepted, because the two callers differ. */
+  .segment {
+    height: 2rem;
+    border-radius: 10px;
+    border: 1px solid transparent;
+    background-color: transparent;
+    padding: 0 0.625rem;
+    font-size: 0.6875rem;
+    font-weight: 500;
+    color: var(--text-muted);
+    transition:
+      background-color 140ms cubic-bezier(0.22, 0.61, 0.36, 1),
+      border-color 140ms cubic-bezier(0.22, 0.61, 0.36, 1),
+      color 140ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+  .segment:hover:not([aria-pressed='true']):not([aria-current='page']) {
+    background-color: var(--surface-hover);
+    color: var(--text-secondary);
+  }
+  .segment[aria-pressed='true'],
+  .segment[aria-current='page'] {
+    background-color: var(--surface-raised);
+    border-color: var(--surface-border-strong);
+    color: var(--text-primary);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--iris-400) 28%, transparent);
+  }
+  .segment[aria-pressed='true'] svg,
+  .segment[aria-current='page'] svg {
+    color: var(--iris-400);
+  }
+
+  /* The trough the segments sit in. */
+  .segment-group {
+    display: inline-flex;
+    gap: 0.125rem;
+    border-radius: 12px;
+    background-color: var(--surface-faint);
+    padding: 0.1875rem;
+  }
+
+  /* The left rail. A navigation item reads as "you are here" through a filled
+     surface plus a 3px accent bar on its leading edge, not through a tinted
+     block: a 15%-opacity accent fill is nearly invisible on the light themes,
+     where the accent and the surface are both pale, and it turned the active
+     item into the least readable one on the page. */
+  .nav-item {
+    position: relative;
+    display: flex;
+    height: 2rem;
+    align-items: center;
+    gap: 0.5rem;
+    border-radius: 10px;
+    border: 1px solid transparent;
+    padding: 0 0.5rem;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    transition:
+      background-color 140ms cubic-bezier(0.22, 0.61, 0.36, 1),
+      border-color 140ms cubic-bezier(0.22, 0.61, 0.36, 1),
+      color 140ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+  .nav-item:hover {
+    background-color: var(--surface-hover);
+    color: var(--text-primary);
+  }
+  .nav-item[aria-current='page'] {
+    background-color: var(--surface-input);
+    border-color: var(--surface-border-strong);
+    color: var(--text-primary);
+    font-weight: 500;
+  }
+  .nav-item[aria-current='page']::before {
+    content: '';
+    position: absolute;
+    left: -1px;
+    top: 50%;
+    height: 1rem;
+    width: 3px;
+    border-radius: 0 2px 2px 0;
+    background: var(--iris-500);
+    transform: translateY(-50%);
+  }
+  .nav-item[aria-current='page'] svg {
+    color: var(--iris-400);
+  }
+
+  /* A titled block inside the rail -- the running instances and the capability
+     census. The border and the sunken fill are what make them read as two small
+     cards rather than as more nav. */
+  .nav-card {
+    border-radius: 12px;
+    border: 1px solid var(--surface-border);
+    background-color: var(--surface-faint);
+    padding: 0.5rem 0.375rem;
+  }
+  .nav-card-title {
+    font-size: 0.6875rem;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-faint);
   }
 
   /* The live halo. A ring that grows and fades, so "this instance is running" is
@@ -339,7 +528,6 @@
   --surface-scrim: rgba(2, 4, 9, 0.6);
   --glow-a: rgba(61, 125, 255, 0.2);
   --glow-b: rgba(76, 201, 240, 0.1);
-  --grid-line: rgba(148, 176, 214, 0.03);
   --selection-bg: rgba(61, 125, 255, 0.45);
   color-scheme: dark;
 }
@@ -369,7 +557,6 @@
   --surface-scrim: rgba(30, 35, 43, 0.5);
   --glow-a: rgba(129, 161, 193, 0.16);
   --glow-b: rgba(180, 142, 173, 0.12);
-  --grid-line: rgba(236, 239, 244, 0.03);
   --selection-bg: rgba(129, 161, 193, 0.4);
   --selection-text: #2e3440;
   color-scheme: dark;
@@ -400,7 +587,6 @@
   --surface-scrim: rgba(12, 13, 20, 0.55);
   --glow-a: rgba(122, 162, 247, 0.18);
   --glow-b: rgba(187, 154, 247, 0.12);
-  --grid-line: rgba(192, 202, 245, 0.03);
   --selection-bg: rgba(122, 162, 247, 0.4);
   --selection-text: #1a1b26;
   color-scheme: dark;
@@ -431,7 +617,6 @@
   --surface-scrim: rgba(20, 21, 28, 0.55);
   --glow-a: rgba(189, 147, 249, 0.18);
   --glow-b: rgba(80, 250, 123, 0.08);
-  --grid-line: rgba(248, 248, 242, 0.03);
   --selection-bg: rgba(189, 147, 249, 0.4);
   --selection-text: #282a36;
   color-scheme: dark;
@@ -462,7 +647,6 @@
   --surface-scrim: rgba(20, 20, 20, 0.5);
   --glow-a: rgba(250, 189, 47, 0.14);
   --glow-b: rgba(211, 134, 155, 0.1);
-  --grid-line: rgba(235, 219, 178, 0.03);
   --selection-bg: rgba(250, 189, 47, 0.35);
   --selection-text: #282828;
   color-scheme: dark;
@@ -496,7 +680,6 @@
   --surface-scrim: rgba(15, 16, 12, 0.55);
   --glow-a: rgba(253, 151, 31, 0.14);
   --glow-b: rgba(174, 129, 255, 0.1);
-  --grid-line: rgba(248, 248, 242, 0.03);
   --selection-bg: rgba(253, 151, 31, 0.35);
   --selection-text: #272822;
   color-scheme: dark;
@@ -515,10 +698,10 @@
   --danger: #d32626;
   --violet: #6d28d9;
   --cyan: #0e7490;
-  --text-primary: #1b2029;
-  --text-secondary: #454e5d;
-  --text-muted: #61697a;
-  --text-faint: #8b93a1;
+  --text-primary: #111827;
+  --text-secondary: #374151;
+  --text-muted: #6b7280;
+  --text-faint: #9ca3af;
   --surface-base: #fbf6ec;
   --surface-raised: rgba(255, 253, 245, 0.78);
   --surface-sunken: rgba(246, 239, 228, 0.8);
@@ -531,7 +714,6 @@
   --surface-scrim: rgba(27, 32, 41, 0.35);
   --glow-a: rgba(53, 99, 255, 0.14);
   --glow-b: rgba(124, 58, 237, 0.1);
-  --grid-line: rgba(27, 32, 41, 0.035);
   --scroll-thumb: rgba(27, 32, 41, 0.16);
   --scroll-thumb-hover: rgba(27, 32, 41, 0.28);
   --selection-bg: rgba(53, 99, 255, 0.28);
@@ -549,10 +731,10 @@
   --danger: #cf222e;
   --violet: #8250df;
   --cyan: #1b7c83;
-  --text-primary: #1f2328;
-  --text-secondary: #454c56;
-  --text-muted: #616a76;
-  --text-faint: #8b949e;
+  --text-primary: #111827;
+  --text-secondary: #374151;
+  --text-muted: #6b7280;
+  --text-faint: #9ca3af;
   --surface-base: #ffffff;
   --surface-raised: rgba(255, 255, 255, 0.82);
   --surface-sunken: rgba(246, 248, 250, 0.85);
@@ -565,7 +747,6 @@
   --surface-scrim: rgba(31, 35, 40, 0.35);
   --glow-a: rgba(9, 105, 218, 0.1);
   --glow-b: rgba(130, 80, 223, 0.08);
-  --grid-line: rgba(31, 35, 40, 0.03);
   --scroll-thumb: rgba(31, 35, 40, 0.16);
   --scroll-thumb-hover: rgba(31, 35, 40, 0.28);
   --selection-bg: rgba(9, 105, 218, 0.26);
@@ -603,7 +784,6 @@
   --surface-scrim: rgba(8, 20, 25, 0.55);
   --glow-a: rgba(56, 189, 248, 0.16);
   --glow-b: rgba(192, 132, 252, 0.12);
-  --grid-line: rgba(232, 244, 251, 0.03);
   --selection-bg: rgba(56, 189, 248, 0.38);
   --bg-gradient: linear-gradient(135deg, #0f2027 0%, #203a43 55%, #2c5364 100%);
   color-scheme: dark;
@@ -634,7 +814,6 @@
   --surface-scrim: rgba(16, 6, 32, 0.55);
   --glow-a: rgba(251, 146, 60, 0.16);
   --glow-b: rgba(232, 121, 249, 0.12);
-  --grid-line: rgba(251, 238, 230, 0.03);
   --selection-bg: rgba(251, 146, 60, 0.36);
   --bg-gradient: linear-gradient(135deg, #1a0a2e 0%, #4a1942 55%, #c84b31 100%);
   color-scheme: dark;
@@ -665,7 +844,6 @@
   --surface-scrim: rgba(2, 1, 15, 0.55);
   --glow-a: rgba(56, 189, 248, 0.18);
   --glow-b: rgba(99, 232, 249, 0.1);
-  --grid-line: rgba(230, 239, 255, 0.03);
   --selection-bg: rgba(56, 189, 248, 0.4);
   --bg-gradient: linear-gradient(135deg, #020111 0%, #20124d 55%, #005b96 100%);
   color-scheme: dark;

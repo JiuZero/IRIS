@@ -56,7 +56,7 @@ export function LogPanel() {
         </button>
       </header>
       <div ref={bodyRef} className="scroll-y min-h-0 flex-1 px-3 py-1.5 font-mono text-[11px] leading-relaxed">
-        {rows.length === 0 && <p className="py-2 text-ink-700">尚无失败记录。</p>}
+        {rows.length === 0 && <p className="py-2 text-ink-700">尚无失败记录</p>}
         {rows.map((row) => (
           <div key={`${row.stage}-${row.kind}`} className="flex items-center gap-2 py-0.5">
             <span className="w-16 shrink-0 text-ink-700">{row.stage || '—'}</span>

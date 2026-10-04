@@ -30,6 +30,7 @@ import type {
   RunDetail,
   RunsPage,
   Stats,
+  UploadLaunchResponse,
 } from './types'
 
 /** Where the token lives between page loads. Not a cookie: the API takes a header,
@@ -96,7 +97,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const token = readToken()
   const headers = new Headers(init?.headers)
   if (token) headers.set('X-IRIS-Token', token)
-  if (init?.body !== undefined && !headers.has('Content-Type')) {
+  // FormData has to be left alone: the browser writes its own Content-Type with the
+  // multipart boundary, and setting `application/json` here is what turns an upload
+  // into "There was an error parsing the body" from starlette.
+  const isFormData = typeof FormData !== 'undefined' && init?.body instanceof FormData
+  if (init?.body !== undefined && !headers.has('Content-Type') && !isFormData) {
     headers.set('Content-Type', 'application/json')
   }
 
@@ -176,6 +181,29 @@ export const api = {
 
   emulate: (body: { rootfs_path: string; arch: string; iid?: number; port?: number; timeout?: number }) =>
     request<EmulateResponse>('/api/v1/emulate', { method: 'POST', body: JSON.stringify(body) }),
+
+  /**
+   * Start an emulation from a file the browser holds: a tar of an extracted rootfs,
+   * or a vendor firmware image.
+   *
+   * Sent as multipart rather than JSON because the body *is* the file. The
+   * Content-Type header is deliberately left unset: the boundary in it has to match
+   * the one the browser generates for this FormData instance, and a hardcoded
+   * `multipart/form-data` is how that ends in "server cannot parse the body".
+   */
+  uploadLaunch: (
+    file: File,
+    params: { kind?: 'auto' | 'rootfs' | 'firmware'; arch?: string; port?: number; timeout?: number } = {},
+  ) => {
+    const form = new FormData()
+    form.append('file', file, file.name)
+    const query: Query = { ...params }
+    if (!query.arch) delete query.arch
+    return request<UploadLaunchResponse>(withQuery('/api/v1/emulate/upload', query), {
+      method: 'POST',
+      body: form,
+    })
+  },
 
   stopEmulation: (iid: number) => request<Record<string, unknown>>(`/api/v1/emulate/${iid}`, { method: 'DELETE' }),
 }

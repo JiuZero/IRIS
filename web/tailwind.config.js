@@ -53,9 +53,12 @@ export default {
       fontSize: {
         '2xs': ['0.6875rem', { lineHeight: '1rem' }],
       },
+      /* 10px for controls, 14px for cards. Both are the same values
+         `.glass` and `.field` declare in tokens.css, so the one-off CSS and the
+         utilities cannot drift apart. */
       borderRadius: {
-        card: '8px',
-        panel: '12px',
+        card: '10px',
+        panel: '14px',
       },
       backdropBlur: {
         glass: '20px',
