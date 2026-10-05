@@ -4,6 +4,27 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.23] - 2026-10-05
+
+整洁核查批次：逻辑完整性核对 + 死代码与临时文件清理，外加两处自审发现的文案与链接缺口。
+
+### 修复
+
+- **`emulate run` 端口耗尽的错误提示里 `--port XXX` 是占位符**（`src/iris/cli.py`）。
+  这是发给用户的错误文案，`XXX` 让「照提示操作」无从下手，改为 `--port <port>`；
+  端口范围 `[8080,8199]` 的表述不变
+- **检查器「查看完整日志」链接缺 `tab=console`**（`web/src/layout/Inspector.tsx`）。
+  链接文本承诺看完整日志，落地却是详情页的默认页签；补上 `?tab=console` 后
+  从任何页面点它都落到串口页签
+
+### 清理
+
+- 全量核对：`1455 passed / 5 skipped`、ruff 全绿、`tsc` 零错误；Settings 六个
+  配置字段与三个派生属性逐个交叉验证（src 引用 + tests 引用 + `IRIS_*` 环境变量），
+  无死配置项；业务代码无裸 `print`（`log.py` 的 `print(file=stream)` 是日志机制本身）；
+  无临时/调试文件残留；第 5 批新增符号（`get_live`/`live_state`/`subscriber_name` 等）
+  的定义点、调用点与测试引用齐全
+
 ## [0.3.22] - 2026-10-05
 
 五条反馈。核心是**让「实例已停止」成为一个能传达到的状态，而不是一个不断重试的失败**，

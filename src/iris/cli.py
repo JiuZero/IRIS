@@ -718,7 +718,7 @@ def emulate_run(
             out.info(f"picked host port: {selected_port}")
             result_port = selected_port
     except RuntimeError:
-        err.error("no available host port in range [8080,8199]; use --port XXX")
+        err.error("no available host port in range [8080,8199]; pass --port <port> explicitly")
         raise typer.Exit(code=3) from None
 
     partition_mounts = None

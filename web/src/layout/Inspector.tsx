@@ -261,7 +261,7 @@ function ConsolePanel({
               {iid !== null && (
                 <>
                   {' · '}
-                  <Link to={`/instances/${iid}`} className="text-iris-400 hover:underline">
+                  <Link to={`/instances/${iid}?tab=console`} className="text-iris-400 hover:underline">
                     查看完整日志
                   </Link>
                 </>
