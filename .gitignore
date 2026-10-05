@@ -58,3 +58,7 @@ Thumbs.db
 # 密钥与配置
 .env
 *.local.yaml
+
+# 智能体技能安装目录（由 `npx skills add ...` 写入，含第三方脚本，同 .codeartsdoer/ 理由不入库）
+.agents/
+.claude/
