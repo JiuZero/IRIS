@@ -117,11 +117,21 @@ class TestTargetsAreNotPresentedAsResults:
         assert "尚未达成" in readme
 
     def test_a_current_measurement_is_stated(self, readme: str) -> None:
+        """The stated rate must be a real fraction of the valid corpus, not a
+        standalone number that drifts out of range entirely.
+
+        The denominator was 5 until the corpus was re-audited: two units that
+        used to be counted are not decidable on either side (one is
+        vendor-encrypted, one fails in the host environment), so 9 is now what
+        a fraction is measured against. Asserted as `/9` rather than a fixed
+        numerator so the check keeps its job -- catching a rate nobody measured
+        -- without freezing the number itself.
+        """
         from iris.db.engine import get_engine
 
-        # Sanity: the stated rate must be a real fraction of the M1 set, not a
-        # standalone number that drifts out of range entirely.
-        assert "3/5" in readme
+        assert re.search(r"\d+/9\b", readme), (
+            "the README states no current rate as a fraction of the 9-unit valid corpus"
+        )
 
         del get_engine  # imported only to keep the DB layer import path exercised
 

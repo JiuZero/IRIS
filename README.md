@@ -82,7 +82,7 @@ IRIS 不去承诺一个更高的成功率，它承诺**每一次失败都能被�
 | arm64 通道 | Alpine generic virt 内核 + 自建 initramfs，直跑厂商 `/sbin/init` |
 | 差异化 | **结构化失败画像 + 四层链路分层诊断**；可插拔规则引擎（YAML，零 Python）；摄像头媒体面（RTSP/ONVIF，规划中）；多设备虚拟组网（规划中） |
 | 当前实测 | 9 台有效语料：Web 可达 **4/9**，进入仿真 **8/9**（口径与依据见上文 ③，与 `docs/08-与FirmAE对比.md` §10 一致） |
-| 落地目标 | 精选评测集 Web 可达 ≥80%；长尾语料 ≥60%（对标 FirmPilot 2026 的 52.39%）。**这是目标**，当前是 4/9 |
+| 落地目标 | 精选评测集 Web 可达 ≥80%；长尾语料 ≥60%（对标 FirmPilot 2026 的 52.39%）。**尚未达成**：这是目标，不是当前成绩（当前 4/9） |
 
 ## 当前能力
 
@@ -93,7 +93,7 @@ IRIS 不去承诺一个更高的成功率，它承诺**每一次失败都能被�
 | L2 诊断 | **链路分层主动探测**：失败路径上实测 route / ARP / ICMP / service 四层，产出链路分层表并直接命名断点所在层（`link-no-route` / `link-no-arp` / `link-no-icmp` / `link-no-service`） | ✅ |
 | L3 规则 | YAML 启动修复规则引擎（`rules/`，6 条实证规则），可插拔、可回归，修复后带证据校验 | ✅ |
 | L4 交互 | RTSP/ONVIF 媒体面 | 🔬 未实现（M3 规划） |
-| L5 编排 | Typer CLI + FastAPI 服务（上传固件 → 提取 → 仿真一条 `/api/v1/pipeline` 打通）+ 值守监控（`emulate guardian-start`，规则+状态机，**不含模型调用**） | ✅ |
+| L5 编排 | Typer CLI + FastAPI 服务（上传固件 → 提取 → 仿真一条 `/api/v1/pipeline` 打通）+ 值守监控（`emulate guardian-start`，规则+状态机，**不含模型调用**，**LLM 尚未接入**） | ✅ |
 | L5 交付面 | API 鉴权（`IRIS_API_TOKEN`）、按调用方隔离的仿真归属、上传大小上限、运行状态落库（重启可见）、从 HTTP 直接上传固件或 rootfs 归档并启动 | ✅ |
 
 ### 设计边界（请按此判断可行性）
