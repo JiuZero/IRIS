@@ -5,17 +5,84 @@
 
 > 命名寓意：**I**oT **R**ehosting & **I**nterconnection **S**imulator；相机光圈（摄像头场景）、虹膜（看清设备内部）。
 
+## ① 痛点：固件重托管为什么难
+
+把一台真实路由器的固件包变成一台能在 QEMU 里访问的"虚拟设备"，学术界做了十年
+（Avatar → firmadyne → FirmAE → FirmPilot）。这条路线的瓶颈从来不是"跑不起来"，
+而是**跑不起来的时候说不清为什么**：
+
+- 一个二进制固件包进去，工具吐回一个 `HTTP 000`。它是没解包？内核没起？网卡没配 IP？
+  路由不通？服务没监听？端口转发没建立？——**同一个符号，六种完全不同的病因**。
+- 于是研究者的时间大量花在"重新手工走一遍工具内部的每一步"，而不是花在设备本身上。
+- 更糟的是失败会伪装成结论。本项目自己的 `docs/08-与FirmAE对比.md` 就记录了两次被推翻的
+  DIR-868L 结论：第一次记成"服务起、VLAN 路由不通"，第二次记成"宿主与 guest 不同子网"，
+  最终查明真实根因是宿主桥地址不在 guest 子网内被静默丢弃——**是宿主基础设施缺陷，
+  既不是固件缺陷，也不是 VLAN 问题**。
+
+**失败的不可解释，才是这条路线的真问题。**
+
+## ② IRIS 的答案：让失败可归因
+
+IRIS 不去承诺一个更高的成功率，它承诺**每一次失败都能被命名**。三件事：
+
+**1）分层失败画像（`failure_profile` + `result_kind` 封闭词表）。**
+旧的单一「HTTP 000」被拆成可以命名的断点：
+`link-no-route` / `link-no-arp` / `link-no-icmp` / `link-no-service` / `no-rootfs` /
+`unsupported-arch` / `arch-mismatch` / `GUEST_KERNEL_PANIC` 等。
+这个区分不是措辞偏好——`link-no-service` 要换固件或接受能力边界，
+`link-no-arp` 要修宿主内核，**下一步动作完全不同**
+（`src/iris/failures.py`）。
+
+**2）四层链路主动探测（route → ARP → ICMP → service）。**
+失败路径上 IRIS 会逐层实测并直接说出断在哪一层、哪一层没测到
+（`src/iris/emulate/linkprobe.py`）。诚实边界写进产出一行：只在失败路径上探测，
+成功路径不探测，因此成功运行没有这份表。
+
+**3）零 Python 的可插拔规则引擎。**
+启动修复规则是 YAML（`rules/`，6 条实证规则），可上传、可校验、可卸载、可回归，
+修复后带证据校验；引擎先完整校验再落盘，有告警即拒绝安装。修复决策由可审计的规则承担，
+每条修复都能被验证、被回滚、被回归测试覆盖（`src/iris/rules/engine.py`）。
+
+## ③ 证据：与 FirmAE 的同批实测
+
+不复述，直接给结论。完整逐台对照、失败根因、耗时口径与偏离声明见
+[`docs/08-与FirmAE对比.md`](docs/08-与FirmAE对比.md)（同批语料、两侧都是新跑的）。
+
+有效语料 **9 台**（10 台语料剔除 1 份 GPON 残包，该残包 ELF census 只有 `unk`，不是完整固件）。
+
+| 口径 | IRIS | FirmAE |
+|---|---|---|
+| 提取成功 | **8 / 9** | **5 / 9** |
+| 进入仿真 | **8 / 9** | **5 / 9** |
+| Web 可达 | **4 / 9** | **2 / 9** |
+
+逐台判定：**IRIS 占优 4 台**（Newifi D2 与 US TES7002 为完整占优；WRT1200AC、R7800 仅在提取层占优），
+**平 4 台**（Archer C7 v2、DIR-868L、G1V31si、i27V11br），**FirmAE 占优 0 台**，**无法判定 1 台**（RP3V30）。
+
+> **在 FirmAE 能够进入仿真的同一批语料上，IRIS 的 Web 可达数是它的两倍（4 : 2），
+> 且 FirmAE 没有一台 IRIS 做不到而它能做到。**
+
+三条必须说准的边界：
+
+- **i27V11br 是厂商加密 FIT（YZTenda）**，两侧都解不开。这是**语料属性**，不是任何一方的能力短板，
+  不计入能力比较。
+- **WRT1200AC / R7800 上 IRIS 的优势只在提取层**：仿真侧两侧都失败（FirmAE 连提取都没过），
+  所以**既不能算 IRIS 的优势，也不能算 IRIS 的劣势**。这两台的失败根因是**重宿主内核自身的 BUG**
+  （`validate_nla`，`nlattr.c:41`，`pc=c01abe18`，两台完全相同），不在 IRIS 代码内可修。
+- **架构判定**：US TES7002（aarch64）上 FirmAE 把它误判成 `armel` 后用 32 位内核跑出
+  kernel panic（`ENOEXEC`），IRIS 判对并拿到 HTTP 302。差别在 **IRIS 的判定链上多一个第二证据源**
+  （解压后 ELF census，639/640 命中 aarch64），**不是**"IRIS 的架构处理更严谨"——
+  IRIS 的 `inspect` 在同一份固件上也判错了（`docs/08` §9.1 如实记录，本轮未修）。
+
 ## 定位速览
 
 | 维度 | 内容 |
 |---|---|
-| 主干路线 | QEMU 全系统仿真 + 定制内核插桩 + libnvram 用户态仿真（FirmAE 已验证路线） |
-| arm64 通道 | Alpine generic virt 内核 + 自建 initramfs，直跑厂商 `/sbin/init`（FirmAE 无 aarch64 内核的补位方案） |
-| 差异化 | 结构化失败画像 + 可插拔规则引擎（YAML，零 Python）；摄像头媒体面（RTSP/ONVIF，规划中）；多设备虚拟组网（规划中） |
-| 当前实测 | 同语料 5 设备 Web 可达 **3/5**（`docs/eval-log.md` M1 表，逐条附日志指纹）。两个未通过均为宿主内核 `validate_nla` BUG，已定位、项目内不可修 |
-| 目标 | 精选评测集 Web 可达 ≥80%；长尾语料 ≥60%（对标 FirmPilot 2026 的 52.39%）。**尚未达成**，当前 60% |
-
-> 上表的目标行是目标，不是现状。数字全部取自 `docs/eval-log.md` 的实测记录，改动仿真链路后必须同步刷新该表。
+| 主干路线 | QEMU 全系统仿真 + 定制内核插桩 + libnvram 用户态仿真 |
+| arm64 通道 | Alpine generic virt 内核 + 自建 initramfs，直跑厂商 `/sbin/init` |
+| 差异化 | **结构化失败画像 + 四层链路分层诊断**；可插拔规则引擎（YAML，零 Python）；摄像头媒体面（RTSP/ONVIF，规划中）；多设备虚拟组网（规划中） |
+| 当前实测 | 9 台有效语料：Web 可达 **4/9**，进入仿真 **8/9**（口径与依据见上文 ③，与 `docs/08-与FirmAE对比.md` §10 一致） |
+| 落地目标 | 精选评测集 Web 可达 ≥80%；长尾语料 ≥60%（对标 FirmPilot 2026 的 52.39%）。**这是目标**，当前是 4/9 |
 
 ## 当前能力
 
@@ -29,12 +96,34 @@
 | L5 编排 | Typer CLI + FastAPI 服务（上传固件 → 提取 → 仿真一条 `/api/v1/pipeline` 打通）+ 值守监控（`emulate guardian-start`，规则+状态机，**不含模型调用**） | ✅ |
 | L5 交付面 | API 鉴权（`IRIS_API_TOKEN`）、按调用方隔离的仿真归属、上传大小上限、运行状态落库（重启可见）、从 HTTP 直接上传固件或 rootfs 归档并启动 | ✅ |
 
-### 能力边界（请按此判断可行性）
+### 设计边界（请按此判断可行性）
 
-- **LLM 尚未接入**：失败修复当前全部由 YAML 规则引擎完成，仓库内没有任何模型调用代码。`ai_guardian.py` 是正则 + 状态机的规则式值守，不含推理。
-- **固件镜像的解包格式单一**：从固件镜像自动剖分时只有 `squashfs` 可解。`ext4` / `cramfs` / `yaffs2` / `cpio` 会明确落到 `no-rootfs` 失败画像，而不是静默产出错误 rootfs。`JFFS2` 仅在 TendaW 容器内可解。`tar` **不是**固件镜像格式，但已提取 rootfs 的 tar 归档可以直接上传启动（`POST /api/v1/emulate/upload?kind=rootfs`），解包是保守的：拒绝越界路径、重锚软链、跳过逃逸或悬空链接并计数。
-- **网络拓扑单平面**：单 TAP + 单网桥 + 固定 VLAN 1，端口转发目标端口硬编码；无 `eth1` 及以上网卡，无无线（802.11）仿真。
-- **x86 语料不在仿真范围**。
+六条，每条一句话：**限制是什么 + 为什么这样取舍**。
+
+1. **arm64 采用通用内核通道直跑厂商 init**，与 MIPS/ARM32 的插桩通道在能力上不等价——
+   这是为了覆盖 FirmAE 无法处理的 aarch64 语料所做的通道取舍，代价是 arm64 下不提供
+   libnvram 与 console 劫持（依赖 nvram 的厂商服务在 arm64 下起不来）。
+2. **兜底刻意不注入外部 httpd**：注入会改变被测设备的真实行为，IRIS 只复用固件自带且已识别的
+   web 服务实现（`/opt/goahead/goahead` 与 `/usr/bin/boa`，`scripts/emulate/iris_net_fix.sh:659-688`），
+   因此"固件内没有 web 服务"这种情况 IRIS 兜不出来——这是能力边界，不是缺陷。
+3. **修复决策当前由可审计的规则引擎承担**：每条修复都可被验证、被回滚、被回归测试覆盖，
+   而不依赖不可复现的模型输出；仓库内没有任何模型调用代码（`ai_guardian.py` 是正则 + 状态机的
+   规则式值守）。AI 演进方向见交付 PPT 的"落地规划"页。
+4. **网络拓扑单平面、架构白名单有限**：单 TAP + 单网桥 + 固定 VLAN 1，端口转发目标端口硬编码，
+   无 `eth1` 及以上网卡、无无线（802.11）仿真；可仿真架构只有 `armel / mipsel / mipseb / arm64`，
+   **x86_64 语料不在仿真范围**（FirmAE 同样不支持，这一条两侧共有）。
+5. **固件镜像自动剖分只认 squashfs**：`ext4` / `cramfs` / `yaffs2` / `cpio` 会明确落到 `no-rootfs`
+   失败画像，而不是静默产出错误 rootfs；`tar` 不是固件镜像格式，但已提取 rootfs 的 tar 归档
+   可以直接上传启动（解包是保守的：拒绝越界路径、重锚软链、跳过逃逸或悬空链接并计数）。
+6. **链路分层探测只在失败路径上运行**：成功路径不探测，这是有意为之——只有需要解释失败时才付
+   探测的代价。连带两条已知细节：ARP 层在没有邻居表条目时无法区分"没有这个地址"与
+   "ARP 问过但没人应"，此时该层记 `unknown` 并在 verdict 里显式写出哪一层没测到；
+   四层状态与首个断点会落库，但每层原始探测文案不落库。
+
+> 其他机器可读的细节（如 `guest_has_ipv4()` 对 busybox ≥1.20 的 `inet` 输出误判、
+> `inspect` 与 `emulate` 的架构判定不一致）见
+> [`docs/08-与FirmAE对比.md`](docs/08-与FirmAE对比.md) §9「本轮新发现：**未修**的代码缺陷」——
+> 那些缺陷是**已知、已定位、如实记录**的，不做美化。
 
 ## 快速开始
 
@@ -71,9 +160,16 @@ curl -F "file=@firmware.bin" http://127.0.0.1:9000/api/v1/pipeline
 一条命令起工作台，浏览器打开即用，不需要另跑前端：
 
 ```bash
-cd web && npm install && npm run build   # 首次一次；已构建过可跳过
-iris web                                  # http://127.0.0.1:9000/
+cd web && npm install && npm run build:pkg   # 首次必须一次；已构建过可跳过
+iris web                                     # http://127.0.0.1:9000/
 ```
+
+> **⚠️ 首次运行必须先 `npm run build:pkg`，否则 `iris web` 打开是空白/503。**
+> 前端构建产物 `web/dist/` 与 `src/iris/web/dist/` 都被 `.gitignore` 的 `dist/` 规则排除，
+> **不随仓库分发**；而 `iris web` 实际服务的是 `src/iris/web/dist/`。
+> `build:pkg` = `tsc -b && vite build` + 把 `web/dist` 整体复制到 `src/iris/web/dist`，
+> 只跑 `npm run build` **不够**。工作台的发行版交付说明（`readme/README.md`）与
+> 一键脚本 `readme/setup.sh` / `setup.bat` 都把这一步写成必经步骤。
 
 工作台把四件事摆在同一屏：**仿真状态**（托管实例、历史运行、按架构与失败聚类统计）、
 **终端交互**（接入 guest 串口）、**网络连接**（四层链路 route/arp/icmp/service）、
@@ -225,7 +321,12 @@ python iris.py emulate run ./rootfs_out --arch mipsel --port 8080
 
 ## 已验证样例（M0/M1 评测集）
 
-下表为 **0.3.12 同批实测**（iid 6711–6715，`--timeout 300/240`），不是历史最优值：
+> **口径提示**：本节两张表是**分批次的逐台明细**（0.3.12 的 M0 语料与 0.3.13 的扩样批次），
+> 其中同一台固件在不同批次里超时上界不同，数字因此不同——引用时必须带上批次。
+> **对外统一口径只有一套**，见上文「③ 证据」：有效语料 9 台，
+> 提取成功与进入仿真 IRIS 8 / FirmAE 5，Web 可达 IRIS 4 / FirmAE 2。
+
+**0.3.12 同批实测**（iid 6711–6715，`--timeout 300/240`），不是历史最优值：
 
 | 固件 | arch | 结果 |
 |---|---|---|
@@ -288,7 +389,7 @@ python iris.py corpus eval --from-db --baseline iris-home/corpus/m0-report.json 
 
 - **Web 可达率**：分母含环境失败条目——用户依然没拿到设备。
 - **能力口径**：分母剔除环境失败条目——只衡量宿主健康时 IRIS 能做到什么。
-- **逐设备回归**：`3/5 → 4/5` 可能藏着一修一坏，比率相等时尤其如此，所以回归按设备点名。
+- **逐设备回归**：`4/9 → 5/9` 可能藏着一修一坏，比率相等时尤其如此，所以回归按设备点名。
 
 三条口径都不能靠「全部条目」当分母：清单里没声明期望的条目永远不进分母，
 未实测的条目记 `skipped`。`db_match` 声明与 `image` 表 filename 的对应关系，
@@ -332,22 +433,11 @@ IRIS/
 | [eval-log](docs/eval-log.md) | 评测集逐设备实测日志指纹 |
 | [10-AI值守与稳定性治理](docs/10-AI值守与稳定性治理.md) | TES7002 实战治理全过程：三类故障的证据链、根因、修复，以及 AI 值守能力设计 |
 | [11-免安装使用指南](docs/11-免安装使用指南.md) | 不做 pip 安装直接从源码运行；四种启动方式、命令速查、故障排查 |
+| [12-设计边界与技术限制](docs/12-设计边界与技术限制.md) | 六条设计边界的细节展开；已定位但**未修**的缺陷索引（含证据与位置） |
 
 ## 里程碑（详见 docs/01-开发规划.md）
 
 M0 技术验证 → M1 MVP 主干 → M2 规模化 → M3 交互与分析 → M4 智能环境恢复 → M5 产品化
-
-## 已知限制
-
-- **arm64 通道无 libnvram / console 劫持**：FirmAE 未发布 aarch64 插桩内核，依赖 nvram 的厂商服务在 arm64 下起不来（属通道设计取舍，非缺陷）；
-- **厂商网络模型强绑定真实存储**：如 Tenda configd 依赖 `ubi0:ubi_Config` 挂载 `/var/config`，仿真环境无该分区时 eth0 不获址，由 `iris_net_fix` 兜底（补 IP、放行 iptables、telnetd:7002、goahead/boa Web 拉起），TES7002 实测由此拿到可达 Web；
-- **QEMU CPU 型号**：厂商 aarch64 二进制常用 ARMv8.3 指针认证（PAC），arm64 通道必须 `-cpu max`，否则 SIGILL；
-- x86 语料不在仿真范围（当前仅 mipsel/mipseb/armel/arm64）。
-- **失败知识已读回，但只到"可读"为止**：`iris db cards` 按失败种类聚合 `failure_profile`，读出该类失败出现在多少次 run、哪些镜像、哪些架构、最后一次何时、以及这些 run 上实际触发过哪些 L3 规则；`--promote-only` 只留最近若干次失败 run 里仍在出现的种类，即"还需要写规则的清单"（`network-fallback-ok` 这类信息类被排除，它表示兜底**正常工作**）。**不会**据此自动施加修复：一条规则有效的唯一证据是活体运行上的 `post_action_verify`，被记住的成功不是。剩余限制：`repair_action` 此前有表无写入路径（现已由 `emulate_firmware` 落库），但 `RuleReport.touched_files` 不落库——`prepare_from_firmware` 只保留命中的 rule id，因此无法回答"这次修补动了几处"；卡片上的 `recovered` 目前恒为 0，因为历史上没有任何成功 run 带过失败行。
-- **链路已主动测量，但仅在失败路径上**：`iris.emulate.linkprobe` 会分层实测 route / ARP / ICMP / service 并产出链路分层表，且只在 Web 超时的失败路径上运行——成功路径不做探测。ARP 层在没有邻居表条目时**无法区分「没有这个地址」与「ARP 问过但没人应」**，此时该层记 `unknown`，verdict 的 detail 会显式写出「哪一层没测到」。
-- **已能直接读写 guest 文件系统，但值守还用不上**：`iris guest ls/get/put` 在特权容器内对 guest 镜像做 loop 挂载（与 `make_image.sh` 构建期同一操作），`guest put` 注入的代码会在下次启动被 guest 执行（2026-10-04 DIR-868L 实测：串口出现注入的 `IRIS-REPAIR-PROOF`，Web 仍 HTTP 200）。两条边界：看到的是**磁盘上的文件**，不是运行中 guest 的视图（内存缓冲、被挂载覆盖的路径都不算）；访问状态盘要求 **QEMU 已停止**，而值守的动作都发生在它运行时，所以值守侧 `n=0` 依旧读作 UNKNOWN。详见 `docs/10-AI值守与稳定性治理.md` §6.4 与 §9。
-- **运行期写入不再丢弃，重启也复现首启的宿主观测**：`run_qemu.sh` 改用持久的 `state.raw`（出厂镜像 `image.raw` 保持不动，可随时 `iris guest reset <iid>` 回到出厂状态），guest 与修补的写入能跨启动保留。首启从串口认出 guest 自己的子网后，那个地址会被写进 `/work/scratch/<iid>/guest_ip`（与 `arch` 标记同目录），`run_qemu.sh` 重跑时优先读它，`WEB_SERVER_RESTART` 因此不再退回 `192.168.1.254/16` 的默认桥地址（2026-10-04 DIR-868L 实测：同一容器、同样三参数重跑，有标记时桥为 `192.168.0.254/16` 且 `HTTP 200`，把标记挪走作对照则是 `192.168.1.254/16` 且 `HTTP 000`）。标记里的地址不是四段十进制就退回默认而不是让启动失败；`make_image.sh` 重烤镜像时会连同 `state.raw` 一起删掉它。
-- **语料规模**：当前 5 个 M1 设备，离任何可承诺的成功率都还很远。
 
 ## 协作规范（强制）
 

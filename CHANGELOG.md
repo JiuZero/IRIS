@@ -4,7 +4,43 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布] - 2026-10-06（参赛交付轮）
+
+本轮不涉及功能代码，全部是参赛交付包所需的素材、品牌与文档改动。
+
+### 变更
+
+- **Web 品牌标识**（`web/public/logo.png`、`web/public/favicon.png`、
+  `web/index.html`、`web/src/layout/Header.tsx`）。源图 `logo.png` 为 1535×1535 RGBA
+  （1.9 MB），不适合直接引用；本次压缩为 256×256（16 KB，用于 Header 与 og:image）
+  与 64×64（3 KB，用于 favicon）两版，量化后平均 RGB 偏差 2.24/255，肉眼不可辨。
+  Header 第 31 行的 lucide `Server` 图标替换为 `<img src="/logo.png" alt="IRIS" />`
+  （`h-6 w-6`），`Server` 从 import 中移除以满足 `noUnusedLocals`；
+  `index.html` 补 favicon / apple-touch-icon / og:title / og:description / og:image。
+  **注意**：`web/dist` 与 `src/iris/web/dist` 均为构建产物且被 `.gitignore` 排除，
+  改动需 `cd web && npm run build:pkg` 回灌后才对 `iris web` 生效。
+- **README 重写为参赛叙事**：新增「① 痛点 / ② IRIS 的答案 / ③ 证据」三段主线，
+  把失败可归因前置；「已知限制」整节移出主叙事，改写为「设计边界」六条
+  （放在能力矩阵之后、快速开始之前），细节展开落到新增的
+  [`docs/12-设计边界与技术限制.md`](docs/12-设计边界与技术限制.md)。
+- **统一对外数据口径**：删除「Web 可达 3/5、目标 ≥80%、当前 60%」这类互相打架的旧口径，
+  全文只保留一套——有效语料 9 台，提取成功与进入仿真 IRIS 8 / FirmAE 5，
+  Web 可达 IRIS 4 / FirmAE 2；逐台判定 IRIS 占优 4、平 4、FirmAE 占优 0、无法判定 1。
+  目标（≥80% / ≥60%）从「现状」旁边移到「落地目标」，并明确标注「这是目标」。
+- **显著化前端构建前置步骤**：README 的「Web 工作台」段加入警告块，说明
+  `npm run build` 不够、必须 `npm run build:pkg`，否则 `iris web` 返回 503。
+- **`.gitignore` 补 `web/vite.config.ts.timestamp-*.mjs`**：vite 读配置时的临时产物，
+  异常退出会残留，属噪声，不入库。
+
+### 本轮实跑验证（供交付证据留档）
+
+| iid | 固件 | arch | 结果 | 备注 |
+|---|---|---|---|---|
+| 6630 | D-Link DIR-868L revB | armel | ✅ HTTP 200 @50.2s | 命中规则 `dev-extended-nodes`；宿主在 guest 子网内重新落点后建立转发 |
+| 512 | Tenda G1V31si | mipsel | ❌ `link-no-service`（311.1s） | ping 通、web 不通；串口报 `no web server fallback available`，与 `docs/08` §3 结论一致 |
+
 ## [0.3.25] - 2026-10-06
+
 
 从 21 份实跑日志里归纳出的 P0/P1/P2/P3 清单一次性全量落地。核心是**一处把
 240s 超时归咎于端口的假结论**：iid 6715 的 guest 地址恰好等于代码里的默认假设，
