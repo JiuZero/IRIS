@@ -63,6 +63,13 @@ interface UiState {
   logPanelOpen: boolean
   /** null means "follow the route". Set by the command palette and the header. */
   pinnedInstance: number | null
+  /** Whether the launch window is open. Held here rather than in the shell's own
+   *  state because the three things that open it -- the rail's create button, the
+   *  command palette, and the records page's empty state -- are not in one subtree,
+   *  and the alternative is a callback threaded through three components to reach
+   *  one boolean. Not persisted: a window that reopens on reload would hide the page
+   *  somebody was reading. */
+  launchOpen: boolean
   setPanelWidth: (name: PanelName, value: number) => void
   resetPanelWidth: (name: PanelName) => void
   toggleSidebar: () => void
@@ -70,6 +77,8 @@ interface UiState {
   toggleLogPanel: () => void
   setLogPanelOpen: (open: boolean) => void
   setPinnedInstance: (iid: number | null) => void
+  openLaunch: () => void
+  closeLaunch: () => void
 }
 
 export const useUiStore = create<UiState>((set, get) => ({
@@ -80,6 +89,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   inspectorOpen: true,
   logPanelOpen: false,
   pinnedInstance: null,
+  launchOpen: false,
 
   setPanelWidth: (name, value) => {
     const bounds = PANEL_BOUNDS[name]
@@ -103,6 +113,8 @@ export const useUiStore = create<UiState>((set, get) => ({
   toggleLogPanel: () => set((state) => ({ logPanelOpen: !state.logPanelOpen })),
   setLogPanelOpen: (open) => set({ logPanelOpen: open }),
   setPinnedInstance: (iid) => set({ pinnedInstance: iid }),
+  openLaunch: () => set({ launchOpen: true }),
+  closeLaunch: () => set({ launchOpen: false }),
 }))
 
 /** The viewport band a layout decision is made in. Derived once per resize rather

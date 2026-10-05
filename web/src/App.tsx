@@ -6,14 +6,16 @@ import { Shell } from './layout/Shell'
 import { Dashboard } from './pages/Dashboard'
 import { InstanceDetail } from './pages/InstanceDetail'
 import { Instances } from './pages/Instances'
+import { Plugins } from './pages/Plugins'
 import { Settings } from './pages/Settings'
 import { TerminalPage } from './pages/TerminalPage'
+import { WorkPolicy } from './pages/WorkPolicy'
 import { applyAppearance, useAppearanceStore } from './store/appearance'
 
 /**
  * The routes.
  *
- * Five screens, and the terminal is a *separate* route from the instance detail
+ * Seven screens, and the terminal is a *separate* route from the instance detail
  * rather than a tab inside it. That is the one place this layout departs from a
  * plain tabbed page, and the reason is the shortcut: Ctrl/Cmd+` has to land on a
  * full-width terminal from anywhere, including from another instance's page. A tab
@@ -49,6 +51,8 @@ export function App() {
           <Route path="instances" element={<Instances />} />
           <Route path="instances/:iid" element={<InstanceDetail />} />
           <Route path="instances/:iid/terminal" element={<TerminalPage />} />
+          <Route path="plugins" element={<Plugins />} />
+          <Route path="work-policy" element={<WorkPolicy />} />
           <Route path="settings" element={<Settings />} />
           {/* A typo in a path should land on the dashboard, not on a blank page with
               no way back except the browser button. */}

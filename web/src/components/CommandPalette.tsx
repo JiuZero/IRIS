@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
+  Boxes,
   Cpu,
   FileDown,
   Gauge,
+  ListChecks,
   Palette,
   Plus,
   Search,
@@ -17,6 +19,7 @@ import { api } from '../lib/api'
 import { classNames } from '../lib/format'
 import { useEmulations } from '../hooks/queries'
 import { DENSITIES, THEMES, useAppearanceStore } from '../store/appearance'
+import { useUiStore } from '../store/ui'
 
 interface Command {
   id: string
@@ -46,6 +49,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
   const [notice, setNotice] = useState<string | null>(null)
   const navigate = useNavigate()
   const emulations = useEmulations()
+  const openLaunch = useUiStore((state) => state.openLaunch)
   const theme = useAppearanceStore((state) => state.theme)
   const density = useAppearanceStore((state) => state.density)
   const setTheme = useAppearanceStore((state) => state.setTheme)
@@ -61,10 +65,23 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
     const list: Command[] = [
       { id: 'home', label: '总览', group: '导航', shortcut: 'G 然后 H', icon: <Gauge className="h-3.5 w-3.5" />, run: go('/') },
       { id: 'instances', label: '实例记录', group: '导航', icon: <Cpu className="h-3.5 w-3.5" />, run: go('/instances') },
-      { id: 'settings', label: '设置与能力矩阵', group: '导航', icon: <SettingsIcon className="h-3.5 w-3.5" />, run: go('/settings') },
-      // First among the actions, because it is the one that does the work: the
-      // launch form lives on the dashboard, not on the records page.
-      { id: 'launch', label: '新建实例', hint: '三种固件来源；接口等启动结束才返回', group: '动作', icon: <Plus className="h-3.5 w-3.5" />, run: go('/#launch') },
+      { id: 'plugins', label: '插件中心', group: '导航', icon: <Boxes className="h-3.5 w-3.5" />, run: go('/plugins') },
+      { id: 'work-policy', label: '工作策略', group: '导航', icon: <ListChecks className="h-3.5 w-3.5" />, run: go('/work-policy') },
+      { id: 'settings', label: '设置与主题', group: '导航', icon: <SettingsIcon className="h-3.5 w-3.5" />, run: go('/settings') },
+      // First among the actions, because it is the one that does the work. It opens a
+      // window rather than navigating: the form is not on any page any more, so a
+      // navigation would have nothing to show.
+      {
+        id: 'launch',
+        label: '新建实例',
+        hint: '三种固件来源；接口等启动结束才返回',
+        group: '动作',
+        icon: <Plus className="h-3.5 w-3.5" />,
+        run: () => {
+          openLaunch()
+          onClose()
+        },
+      },
     ]
 
     // Appearance, cycled rather than listed twelve times: the picker on the settings
@@ -139,7 +156,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
       },
     })
     return list
-  }, [density, emulations.data, navigate, onClose, setDensity, setTheme, theme])
+  }, [density, emulations.data, navigate, onClose, openLaunch, setDensity, setTheme, theme])
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase()

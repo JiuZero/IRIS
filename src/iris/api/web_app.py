@@ -182,6 +182,32 @@ def _add_api_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=404, detail=f"run {run_id} not found")
         return detail
 
+    @app.delete("/api/v1/runs/{run_id}")
+    async def remove_run(run_id: int, caller: Caller) -> dict:
+        """Erase one recorded run.
+
+        404 for an id that is not there, which is deliberately the same answer the
+        emulate routes give for "exists but is not yours": otherwise this route
+        would turn into an oracle for probing which run ids exist.
+        """
+        if not web_data.delete_run_record(run_id):
+            raise HTTPException(status_code=404, detail=f"run {run_id} not found")
+        return {"removed": 1, "run_id": run_id}
+
+    @app.delete("/api/v1/runs")
+    async def remove_runs(caller: Caller) -> dict:
+        """Erase the whole recorded history.
+
+        Counted rather than a boolean, because "there was nothing to remove" and
+        "the delete failed" are different states and a caller cannot tell them
+        apart from a bare success code.
+        """
+        return web_data.clear_run_records()
+
+    @app.get("/api/v1/rules")
+    async def read_rules(_caller: Caller) -> dict:
+        return web_data.rule_plugins()
+
     @app.get("/api/v1/console/{iid}")
     async def read_console(iid: int, _caller: Caller, start_line: int = Query(0, ge=0),
                            max_lines: int = Query(2000, ge=1, le=20000)) -> dict:

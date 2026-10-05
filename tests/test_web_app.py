@@ -304,6 +304,162 @@ class TestDashboardRoutes:
         assert body.json()["sampled"] is False
 
 
+# --------------------------------------------------------------- erasing history
+
+
+def _seed_run(iid: int, *, web: bool, profile: bool = True) -> int:
+    """One recorded run, with the child rows a failed run really leaves behind.
+
+    The children are what makes the delete worth testing: they are declared
+    ``ON DELETE CASCADE`` but SQLite never enforces that here, so an erase that
+    forgets them leaves rows nothing points at any more.
+    """
+    from iris.db.models import EmulationRun, FailureProfile, RepairAction
+
+    with web_app._session() as session:
+        row = EmulationRun(iid=iid, arch="mipsel", web_reachable=web)
+        session.add(row)
+        session.flush()
+        if profile:
+            session.add(FailureProfile(run_id=row.id, stage="boot",
+                                       signal="reboot_loop", detail={"n": 2}))
+            session.add(RepairAction(run_id=row.id, source="rule",
+                                     rule_id="generic-diag-crash-fix", applied=True))
+        session.commit()
+        return row.id
+
+
+class TestDeletingHistory:
+    def test_one_run_is_erased_and_its_children_with_it(self, client, db) -> None:
+        run_id = _seed_run(7101, web=False)
+
+        body = client.delete(f"/api/v1/runs/{run_id}")
+
+        assert body.status_code == 200
+        assert body.json() == {"removed": 1, "run_id": run_id}
+        assert client.get(f"/api/v1/runs/{run_id}").status_code == 404
+
+    def test_the_erased_run_stops_counting_as_a_failure(self, client, db) -> None:
+        """Stated as the dashboard would show it. An orphan profile row keeps
+        inflating the histogram long after the run is gone, and nothing else in this
+        file would notice that."""
+        run_id = _seed_run(7102, web=False)
+        before = client.get("/api/v1/stats").json()["failures"]
+        assert before == [{"stage": "boot", "kind": "reboot_loop", "count": 1}]
+
+        client.delete(f"/api/v1/runs/{run_id}")
+
+        stats = client.get("/api/v1/stats").json()
+        assert stats["failures"] == []
+        assert stats["total"] == 0
+
+    def test_a_run_id_that_is_not_there_is_a_404(self, client, db) -> None:
+        """The same answer the emulate routes give for "exists but is not yours", so
+        this route is not a way to probe which run ids exist."""
+        assert client.delete("/api/v1/runs/99999").status_code == 404
+
+    def test_both_delete_routes_carry_the_caller_dependency(self, app) -> None:
+        """Asserted on the route table, because the test app configures no token:
+        a dropped dependency would still serve every request in this file open."""
+        from fastapi.routing import APIRoute
+
+        deletes = [r for r in app.routes
+                   if isinstance(r, APIRoute) and r.path.startswith("/api/v1/runs")
+                   and "DELETE" in r.methods]
+        assert {r.path for r in deletes} == {"/api/v1/runs", "/api/v1/runs/{run_id}"}
+        assert all(r.dependant.dependencies for r in deletes)
+
+    def test_clearing_the_history_reports_how_much_it_removed(self, client, db) -> None:
+        _seed_run(7103, web=False)
+        _seed_run(7104, web=True)
+
+        body = client.delete("/api/v1/runs")
+
+        assert body.status_code == 200
+        assert body.json() == {"removed": 2}
+        assert client.get("/api/v1/stats").json()["total"] == 0
+
+    def test_clearing_an_empty_history_reports_zero(self, client, db) -> None:
+        """Zero is an answer, not an error: there was simply nothing recorded yet."""
+        assert client.delete("/api/v1/runs").json() == {"removed": 0}
+
+    def test_the_firmware_corpus_survives_the_cleanup(self, client, db) -> None:
+        """History is what the user threw away; the registered firmware is what the
+        evaluation set is built from, so the two must not be deletable together."""
+        from iris.db.models import Image
+
+        with web_app._session() as session:
+            session.add(Image(filename="kept.bin", hash="a" * 64, arch="mipsel"))
+            session.commit()
+        _seed_run(7105, web=False)
+
+        client.delete("/api/v1/runs")
+
+        with web_app._session() as session:
+            assert session.query(Image).count() == 1
+
+
+class TestRulePlugins:
+    def test_the_list_is_the_rules_on_disk(self, client, db) -> None:
+        """Sourced from ``rules/`` through the engine's own loader, so a rule added
+        there appears without a second inventory to keep in step."""
+        body = client.get("/api/v1/rules").json()
+
+        assert body["items"], ("the repository ships rule plugins, so an empty list "
+                               "means the route is reading the wrong directory")
+        assert all(item["id"] and item["description"] and item["stage"]
+                   for item in body["items"])
+
+    def test_every_plugin_names_a_stage_the_failure_profiles_use(self, client, db) -> None:
+        """``Stage`` is the vocabulary of the recorded profiles; a rule tagged with a
+        stage nothing else in the system uses would be untriageable."""
+        from iris.failures import STAGES
+
+        stages = {str(stage) for stage in STAGES}
+        body = client.get("/api/v1/rules").json()
+        assert {item["stage"] for item in body["items"]} <= stages
+
+    def test_the_tallies_follow_the_repair_ledger(self, client, db) -> None:
+        """Counted per ``rule_id`` off the real rules on disk, so the assertion
+        cannot drift from whatever happens to sort first in ``rules/``."""
+        from iris.db.models import RepairAction
+
+        rule_id = "generic-diag-crash-fix"
+        assert rule_id in {item["id"] for item in client.get("/api/v1/rules").json()["items"]}
+        run_id = _seed_run(7106, web=False)
+        with web_app._session() as session:
+            session.add(RepairAction(run_id=run_id, source="rule", rule_id=rule_id,
+                                     applied=False, promoted=True))
+            session.commit()
+
+        item = next(i for i in client.get("/api/v1/rules").json()["items"]
+                    if i["id"] == rule_id)
+
+        assert item["recorded"] == 2
+        assert item["applied"] == 1
+        assert item["promoted"] == 1
+
+    def test_the_conditions_are_summarised_and_not_quoted(self, client, db) -> None:
+        """A regex or a path glob is the vendor's file layout; a plugin list is not
+        where a reader of it needs that."""
+        item = client.get("/api/v1/rules").json()["items"][0]
+
+        assert item["detect"], "every shipped rule detects something"
+        assert all(entry.islower() and "(" not in entry for entry in item["detect"])
+
+    def test_an_unreadable_rule_directory_shows_nothing_rather_than_failing(
+            self, client, db, monkeypatch, tmp_path) -> None:
+        """A wheel install has no ``rules/`` beside it, and a plugin centre that 500s
+        takes a page down over a missing optional directory."""
+        monkeypatch.setattr(web_data, "_rules_dir", lambda: tmp_path / "absent")
+
+        resp = client.get("/api/v1/rules")
+
+        assert resp.status_code == 200
+        assert resp.json()["items"] == []
+        assert "absent" in resp.json()["source"]
+
+
 def resp_text(client) -> str:
     return client.get("/api/v1/config").text
 

@@ -25,10 +25,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from iris.db.models import EmulationRun, FailureProfile, Image
+from iris.db.models import EmulationRun, FailureProfile, Image, RepairAction
 from iris.failures import Failure, FailureKind, kind_of, stage_of
 from iris.log import get_logger
 
@@ -37,6 +37,8 @@ logger = get_logger(__name__)
 __all__ = [
     "RunStats",
     "attribute_to_image",
+    "clear_runs",
+    "delete_run",
     "failure_histogram",
     "record_run",
     "run_stats",
@@ -153,6 +155,45 @@ def record_run(
         ))
     session.commit()
     return run.id
+
+
+def delete_run(session: Session, run_id: int) -> bool:
+    """Drop one recorded run and everything filed under it. ``False`` if absent.
+
+    The children go first on purpose. Both ``failure_profile`` and
+    ``repair_action`` declare ``ondelete="CASCADE"``, but SQLite does not enforce
+    foreign keys unless ``PRAGMA foreign_keys=ON`` is issued on every connection --
+    this engine issues none. So the CASCADE is a declaration, not a guarantee, and
+    relying on it would leave rows that no longer reference anything.
+
+    That is not cosmetic: :func:`run_stats` counts *every* ``failure_profile`` row
+    to build the failure histogram, so an orphan would keep inflating the failure
+    counts on the dashboard long after its run was gone.
+    """
+    run = session.get(EmulationRun, run_id)
+    if run is None:
+        return False
+    session.execute(delete(FailureProfile).where(FailureProfile.run_id == run_id))
+    session.execute(delete(RepairAction).where(RepairAction.run_id == run_id))
+    session.delete(run)
+    session.commit()
+    return True
+
+
+def clear_runs(session: Session) -> int:
+    """Drop every recorded run, returning how many were removed.
+
+    Children first, for the same reason as :func:`delete_run`. An empty table is a
+    legitimate outcome and returns ``0`` -- a reader has to be able to tell "there
+    was nothing to delete" from "the delete failed", which are different states
+    that would otherwise both look like a no-op.
+    """
+    removed = session.scalar(select(func.count()).select_from(EmulationRun)) or 0
+    session.execute(delete(FailureProfile))
+    session.execute(delete(RepairAction))
+    session.execute(delete(EmulationRun))
+    session.commit()
+    return int(removed)
 
 
 def run_stats(session: Session) -> RunStats:

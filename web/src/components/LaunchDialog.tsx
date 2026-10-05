@@ -3,7 +3,8 @@ import { Link } from 'react-router-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Play } from 'lucide-react'
 
-import { Badge, Button, FileInput, Panel, Segmented, Select, TextInput } from './ui'
+import { Modal } from './Modal'
+import { Badge, Button, FileInput, Segmented, Select, TextInput } from './ui'
 import { api } from '../lib/api'
 import { formatBytes, seconds } from '../lib/format'
 import { useFirmware } from '../hooks/queries'
@@ -18,8 +19,7 @@ type LaunchOutcome = EmulateResponse | UploadLaunchResponse
 type LaunchSource = 'ready' | 'rootfs-archive' | 'firmware'
 
 /**
- * Start an emulation from the page, from whichever of the three places the
- * firmware actually happens to be.
+ * Start an emulation, in a window over whatever page you happened to be on.
  *
  * The source picker exists because "启动一次仿真" was only ever reachable for a
  * rootfs that `iris extract` had already written to the staging directory. Anyone
@@ -34,14 +34,15 @@ type LaunchSource = 'ready' | 'rootfs-archive' | 'firmware'
  * (tens of seconds to a few minutes on this corpus). A progress bar over a request
  * that reports nothing would be a lie with a percentage on it.
  *
- * It lives on the dashboard rather than on `/instances` because that page's one
- * job is to answer "what has this service run, and what happened to it" -- a table
- * of records. A creation form there competes with two tables for the top of the
- * screen and pushes the records below the fold; here it sits under the environment
- * reading and above them, which is where the question "can I run something, and on
- * what" belongs.
+ * It is a window rather than a panel on the dashboard because launching does not
+ * need the dashboard: the decision is "which firmware, which port", and both are
+ * knowable from any screen. A form pinned to one page means the people on the
+ * other four have to go somewhere first, and the fastest path to the terminal they
+ * already left is not via the overview. The verdict stays in the window rather than
+ * closing on success -- a launch that answers "Web 不可达, link-no-arp" is exactly
+ * the answer somebody needs to read before moving on.
  */
-export function LaunchPanel() {
+export function LaunchDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const firmware = useFirmware()
   const client = useQueryClient()
   const [source, setSource] = useState<LaunchSource>('ready')
@@ -75,7 +76,7 @@ export function LaunchPanel() {
       }
       const file = source === 'rootfs-archive' ? archive : image
       if (!file) throw new Error(source === 'rootfs-archive' ? '请先选择一个 rootfs 归档' : '请先选择一个固件镜像')
-      // `kind` is stated rather than left to `auto` so the panel's choice is the
+      // `kind` is stated rather than left to `auto` so the window's choice is the
       // request's choice; a mislabelled tar then fails as a firmware image with a
       // message about the format instead of quietly extracting to the wrong tree.
       return api.uploadLaunch(file, {
@@ -98,21 +99,34 @@ export function LaunchPanel() {
   const ready = source === 'ready' ? Boolean(selected) : Boolean(file)
 
   return (
-    <Panel
+    <Modal
+      open={open}
       title="新建实例"
       subtitle="来源可选已提取的 rootfs、rootfs 归档或厂商固件镜像；接口会等启动过程结束才返回，通常需要数十秒到数分钟"
-      // The anchor the sidebar's "新建实例" button jumps to. It is a real `id` on
-      // the panel, so `/#launch` works from a cold load and from an in-app
-      // navigation alike.
-      id="launch"
-      className="scroll-mt-4"
-      actions={
-        <Badge tone={start.isPending ? 'iris' : 'neutral'}>
-          {start.isPending ? `已等待 ${elapsed}s` : '空闲'}
-        </Badge>
+      onClose={onClose}
+      footer={
+        <>
+          <Badge tone={start.isPending ? 'iris' : 'neutral'}>
+            {start.isPending ? `已等待 ${elapsed}s` : '空闲'}
+          </Badge>
+          <div className="ml-auto flex items-center gap-2">
+            <Button variant="ghost" onClick={onClose}>
+              关闭
+            </Button>
+            <Button
+              variant="primary"
+              disabled={start.isPending || !ready}
+              onClick={() => start.mutate()}
+              title="启动（接口会阻塞到仿真结束）"
+            >
+              <Play className="h-3.5 w-3.5" aria-hidden="true" />
+              {start.isPending ? '启动中…' : '启动'}
+            </Button>
+          </div>
+        </>
       }
     >
-      <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-4">
         <Segmented<LaunchSource>
           label="固件来源"
           value={source}
@@ -132,8 +146,7 @@ export function LaunchPanel() {
 
         {/* One row, one baseline: every control is `h-8` inside a `flex flex-col`,
             so `items-end` aligns the boxes themselves rather than the text inside
-            them, and the primary button sits on the same line as the fields it
-            submits. */}
+            them, and the port sits next to the fields that change what it does. */}
         <div className="flex flex-wrap items-end gap-2">
           {source === 'ready' ? (
             <Select
@@ -198,36 +211,27 @@ export function LaunchPanel() {
             onChange={(event) => setTimeoutValue(event.target.value)}
             className="w-32"
           />
-          <Button
-            variant="primary"
-            disabled={start.isPending || !ready}
-            onClick={() => start.mutate()}
-            title="启动（接口会阻塞到仿真结束）"
-          >
-            <Play className="h-3.5 w-3.5" aria-hidden="true" />
-            {start.isPending ? '启动中…' : '启动'}
-          </Button>
         </div>
-      </div>
 
-      {start.isError && (
-        <p className="mt-2 text-2xs text-danger" role="alert">
-          启动失败：{(start.error as Error).message}
-        </p>
-      )}
-      {lastResult && <LaunchOutcomeRow result={lastResult} />}
-    </Panel>
+        {start.isError && (
+          <p className="text-2xs text-danger" role="alert">
+            启动失败：{(start.error as Error).message}
+          </p>
+        )}
+        {lastResult && <LaunchOutcome result={lastResult} />}
+      </div>
+    </Modal>
   )
 }
 
-/** What the page shows after a launch: the boot verdict, plus -- for an upload --
+/** What the window shows after a launch: the boot verdict, plus -- for an upload --
  *  where the input came from and what the unpack did. The upload extras are not
  *  decoration: a skipped symlink is the first thing to look at when a guest that
  *  came out of a tar will not boot. */
-function LaunchOutcomeRow({ result }: { result: LaunchOutcome }) {
+function LaunchOutcome({ result }: { result: LaunchOutcome }) {
   const upload = 'source' in result ? result : null
   return (
-    <div className="mt-3 flex flex-col gap-2 border-t border-surface-border pt-2 text-2xs">
+    <div className="flex flex-col gap-2 border-t border-surface-border pt-3 text-2xs">
       <div className="flex flex-wrap items-center gap-2">
         <Badge tone={result.web_ok ? 'success' : 'danger'}>{result.web_ok ? 'Web 可达' : 'Web 不可达'}</Badge>
         {upload && <Badge tone="violet">{upload.source === 'rootfs' ? 'rootfs 归档' : '厂商固件'}</Badge>}

@@ -1,13 +1,26 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query'
-import { FileDown, Plus, RefreshCw, Square, Terminal as TerminalIcon } from 'lucide-react'
+import { AlertTriangle, Eraser, FileDown, Plus, RefreshCw, Square, Terminal as TerminalIcon, Trash2 } from 'lucide-react'
 
-import { Badge, Button, EmptyState, ErrorState, Panel, Select, Skeleton, StatusDot, TextInput } from '../components/ui'
+import { Modal } from '../components/Modal'
+import { RunRecord } from '../components/RunRecord'
+import {
+  Badge,
+  Button,
+  EmptyState,
+  ErrorState,
+  Panel,
+  Select,
+  Skeleton,
+  StatusDot,
+  TextInput,
+} from '../components/ui'
 import { api } from '../lib/api'
 import { classNames, DASH, failureLabel, seconds, shortDateTime } from '../lib/format'
 import { useEmulations } from '../hooks/queries'
-import type { RunsPage } from '../lib/types'
+import { useUiStore } from '../store/ui'
+import type { RunsPage, RunItem } from '../lib/types'
 
 const PAGE_SIZE = 20
 
@@ -20,10 +33,13 @@ const PAGE_SIZE = 20
  * only ever grows. Mixing them into one list would mean a row's meaning depends on
  * where you looked.
  *
- * Nothing here creates an instance. Creating one is a launch -- three sources of
- * firmware, a port, a timeout, and a boot that takes tens of seconds -- and it
- * belongs on the dashboard next to the environment reading that decides whether a
- * launch is a good idea right now. A page of records is for reading records.
+ * A row is also the entry to that run's evidence. The table answers "what happened",
+ * which is five columns and a verdict badge; everything that explains *why* -- the
+ * four-layer profile, the failure rows, the repair ledger -- is one window away,
+ * because a summary you cannot open is a claim you cannot check. And history has to
+ * be erasable: a corpus that has been re-run sixty times on one image makes every
+ * cumulative statistic unreadable, so there is a per-row delete and a bulk clear,
+ * both behind a confirmation that says how much is about to go.
  */
 export function Instances() {
   const emulations = useEmulations()
@@ -31,6 +47,7 @@ export function Instances() {
   const [kind, setKind] = useState('')
   const [query, setQuery] = useState('')
   const [page, setPage] = useState(0)
+  const openLaunch = useUiStore((state) => state.openLaunch)
 
   const history = useQuery({
     queryKey: ['runs', arch, kind, query, page],
@@ -45,7 +62,7 @@ export function Instances() {
 
   return (
     <div className="flex flex-col gap-4 p-4">
-      <ActiveTable query={emulations} />
+      <ActiveTable query={emulations} onLaunch={openLaunch} />
       <HistoryTable
         arch={arch}
         kind={kind}
@@ -65,7 +82,13 @@ export function Instances() {
   )
 }
 
-function ActiveTable({ query }: { query: ReturnType<typeof useEmulations> }) {
+function ActiveTable({
+  query,
+  onLaunch,
+}: {
+  query: ReturnType<typeof useEmulations>
+  onLaunch: () => void
+}) {
   const client = useQueryClient()
   const stop = useMutation({
     mutationFn: (iid: number) => api.stopEmulation(iid),
@@ -97,12 +120,10 @@ function ActiveTable({ query }: { query: ReturnType<typeof useEmulations> }) {
           title="当前没有运行中的实例"
           detail="命令行启动的实例不受页面管理；本页只列出本服务托管的那些"
           action={
-            <Link to="/#launch">
-              <Button size="sm" variant="outline">
-                <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-                去总览页新建实例
-              </Button>
-            </Link>
+            <Button size="sm" variant="outline" onClick={onLaunch}>
+              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+              新建实例
+            </Button>
           }
         />
       )}
@@ -212,14 +233,32 @@ function HistoryTable({
 }) {
   const total = result.data?.total ?? 0
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
+  const [inspecting, setInspecting] = useState<number | null>(null)
+  const [pendingErase, setPendingErase] = useState<{ kind: 'one'; run: RunItem } | { kind: 'all' } | null>(null)
+  const erase = useEraseHistory(result)
 
   return (
-    <Panel
-      title="历史运行记录"
-      subtitle="全库累计；筛选在服务端执行，分页计数与筛选一致"
-      actions={<ExportButton />}
-      bodyClassName="p-0"
-    >
+    <>
+      <Panel
+        title="历史运行记录"
+        subtitle="全库累计；筛选在服务端执行，分页计数与筛选一致"
+        actions={
+          <>
+            <ExportButton />
+            <Button
+              size="sm"
+              variant="danger"
+              disabled={total === 0 || erase.isPending}
+              onClick={() => setPendingErase({ kind: 'all' })}
+              title="删除全部已记录的仿真运行"
+            >
+              <Eraser className="h-3.5 w-3.5" aria-hidden="true" />
+              清空全部
+            </Button>
+          </>
+        }
+        bodyClassName="p-0"
+      >
       <div className="flex flex-wrap items-end gap-2 border-b border-surface-border px-3 py-2">
         <TextInput
           label="搜索"
@@ -278,15 +317,18 @@ function HistoryTable({
               <th className="px-3 py-2 font-medium">耗时</th>
               <th className="px-3 py-2 font-medium">结论</th>
               <th className="px-3 py-2 font-medium">开始</th>
+              <th className="px-3 py-2 text-right font-medium">操作</th>
             </tr>
           </thead>
           <tbody>
             {result.data.items.map((row) => (
-              <tr key={row.id} className="border-b border-surface-border/60 last:border-0 hover:bg-surface-faint">
+              <tr
+                key={row.id}
+                onClick={() => setInspecting(row.id)}
+                className="cursor-pointer border-b border-surface-border/60 last:border-0 hover:bg-surface-faint"
+              >
                 <td className="px-3 py-2">
-                  <Link to={`/instances/${row.iid}?run=${row.id}`} className="font-mono text-xs text-iris-400 hover:underline">
-                    #{row.id}
-                  </Link>
+                  <span className="font-mono text-xs text-iris-400">#{row.id}</span>
                 </td>
                 <td className="px-3 py-2 font-mono text-ink-300">{row.iid}</td>
                 <td className="px-3 py-2 font-mono text-ink-300">{row.arch || DASH}</td>
@@ -314,17 +356,147 @@ function HistoryTable({
                   )}
                 </td>
                 <td className="px-3 py-2 text-2xs text-ink-500">{shortDateTime(row.started_at)}</td>
+                {/* Stops the row click: deleting is not inspecting, and one of the
+                    two opening the other's window is the kind of thing that only
+                    shows up when somebody is in a hurry. */}
+                <td className="px-3 py-2" onClick={(event) => event.stopPropagation()}>
+                  <div className="flex items-center justify-end gap-1.5">
+                    <Link to={`/instances/${row.iid}?run=${row.id}`}>
+                      <Button size="sm" variant="ghost" title="打开实例详情">
+                        实例页
+                      </Button>
+                    </Link>
+                    <Button
+                      size="sm"
+                      variant="danger"
+                      onClick={() => setPendingErase({ kind: 'one', run: row })}
+                      title={`删除记录 #${row.id}`}
+                      aria-label={`删除记录 ${row.id}`}
+                    >
+                      <Trash2 className="h-3 w-3" aria-hidden="true" />
+                    </Button>
+                  </div>
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       )}
       <p className="border-t border-surface-border px-3 py-2 text-[10px] text-ink-700">
-        上表只显示当前筛选下的一页。统计卡与评测集使用全库口径，两处数字来自同一份聚合，
-        不随分页或筛选变化
+        上表只显示当前筛选下的一页；点击任意一行可查看该次运行的完整信息。统计卡与评测集使用全库口径，
+        两处数字来自同一份聚合，不随分页或筛选变化
       </p>
-    </Panel>
+      </Panel>
+
+      <RunRecord runId={inspecting} onClose={() => setInspecting(null)} />
+
+      <EraseConfirm
+        pending={pendingErase}
+        total={total}
+        busy={erase.isPending}
+        onCancel={() => setPendingErase(null)}
+        onConfirm={() => {
+          if (!pendingErase) return
+          erase.mutate(pendingErase.kind === 'one' ? { id: pendingErase.run.id } : {})
+          setPendingErase(null)
+        }}
+      />
+      {erase.error && (
+        <p className="text-2xs text-danger" role="alert">
+          删除失败：{(erase.error as Error).message}
+        </p>
+      )}
+    </>
   )
+}
+
+/** The delete, with both questions answered before it happens.
+ *
+ *  One confirmation rather than two shapes: what is about to go, and what survives.
+ *  The bulk one therefore says that the firmware corpus is untouched *and* that the
+ *  dashboard's cumulative rates will move -- those numbers are computed from exactly
+ *  these rows, so a reader who does not expect the reach rate to change will read the
+ *  change as a bug. */
+function EraseConfirm({
+  pending,
+  total,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  pending: { kind: 'one'; run: RunItem } | { kind: 'all' } | null
+  total: number
+  busy: boolean
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  if (!pending) return null
+  const one = pending.kind === 'one'
+  return (
+    <Modal
+      open
+      width="max-w-md"
+      title={one ? `删除记录 #${pending.run.id}` : '清空全部历史记录'}
+      subtitle={
+        one
+          ? `实例 ${pending.run.iid} · ${pending.run.arch || '未知架构'} · ${shortDateTime(pending.run.started_at)}`
+          : `当前筛选下共 ${total} 条记录`
+      }
+      onClose={onCancel}
+      footer={
+        <>
+          <span className="flex items-center gap-1.5 text-[10px] text-ink-700">
+            <AlertTriangle className="h-3 w-3 text-warning" aria-hidden="true" />
+            不可撤销
+          </span>
+          <div className="ml-auto flex items-center gap-2">
+            <Button variant="ghost" onClick={onCancel} disabled={busy}>
+              取消
+            </Button>
+            <Button variant="danger" onClick={onConfirm} disabled={busy}>
+              <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+              {busy ? '删除中…' : one ? '删除这一条' : '删除全部'}
+            </Button>
+          </div>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-2 text-2xs leading-relaxed text-ink-300">
+        <p>
+          这条记录下的失败画像与修复账本条目会一并删除。它们在数据库里声明了级联删除，但 SQLite 默认不
+          启用外键约束，所以由服务端显式先删子表 —— 否则残留行会继续计入总览的失败统计，而那条运行早已不存在。
+        </p>
+        <p>已登记的固件语料不受影响，评测集仍可从语料重新运行得到。</p>
+        {!one && (
+          <p className="text-warning">
+            注意：总览页与评测集的可达率是全库累计口径，删除后这些数字会随之变化。
+          </p>
+        )}
+      </div>
+    </Modal>
+  )
+}
+
+/** One mutation for both shapes, so the invalidation cannot drift between them.
+ *
+ *  Every cache that shows a run has to be invalidated, not just the paged list: the
+ *  header and the footer quote `stats.total`, the evaluation set counts the same
+ *  rows, and the plugin page tallies repairs out of the ledger. Leaving any one of
+ *  them cached is how a screen ends up reporting a record that no longer exists. */
+function useEraseHistory(result: UseQueryResult<RunsPage, Error>) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (target: { id?: number }) =>
+      target.id === undefined ? api.clearRuns() : api.deleteRun(target.id),
+    onSuccess: async () => {
+      for (const key of [['runs'], ['stats'], ['eval-set'], ['root-causes'], ['rules'], ['run']]) {
+        await client.invalidateQueries({ queryKey: key })
+      }
+      // A page whose only rows were just deleted is now past the end; without this
+      // the table shows an empty page still labelled "第 3 / 3 页".
+      await result.refetch()
+    },
+  })
 }
 
 function ExportButton() {

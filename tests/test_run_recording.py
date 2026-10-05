@@ -15,12 +15,14 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from iris.db.engine import get_engine, init_db, make_session
 from iris.db.models import Brand, EmulationRun, FailureProfile, Image, RepairAction
 from iris.db.runs import (
     attribute_to_image,
+    clear_runs,
+    delete_run,
     failure_histogram,
     record_run,
     run_stats,
@@ -356,6 +358,111 @@ class TestSchemaUpgrade:
         engine = get_engine(f"sqlite:///{(tmp_path / 'twice.db').as_posix()}")
         init_db(engine)
         init_db(engine)  # the ALTER branch must find nothing left to add
+
+
+class TestClearingHistory:
+    """Erasing runs, and the reason the children go first.
+
+    Both child tables declare ``ondelete="CASCADE"``, but SQLite enforces foreign
+    keys only under ``PRAGMA foreign_keys=ON`` and this engine never issues it --
+    so the CASCADE is a declaration and not a behaviour. The test that matters most
+    is therefore the one asserting the failure histogram stops counting: an orphan
+    profile row would keep inflating a dashboard statistic long after its run was
+    gone, which is exactly the kind of "the number is stale" bug nothing else here
+    would catch.
+    """
+
+    def _seed_failed(self, session, tmp_path):
+        run_id = record_run(
+            session, iid=5, arch="mipsel", rootfs_dir=tmp_path / "e-rootfs",
+            success=False, web_ok=False,
+            findings=(Failure(FailureKind.REBOOT_LOOP, "loop"),
+                      Failure(FailureKind.NVRAM_UNREADABLE, "flash")),
+        )
+        session.add(RepairAction(run_id=run_id, source="rule", rule_id="generic-diag-crash-fix",
+                                 evidence="diag crashed", applied=True))
+        session.commit()
+        return run_id
+
+    def test_one_run_erases_its_profiles_and_repairs(self, session, tmp_path):
+        run_id = self._seed_failed(session, tmp_path)
+        assert delete_run(session, run_id) is True
+
+        assert session.get(EmulationRun, run_id) is None
+        assert list(session.scalars(select(FailureProfile))) == []
+        assert list(session.scalars(select(RepairAction))) == []
+
+    def test_erasing_a_run_removes_it_from_the_histogram(self, session, tmp_path):
+        """The orphan case stated as a number, because that is how it would show up
+        on the dashboard: the failures would keep counting against a run that no
+        longer exists anywhere in the table."""
+        run_id = self._seed_failed(session, tmp_path)
+        assert [kind for _s, kind, _n in failure_histogram(session)] != []
+
+        delete_run(session, run_id)
+
+        assert failure_histogram(session) == []
+        assert run_stats(session).total == 0
+        assert run_stats(session).failures == {}
+
+    def test_an_absent_run_is_reported_rather_than_created(self, session):
+        """False, not an exception and not a silent success: "there was nothing at
+        that id" is a different answer from "deleted", and a caller rendering both
+        as a green check would claim a cleanup that did not happen."""
+        assert delete_run(session, 4242) is False
+        assert run_stats(session).total == 0
+
+    def test_erasing_one_run_leaves_the_others_evidence_intact(self, session, tmp_path):
+        """The other half of the scoping, and the one a real corpus exercises: 81 runs
+        share the two child tables, so a delete that filtered on the wrong column --
+        or omitted the filter -- would look identical on a table holding exactly one
+        run. This is stated as counts because that is how a corrupted corpus shows up:
+        the histogram quietly halves."""
+        kept = record_run(session, iid=7, arch="armel", rootfs_dir=tmp_path / "g-rootfs",
+                          success=True, web_ok=True, duration_sec=4)
+        session.add(FailureProfile(run_id=kept, stage="boot", signal="reboot-loop"))
+        session.commit()
+
+        erased = self._seed_failed(session, tmp_path)
+        delete_run(session, erased)
+
+        assert session.scalar(select(func.count()).select_from(EmulationRun)) == 1
+        assert session.scalar(select(func.count()).select_from(FailureProfile)) == 1
+        assert [row.run_id for row in session.scalars(select(FailureProfile))] == [kept]
+
+    def test_clearing_everything_counts_what_it_removed(self, session, tmp_path):
+        self._seed_failed(session, tmp_path)
+        record_run(session, iid=6, arch="armel", rootfs_dir=tmp_path / "f-rootfs",
+                   success=True, web_ok=True, duration_sec=9)
+
+        assert clear_runs(session) == 2
+        assert run_stats(session).total == 0
+
+    def test_clearing_an_empty_library_reports_zero(self, session):
+        assert clear_runs(session) == 0
+
+    def test_clearing_everything_leaves_no_child_rows_behind(self, session, tmp_path):
+        """The bulk path is the one the button on the history page calls, so the
+        orphan check has to reach it too: counting the runs it removed says nothing
+        about the profiles and repairs it may have left pointing at nothing."""
+        self._seed_failed(session, tmp_path)
+        assert session.scalar(select(func.count()).select_from(FailureProfile)) == 2
+        assert session.scalar(select(func.count()).select_from(RepairAction)) == 1
+
+        clear_runs(session)
+
+        assert session.scalar(select(func.count()).select_from(FailureProfile)) == 0
+        assert session.scalar(select(func.count()).select_from(RepairAction)) == 0
+
+    def test_the_corpus_survives_clearing_the_history(self, session, tmp_path):
+        """Clearing history is not forgetting the firmware: the corpus rows are
+        what the evaluation set is built from, so they must be untouched."""
+        image_id = _register(session, "firmware-a.bin")
+        self._seed_failed(session, tmp_path)
+
+        clear_runs(session)
+
+        assert session.get(Image, image_id) is not None
 
 
 class TestCorpusIsolation:

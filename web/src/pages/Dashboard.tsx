@@ -1,20 +1,23 @@
 import { Link } from 'react-router-dom'
-import { ArrowRight, Boxes, Gauge, HardDrive, Layers, Terminal, Timer, TrendingUp, Wrench } from 'lucide-react'
+import { ArrowRight, Boxes, Gauge, Layers, ListChecks, Terminal, TrendingUp, Wrench } from 'lucide-react'
 
-import { LaunchPanel } from '../components/LaunchPanel'
-import { Badge, Button, EmptyState, ErrorState, Meter, Panel, Skeleton, StatTile, StatusDot } from '../components/ui'
-import { classNames, DASH, failureLabel, formatDuration, megabytes, percent } from '../lib/format'
-import { useCapabilities, useEvalSet, useRootCauses, useStats, useSystem } from '../hooks/queries'
+import { Badge, Button, EmptyState, ErrorState, Panel, Skeleton, StatTile, StatusDot } from '../components/ui'
+import { DASH, failureLabel, percent } from '../lib/format'
+import { useEvalSet, useRootCauses, useStats } from '../hooks/queries'
+import { useUiStore } from '../store/ui'
 
 
 /**
- * The landing screen, in the order the questions actually get asked: *can this
- * machine do it*, *what has it done*, *start something*, *why did it fail*.
+ * The landing screen, in the order the questions actually get asked: *what has this
+ * host done*, *how well*, *why did it fail*, *what next*.
  *
- * The environment strip comes first because every other number on this page is a
- * claim about work this host performed -- a 34% reach rate means nothing without
- * knowing the CPU and disk it ran on, and a launch that will fail for want of disk
- * is worth knowing about before the form rather than after it.
+ * Only the cumulative record lives here. The host's live reading is in the rail and
+ * the launch window: those two are a pairing -- "can this machine take another run"
+ * and "here is the run" -- and putting the meter above the statistics made the
+ * dashboard answer a question about the *present* with the most important number on
+ * it being about the past. The capability census moved to `/work-policy` for the
+ * same reason: a row that says "待改造" is a policy statement, not a metric, and
+ * three copies of it on three screens is three chances to drift.
  *
  * Every card is a live read of the same tables the rest of the workbench reads, so
  * nothing here can drift from what the detail pages show. Nothing on this page is
@@ -22,10 +25,9 @@ import { useCapabilities, useEvalSet, useRootCauses, useStats, useSystem } from 
  */
 export function Dashboard() {
   const stats = useStats()
-  const capabilities = useCapabilities()
   const evalSet = useEvalSet()
   const causes = useRootCauses(6)
-  const system = useSystem()
+  const openLaunch = useUiStore((state) => state.openLaunch)
 
   if (stats.isError) {
     const error = stats.error as { status?: number; message?: string; isAuth?: boolean }
@@ -98,8 +100,6 @@ export function Dashboard() {
 
   return (
     <div className="flex flex-col gap-4 p-4">
-      <EnvironmentStrip query={system} />
-
       <section aria-label="总览指标" className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {stats.isLoading
           ? Array.from({ length: 4 }, (_, index) => <Skeleton key={index} className="h-24" />)
@@ -114,131 +114,18 @@ export function Dashboard() {
         </Panel>
       )}
 
-      <LaunchPanel />
-
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         <EvalSetPanel query={evalSet} />
         <ArchPanel stats={data} />
-        <CapabilityPanel query={capabilities} />
       </div>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         <FailurePanel causes={causes} />
-        <QuickStart />
+        <QuickStart onLaunch={openLaunch} />
       </div>
     </div>
   )
 }
-
-/**
- * What this host can do right now, read live.
- *
- * Every figure is sampled at request time by `iris.api.host_metrics` -- there is no
- * stored reading and nothing to fall back to, so a host that refuses to answer
- * shows dashes rather than plausible numbers. The CPU share is `null` on the very
- * first sample by construction: computing a share of host CPU needs two counter
- * reads, and inventing a `0` for the gap would report an idle machine on a machine
- * that is busy.
- */
-function EnvironmentStrip({ query }: { query: ReturnType<typeof useSystem> }) {
-  const host = query.data?.host
-  const service = query.data?.service
-
-  if (query.isError) {
-    return (
-      <Panel
-        title="环境状态"
-        subtitle="CPU、内存与暂存盘剩余空间，实时采样"
-        actions={<Badge tone="warning">采样不可用</Badge>}
-      >
-        <ErrorState
-          title="无法读取宿主资源"
-          detail={(query.error as Error).message}
-          onRetry={() => void query.refetch()}
-        />
-      </Panel>
-    )
-  }
-
-  // A ratio needs both halves measured; `mem_total_mb` alone would divide by a
-  // number the same read could not supply.
-  const memRatio =
-    host?.mem_total_mb && host.mem_used_mb != null ? host.mem_used_mb / host.mem_total_mb : null
-
-  return (
-    <Panel
-      title="环境状态"
-      subtitle="CPU、内存与暂存盘剩余空间；实时采样，非历史统计"
-      actions={
-        <span className="flex items-center gap-2">
-          {query.isFetching && (
-            <span className="flex items-center gap-1 text-2xs text-ink-700">
-              <StatusDot tone="iris" pulse />
-              重新采样
-            </span>
-          )}
-          <Badge tone="neutral" title="服务自身版本，随每次采样一起下发">
-            IRIS {service?.version ?? DASH}
-          </Badge>
-        </span>
-      }
-    >
-      {query.isLoading && !query.data && <Skeleton className="h-28 w-full" />}
-      {query.data && (
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:gap-6">
-          {/* Two bars, not three. Uptime is a figure with no natural maximum, so a
-              bar for it would need an arbitrary denominator and would sit pinned at
-              full on any host that has been up for a day; it reads as a number in the
-              table beside these, which is what uptime actually is. */}
-          <div className="grid flex-1 grid-cols-1 gap-3 sm:grid-cols-2">
-            <Meter
-              label="CPU"
-              value={host?.cpu_pct == null ? null : host.cpu_pct / 100}
-              caption={host?.cpu_cores ? `· ${host.cpu_cores} 核` : undefined}
-              tone={host?.cpu_pct == null ? 'neutral' : host.cpu_pct >= 90 ? 'danger' : host.cpu_pct >= 75 ? 'warning' : 'iris'}
-            />
-            <Meter
-              label="内存"
-              value={memRatio}
-              tone={memRatio == null ? 'neutral' : memRatio >= 0.9 ? 'danger' : memRatio >= 0.8 ? 'warning' : 'iris'}
-            />
-          </div>
-
-          <dl className="grid flex-none grid-cols-2 gap-x-5 gap-y-1.5 border-t border-surface-border pt-3 text-2xs lg:border-l lg:border-t-0 lg:pl-6 lg:pt-0">
-            <dt className="text-ink-500">内存占用</dt>
-            <dd className="tnum text-right text-ink-100">
-              {megabytes(host?.mem_used_mb)} / {megabytes(host?.mem_total_mb)}
-            </dd>
-            <dt className="flex items-center gap-1 text-ink-500">
-              <HardDrive className="h-3 w-3" aria-hidden="true" />
-              暂存盘剩余
-            </dt>
-            <dd className="tnum text-right text-ink-100" title="所有容器的 rootfs 归档都落在这个卷上">
-              {host?.scratch_free_gb == null ? DASH : `${host.scratch_free_gb.toFixed(1)} GB`}
-            </dd>
-            <dt className="flex items-center gap-1 text-ink-500">
-              <Timer className="h-3 w-3" aria-hidden="true" />
-              宿主已运行
-            </dt>
-            <dd className="tnum text-right text-ink-100">
-              {host?.uptime_sec == null ? DASH : formatDuration(host.uptime_sec)}
-            </dd>
-            <dt className="text-ink-500">服务已运行</dt>
-            <dd className="tnum text-right text-ink-100" title="本进程自己的单调时钟，与宿主运行时长不是一回事">
-              {service?.uptime_sec == null ? DASH : formatDuration(service.uptime_sec)}
-            </dd>
-          </dl>
-        </div>
-      )}
-      <p className="mt-3 border-t border-surface-border pt-2 text-[10px] leading-relaxed text-ink-700">
-        这里的每个数字都在请求时现采，没有缓存的历史读数。CPU 占比需要两次计数器读数之差，所以首次采样显示
-        {host?.cpu_pct == null ? '未测量' : '最新值'}而非 0%；同一个 {service?.sample_ttl_sec ?? DASH} 秒窗口内的重复请求会拿到同一个数字
-      </p>
-    </Panel>
-  )
-}
-
-
 
 function EvalSetPanel({ query }: { query: ReturnType<typeof useEvalSet> }) {
   return (
@@ -328,43 +215,6 @@ function ArchPanel({ stats }: { stats: ReturnType<typeof useStats>['data'] }) {
   )
 }
 
-function CapabilityPanel({ query }: { query: ReturnType<typeof useCapabilities> }) {
-  return (
-    <Panel
-      title="能力矩阵"
-      subtitle="状态由后端探测构建内容得出"
-      actions={<Badge tone="neutral">v{query.data?.version ?? DASH}</Badge>}
-    >
-      {query.isLoading && <Skeleton className="h-32 w-full" />}
-      <ul className="flex flex-col gap-1.5">
-        {(query.data?.items ?? []).map((item) => (
-          <li key={item.id} className="flex items-start gap-2">
-            <StatusDot
-              tone={item.state === 'available' ? 'success' : item.state === 'planned' ? 'warning' : 'danger'}
-            />
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-1.5">
-                <span className="text-xs text-ink-100">{item.name}</span>
-                <span
-                  className={classNames(
-                    'text-[10px]',
-                    item.state === 'available' ? 'text-ink-700' : 'text-warning',
-                  )}
-                >
-                  {item.state === 'available' ? '就绪' : item.state === 'planned' ? '待改造' : '不含模型'}
-                </span>
-              </div>
-              <p className="truncate text-[10px] text-ink-700" title={item.detail}>
-                {item.detail}
-              </p>
-            </div>
-          </li>
-        ))}
-      </ul>
-    </Panel>
-  )
-}
-
 function FailurePanel({ causes }: { causes: ReturnType<typeof useRootCauses> }) {
   const cards = causes.data?.cards ?? []
   return (
@@ -401,19 +251,47 @@ function FailurePanel({ causes }: { causes: ReturnType<typeof useRootCauses> }) 
   )
 }
 
-/** The four things a first-time viewer should try, in the order that works without
- *  any setup. Each links somewhere that exists, rather than describing a command.
+/** What a first-time viewer should try, in the order that works without any setup.
  *
- *  The first two are the two halves of the launch that used to be one page: the
- *  form is above this panel, and the records it produces are on `/instances`. A
- *  step that points at "the instances page" for starting something was a lie about
- *  where the work happens; each of the four now names one destination. */
-function QuickStart() {
+ *  Each step names one destination and does at most one thing itself. The first step
+ *  opens the launch window right here: a step whose only effect is to change the URL
+ *  leaves the viewer hunting for a button that is not on the page they were sent to,
+ *  which is what "启动一次仿真" used to do. The last two are the two reference pages
+ *  the rail carries -- the rule inventory and the capability census -- because a
+ *  first-time reader's next real question after "what did it do" is "what is in the
+ *  box". */
+function QuickStart({ onLaunch }: { onLaunch: () => void }) {
   const steps = [
-    { title: '启动一次仿真', detail: '用本页「新建实例」的三种固件来源之一；启动过程结束即返回判定', to: '/', icon: <Boxes className="h-4 w-4" /> },
-    { title: '接入交互式终端', detail: 'QEMU 串口为可写 chardev，可回车执行命令', to: '/instances', icon: <Terminal className="h-4 w-4" /> },
-    { title: '看四层链路证据', detail: '路由/ARP/ICMP/服务逐层给出结论与依据', to: '/instances', icon: <Gauge className="h-4 w-4" /> },
-    { title: '核对这个构建能做什么', detail: '每条能力都带判定依据，不含模型调用的部分如实标注', to: '/settings', icon: <Wrench className="h-4 w-4" /> },
+    {
+      title: '启动一次仿真',
+      detail: '三种固件来源可选；启动过程结束即返回判定',
+      icon: <Boxes className="h-4 w-4" />,
+      action: onLaunch,
+    },
+    {
+      title: '接入交互式终端',
+      detail: 'QEMU 串口为可写 chardev，可回车执行命令',
+      to: '/instances',
+      icon: <Terminal className="h-4 w-4" />,
+    },
+    {
+      title: '看四层链路证据',
+      detail: '路由/ARP/ICMP/服务逐层给出结论与依据',
+      to: '/instances',
+      icon: <Gauge className="h-4 w-4" />,
+    },
+    {
+      title: '核对这个构建能做什么',
+      detail: '能力矩阵每条带判定依据，不含模型调用的部分如实标注',
+      to: '/work-policy',
+      icon: <ListChecks className="h-4 w-4" />,
+    },
+    {
+      title: '看规则插件库',
+      detail: '内置规则插件的匹配条件与修复动作，账本记账逐条可核',
+      to: '/plugins',
+      icon: <Wrench className="h-4 w-4" />,
+    },
   ]
   return (
     <Panel title="快速开始" subtitle="无需额外配置；数据来自本机已记录的仿真">
@@ -421,7 +299,17 @@ function QuickStart() {
         {steps.map((step, index) => (
           <li key={step.title}>
             <Link
-              to={step.to}
+              to={step.to ?? '/'}
+              onClick={
+                step.action
+                  ? (event) => {
+                      // An action, not a destination: navigating as well would push a
+                      // history entry that went nowhere and scroll the page under it.
+                      event.preventDefault()
+                      step.action?.()
+                    }
+                  : undefined
+              }
               className="flex items-center gap-3 rounded-card border border-surface-border px-3 py-2 transition-colors hover:border-iris-400/50"
             >
               <span className="tnum w-4 shrink-0 text-2xs text-ink-700">{index + 1}</span>
@@ -430,7 +318,13 @@ function QuickStart() {
                 <span className="block text-xs text-ink-100">{step.title}</span>
                 <span className="block truncate text-[10px] text-ink-700">{step.detail}</span>
               </span>
-              <ArrowRight className="h-3.5 w-3.5 shrink-0 text-ink-700" aria-hidden="true" />
+              {step.action ? (
+                <Button size="sm" variant="outline" tabIndex={-1} aria-hidden="true">
+                  新建实例
+                </Button>
+              ) : (
+                <ArrowRight className="h-3.5 w-3.5 shrink-0 text-ink-700" aria-hidden="true" />
+              )}
             </Link>
           </li>
         ))}
@@ -444,4 +338,3 @@ function QuickStart() {
     </Panel>
   )
 }
-

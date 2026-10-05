@@ -92,3 +92,24 @@ export function useConsoleLog(iid: number | null, enabled: boolean) {
 export function useFirmware() {
   return useQuery({ queryKey: ['firmware'], queryFn: api.firmware, staleTime: 30_000 })
 }
+/** The rule plugin library, read from `rules/` on the server.
+ *
+ *  Not polled: the documents only change when the package is rebuilt, so a
+ *  refresh is a reload rather than a wait. The tallies it carries do move -- a
+ *  launch records a repair against a rule id -- and they move on the pages that
+ *  invalidate after one, which is why the plugin page is invalidated with the
+ *  rest rather than left polling a mostly-static document. */
+export function useRules() {
+  return useQuery({ queryKey: ['rules'], queryFn: api.rules, staleTime: 60_000 })
+}
+
+/** One recorded run, in full: the four-layer evidence, the failure profiles and the
+ *  repair ledger. Disabled at `null` so the record window can be mounted closed
+ *  without a request for `/api/v1/runs/null`. */
+export function useRun(runId: number | null) {
+  return useQuery({
+    queryKey: ['run', runId],
+    queryFn: () => api.run(runId as number),
+    enabled: runId !== null,
+  })
+}

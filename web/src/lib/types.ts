@@ -223,6 +223,35 @@ export interface FirmwareInfo {
   arch: string
 }
 
+/** `GET /api/v1/rules`: one shipped rule document, as `iris.api.web_data.rule_plugins`
+ *  summarises it.
+ *
+ *  `detect` and `actions` are *kinds*, not patterns: `["path_exists", "all"]` says
+ *  the rule gates on the presence of paths, and deliberately does not publish the
+ *  globs and regexes themselves. `verify` and `warnings` are the rule's own
+ *  post-action checks and the loader's complaints about it. */
+export interface RulePlugin {
+  id: string
+  description: string
+  stage: string
+  detect: string[]
+  actions: string[]
+  verify: string[]
+  warnings: string[]
+  /** Repair-ledger tallies. These count repairs *recorded against* this rule id --
+   *  which is not the same as "the rule matched", because the engine's per-run match
+   *  report is not retained. See `rule_plugins` in `web_data.py`. */
+  applied: number
+  promoted: number
+  recorded: number
+}
+
+export interface RuleLibrary {
+  /** The directory the rules were read from, so an empty list is explainable. */
+  source: string
+  items: RulePlugin[]
+}
+
 export interface EmulateResponse {
   iid: number
   success: boolean

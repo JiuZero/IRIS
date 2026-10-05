@@ -27,6 +27,7 @@ import type {
   FirmwareInfo,
   InstanceStats,
   RootCauseCard,
+  RuleLibrary,
   RunDetail,
   RunsPage,
   Stats,
@@ -157,6 +158,19 @@ export const api = {
     request<RunsPage>(withQuery('/api/v1/runs', params)),
 
   run: (id: number) => request<RunDetail>(`/api/v1/runs/${id}`),
+
+  /** The rule plugins shipped in `rules/`. A page that listed invented extensions
+   *  would be the one panel on this workbench whose contents mean nothing, so this
+   *  is the documents themselves, read through the engine's own loader. */
+  rules: () => request<RuleLibrary>('/api/v1/rules'),
+
+  /** Erase one recorded run. Counted rather than a boolean: 404 and "removed
+   *  nothing" are different answers and the page reports the difference. */
+  deleteRun: (id: number) =>
+    request<{ removed: number; run_id: number }>(`/api/v1/runs/${id}`, { method: 'DELETE' }),
+
+  /** Erase the whole recorded history. The firmware corpus is not touched. */
+  clearRuns: () => request<{ removed: number }>('/api/v1/runs', { method: 'DELETE' }),
 
   /** The CSV is fetched rather than linked so a 401 can be reported in place; a
    *  plain `<a href>` would navigate the tab to a JSON error body. */

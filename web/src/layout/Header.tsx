@@ -1,5 +1,5 @@
-import { Link } from 'react-router-dom'
-import { Activity, CircleDot, PanelRightClose, PanelRightOpen, Server } from 'lucide-react'
+import { Link, useLocation } from 'react-router-dom'
+import { Activity, CircleDot, PanelRightClose, PanelRightOpen, Server, Settings as SettingsIcon } from 'lucide-react'
 
 import { Badge, Button, StatusDot } from '../components/ui'
 import { classNames } from '../lib/format'
@@ -65,12 +65,6 @@ export function Header({ onOpenPalette }: { onOpenPalette: () => void }) {
             Ctrl K
           </kbd>
         </Button>
-        <Link
-          to="/settings"
-          className="hidden text-2xs text-ink-500 transition-colors hover:text-ink-300 sm:inline"
-        >
-          关于本构建
-        </Link>
         <Button
           size="sm"
           variant="ghost"
@@ -101,6 +95,7 @@ export function Header({ onOpenPalette }: { onOpenPalette: () => void }) {
 export function Footer() {
   const stats = useStats()
   const emulations = useEmulations()
+  const onSettings = useLocation().pathname === '/settings'
 
   return (
     <footer
@@ -115,14 +110,33 @@ export function Footer() {
       <span aria-hidden="true">·</span>
       <span>终端通道：交互式串口（QEMU chardev，尺寸固定 80×24）</span>
       <span className="ml-auto flex items-center gap-3">
-        <span>数据口径：全库累计，含同一固件的多次运行</span>
-        <span aria-hidden="true">·</span>
+        <span className="hidden md:inline">数据口径：全库累计，含同一固件的多次运行</span>
+        <span aria-hidden="true" className="hidden md:inline">·</span>
         {/* A plain anchor, not a router link: /docs is FastAPI's OpenAPI page served
             by the backend, so a client-side navigation would land on the router's
             catch-all and bounce back to the dashboard. */}
         <a href="/docs" target="_blank" rel="noreferrer" className="transition-colors hover:text-ink-300">
           API 文档
         </a>
+        <span aria-hidden="true">·</span>
+        {/* Settings lives at the far right of the bottom bar and is an icon alone.
+            It is the one control on screen that changes nothing about the work, so
+            it does not belong among the rail's pages -- but it does have to stay
+            reachable from anywhere, which is why it sits on the bar every screen
+            already has. `aria-current` rather than a filled background, because
+            without a label a filled square is a state nobody can read. */}
+        <Link
+          to="/settings"
+          title="界面设置与主题"
+          aria-label="设置"
+          aria-current={onSettings ? 'page' : undefined}
+          className={classNames(
+            'grid h-6 w-6 place-items-center rounded transition-colors hover:bg-surface-hover hover:text-ink-100',
+            onSettings ? 'text-iris-400' : 'text-ink-500',
+          )}
+        >
+          <SettingsIcon className="h-3.5 w-3.5" aria-hidden="true" />
+        </Link>
       </span>
       {emulations.isError && (
         <span className="text-danger" role="status">

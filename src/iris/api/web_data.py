@@ -29,7 +29,13 @@ from iris.config import get_settings
 from iris.db.active import list_owned
 from iris.db.knowledge import promote_candidates, root_cause_cards
 from iris.db.models import EmulationRun, FailureProfile, RepairAction
-from iris.db.runs import failure_histogram, run_stats, web_reach_rate
+from iris.db.runs import (
+    clear_runs,
+    delete_run,
+    failure_histogram,
+    run_stats,
+    web_reach_rate,
+)
 from iris.emulate.container_stats import container_stats
 from iris.emulate.linkprobe import LAYER_ORDER
 from iris.emulate.orchestrator import serial_port_of
@@ -229,6 +235,30 @@ def runs_page(*, limit: int = 50, offset: int = 0, arch: str = "",
         }
 
 
+def clear_run_records() -> dict[str, Any]:
+    """Remove every recorded run. Returns how many rows were deleted.
+
+    ``runs`` is a count, not a boolean, and it is ``0`` on an already-empty
+    library -- "there was nothing to remove" is a different state from "the delete
+    failed", and a caller that cannot tell them apart will render a successful
+    cleanup that removed nothing.
+
+    Note what this does *not* touch: ``active_emulation`` (what the service is
+    hosting right now) and the corpus rows (``image``, ``object``). Clearing history
+    is not "forget this firmware ever existed"; a running instance whose history row
+    disappears is still running and still occupies a container.
+    """
+    with _session() as session:
+        removed = clear_runs(session)
+    return {"removed": removed}
+
+
+def delete_run_record(run_id: int) -> dict[str, Any] | bool:
+    """Remove one recorded run. ``False`` when no such run exists."""
+    with _session() as session:
+        return delete_run(session, run_id)
+
+
 def run_detail(run_id: int) -> dict[str, Any] | None:
     """One run with everything that was learned about why it went the way it did.
 
@@ -386,6 +416,105 @@ def instance_stats(iid: int) -> dict[str, Any]:
         "serial_port": port,
         "console_available": port is not None,
     }
+
+
+def rule_plugins() -> dict[str, Any]:
+    """The YAML rule plugins shipped in ``rules/``, with their ledger tallies.
+
+    A plugin centre that lists made-up extensions would be the one panel on this
+    workbench whose contents mean nothing, so this reads the actual rule documents
+    through the engine's own loader rather than keeping a parallel inventory: a rule
+    added to ``rules/`` appears here, and one deleted disappears.
+
+    The tallies come from ``repair_action``, which is a ledger of repairs that were
+    *attempted and recorded*. That is not the same as "the rule matched": the
+    engine's own match report is per-application and is not retained. So the fields
+    are named ``applied``/``promoted`` rather than "hits", and the page says so.
+    """
+    rules = _load_rule_plugins()
+    tallies: dict[str, tuple[int, int, int]] = {}
+    with _session() as session:
+        for action in session.scalars(select(RepairAction)):
+            key = action.rule_id or ""
+            applied, promoted, recorded = tallies.get(key, (0, 0, 0))
+            tallies[key] = (
+                applied + 1 if action.applied else applied,
+                promoted + 1 if action.promoted else promoted,
+                recorded + 1,
+            )
+    return {
+        "source": str(_rules_dir()),
+        "items": [
+            {
+                "id": rule.id,
+                "description": rule.description.strip(),
+                "stage": rule.stage,
+                "detect": _summarise_conditions(rule.detect),
+                "actions": _summarise_actions(rule.actions),
+                "verify": sorted(rule.post_action_verify),
+                "warnings": rule.warnings,
+                "applied": tallies.get(rule.id, (0, 0, 0))[0],
+                "promoted": tallies.get(rule.id, (0, 0, 0))[1],
+                "recorded": tallies.get(rule.id, (0, 0, 0))[2],
+            }
+            for rule in rules
+        ],
+    }
+
+
+def _rules_dir() -> Path:
+    return _repo_root() / "rules"
+
+
+def _load_rule_plugins() -> list[Any]:
+    """Every rule document, or an empty list when the directory is unreachable.
+
+    Absent rather than raising: a wheel install has no ``rules/`` beside it, and a
+    plugin centre that 500s is worse than one that honestly shows nothing. The
+    empty case is distinguishable by the caller's own rendering, which says the
+    directory could not be read.
+    """
+    try:
+        from iris.rules.engine import load_rules
+
+        return load_rules(_rules_dir())
+    except OSError as exc:
+        logger.warning(f"could not read rule plugins: {exc}")
+        return []
+
+
+def _summarise_conditions(detect: list[dict]) -> list[str]:
+    """The detection keys a rule declares, flattened out of its AND/OR nesting.
+
+    Only the *shape* is reported, never the patterns themselves: the fingerprints
+    are long regexes and path globs whose readable form is the vendor's file
+    layout, and a wall of those is not what a reader of a plugin list needs. The
+    full document stays on disk in ``rules/``.
+    """
+    keys: set[str] = set()
+
+    def walk(entries: object) -> None:
+        if isinstance(entries, dict):
+            for key, value in entries.items():
+                if key in {"all", "any"} and isinstance(value, list):
+                    for item in value:
+                        walk(item)
+                elif key == "within":
+                    continue
+                else:
+                    keys.add(str(key))
+        elif isinstance(entries, list):
+            for item in entries:
+                walk(item)
+
+    walk(detect)
+    return sorted(keys)
+
+
+def _summarise_actions(actions: list[dict]) -> list[str]:
+    """Which action kinds a rule declares, one entry per action."""
+    kinds = [str(key) for entry in actions if isinstance(entry, dict) for key in entry]
+    return kinds
 
 
 def root_causes(*, recent: int = 10) -> dict[str, Any]:

@@ -1,26 +1,31 @@
 import { NavLink, useNavigate } from 'react-router-dom'
 import {
   Activity,
+  Boxes,
   Cpu,
   Gauge,
   Hexagon,
+  ListChecks,
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
   Search,
-  Settings as SettingsIcon,
   Terminal,
 } from 'lucide-react'
 
 import { Badge, Button, StatusDot } from '../components/ui'
 import { classNames, DASH } from '../lib/format'
-import { useCapabilities, useEmulations, useSystem } from '../hooks/queries'
+import { useEmulations, useSystem } from '../hooks/queries'
 import { useUiStore } from '../store/ui'
 
+/** The pages, in the order the questions get asked. Settings is deliberately not
+ *  here: it is a bottom-bar icon now, because every entry on this rail is a question
+ *  about the work, and "change the theme" is not one of them. */
 const NAV = [
   { to: '/', label: '总览', icon: Gauge, end: true },
   { to: '/instances', label: '实例记录', icon: Cpu, end: false },
-  { to: '/settings', label: '设置', icon: SettingsIcon, end: false },
+  { to: '/plugins', label: '插件中心', icon: Boxes, end: false },
+  { to: '/work-policy', label: '工作策略', icon: ListChecks, end: false },
 ]
 
 /**
@@ -40,13 +45,12 @@ const NAV = [
 export function Sidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
   const collapsed = useUiStore((state) => state.sidebarCollapsed)
   const toggle = useUiStore((state) => state.toggleSidebar)
+  const openLaunch = useUiStore((state) => state.openLaunch)
   const emulations = useEmulations()
-  const capabilities = useCapabilities()
   const system = useSystem()
   const navigate = useNavigate()
 
   const running = emulations.data ?? []
-  const unavailable = (capabilities.data?.items ?? []).filter((item) => item.state !== 'available')
 
   return (
     <nav
@@ -83,16 +87,18 @@ export function Sidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
       {/* The one action the rail is built around. Anchored at the top because a
           create button pinned to the bottom of a scrollable rail is the button
           nobody finds; on a collapsed rail it stays as the icon so the affordance
-          survives at 56px. */}
+          survives at 56px. It opens a window rather than navigating, so launching
+          works from any page -- including from the terminal somebody is about to
+          leave. */}
       <Button
         variant="primary"
-        onClick={() => navigate('/#launch')}
+        onClick={openLaunch}
         className={classNames('w-full', collapsed && 'px-0')}
-        title="新建实例（总览页「新建实例」）"
+        title="新建实例"
       >
         <Plus className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
         {!collapsed && <span>新建实例</span>}
-        {!collapsed && <span className="sr-only">，在总览页的「新建实例」面板</span>}
+        {!collapsed && <span className="sr-only">，在当前页面打开新建窗口</span>}
       </Button>
 
       <ul className="flex flex-col gap-0.5">
@@ -113,7 +119,7 @@ export function Sidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
 
       {!collapsed && (
         <>
-          <div className="nav-card mt-2 flex flex-col gap-1">
+          <div className="nav-card mt-2 flex min-h-0 flex-1 flex-col gap-1">
             <div className="flex items-center justify-between px-1">
               <span className="nav-card-title">最近实例</span>
               <Badge tone={running.length ? 'success' : 'neutral'}>{running.length}</Badge>
@@ -143,10 +149,12 @@ export function Sidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
             </ul>
           </div>
 
-          {/* What this host is doing right now, in the rail rather than only on the
-              dashboard: two bars narrow enough to read at a glance while a boot is
-              running, which is exactly when the answer matters. Same `useSystem`
-              query as the dashboard strip, so the two can never disagree. */}
+          {/* What this host is doing right now: two bars narrow enough to read at a
+              glance while a boot is running, which is exactly when the answer
+              matters. This is now the *only* place the live host reading appears --
+              it moved here from the dashboard strip, because "can this machine take
+              another run" is a rail-sized question and a four-card-wide panel
+              answering it pushed the cumulative record off the landing screen. */}
           <div className="nav-card flex flex-col gap-1.5">
             <div className="flex items-center justify-between px-1">
               <span className="nav-card-title">性能与内存</span>
@@ -179,34 +187,6 @@ export function Sidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
             </p>
           </div>
 
-          <div className="nav-card mt-auto flex flex-col gap-1 pt-2">
-            <div className="flex items-center justify-between px-1">
-              <span className="nav-card-title">能力</span>
-              {capabilities.isLoading && <span className="text-2xs text-ink-700">读取中</span>}
-            </div>
-            <ul className="flex flex-col gap-0.5">
-              {(capabilities.data?.items ?? []).slice(0, 6).map((item) => (
-                <li key={item.id} className="flex items-center gap-2 px-1 py-0.5" title={item.detail}>
-                  <StatusDot
-                    tone={
-                      item.state === 'available' ? 'success' : item.state === 'planned' ? 'warning' : 'danger'
-                    }
-                  />
-                  <span className="flex-1 truncate text-2xs text-ink-300">{item.name}</span>
-                  {item.state !== 'available' && (
-                    <span className="text-[10px] text-ink-700">
-                      {item.state === 'planned' ? '待改造' : '不含模型'}
-                    </span>
-                  )}
-                </li>
-              ))}
-            </ul>
-            {unavailable.length > 0 && (
-              <p className="px-1 text-[10px] leading-relaxed text-ink-700">
-                徽章状态由构建内容探测得出，详情见 /settings
-              </p>
-            )}
-          </div>
         </>
       )}
 
