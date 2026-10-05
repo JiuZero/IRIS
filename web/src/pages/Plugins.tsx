@@ -1,28 +1,34 @@
 import { useState } from 'react'
 import type { ReactNode } from 'react'
-import { AlertTriangle, ArrowRight, Boxes, FileWarning, ShieldCheck } from 'lucide-react'
+import { AlertTriangle, ArrowRight, Boxes, FileWarning, PackageMinus, ShieldCheck, Upload } from 'lucide-react'
 
-import { Badge, Button, EmptyState, ErrorState, Panel, Skeleton, StatusDot } from '../components/ui'
+import { ApiError } from '../lib/api'
+import { Badge, Button, EmptyState, ErrorState, FileInput, Panel, Skeleton, StatusDot } from '../components/ui'
 import { Modal } from '../components/Modal'
 import { DASH } from '../lib/format'
-import { useRules } from '../hooks/queries'
+import { useInstallPlugin, useRemovePlugin, useRules } from '../hooks/queries'
 import type { RulePlugin } from '../lib/types'
 
 /**
- * The rule plugin library: what is actually in the box.
+ * The rule plugin library: what is actually in the box, and what can be added to it.
  *
- * Every row is a YAML document read out of `rules/` through the engine's own
- * loader, so a rule added to the repository appears here without a second inventory
- * to keep in step -- and a row cannot claim to be a plugin that is not there. The
- * tallies come from the repair ledger, and they are labelled `applied`/`promoted`
+ * Every row is a YAML document read through the engine's own loader, across both
+ * directories it reads -- `rules/` and the plugin directory under `iris_home` -- so a
+ * rule added to the repository appears here without a second inventory to keep in
+ * step, and a row cannot claim to be a plugin that is not there. `origin` separates
+ * the two because only an external one can be uninstalled, and a list that presented
+ * them as the same kind of thing would be inviting an edit that cannot exist.
+ *
+ * The tallies come from the repair ledger, and they are labelled `applied`/`promoted`
  * rather than "命中次数" because that ledger records repairs *attempted and written
  * down against* a rule id, not the engine's per-run match report, which is not kept.
  * A page that called those hits would be quoting a number that means something else.
  *
- * There is no upload button, and the panel says so in words. A plugin centre that
- * accepts a file has to be able to run it, to sandbox it, and to say what it changed;
- * this one can do none of those, so offering the control would be a promise the
- * product cannot keep.
+ * **Uploading installs, it does not preview.** The server writes the document, re-reads
+ * it through the loader, and refuses it unless the loader has nothing to complain
+ * about -- so a rejection here is the loader's own objection, quoted in full, and
+ * nothing is left on disk. The alternative, accepting a document whose unknown keys
+ * the engine would silently ignore, is the failure this feature exists to remove.
  *
  * The card is a summary and the click is the rest of it. Descriptions here run to
  * three or four lines, and at two per row that is a ragged edge: one card two lines
@@ -37,13 +43,15 @@ export function Plugins() {
   const items = rules.data?.items ?? []
   const applied = items.reduce((total, item) => total + item.applied, 0)
   const warned = items.filter((item) => item.warnings.length > 0)
+  const external = items.filter((item) => item.origin === 'external')
   const [detail, setDetail] = useState<RulePlugin | null>(null)
+  const [uploading, setUploading] = useState(false)
 
   return (
     <div className="flex flex-col gap-4 p-4">
       <Panel
         title="插件中心"
-        subtitle="IRIS 自带的规则插件库；状态与账本数字由后端从 rules/ 目录与 repair_action 表读出"
+        subtitle="IRIS 自带的规则插件库，加上上传安装的外部插件；状态与账本数字由后端从规则目录与 repair_action 表读出"
         actions={
           <span className="flex items-center gap-2">
             {rules.isFetching && !rules.isError && (
@@ -53,6 +61,13 @@ export function Plugins() {
               </span>
             )}
             <Badge tone="neutral">{rules.data ? `${items.length} 个插件` : DASH}</Badge>
+            <Button
+              size="sm"
+              icon={<Upload className="h-3 w-3" aria-hidden="true" />}
+              onClick={() => setUploading(true)}
+            >
+              上传插件
+            </Button>
           </span>
         }
       >
@@ -70,6 +85,7 @@ export function Plugins() {
               <Badge tone="iris" icon={<Boxes className="h-3 w-3" aria-hidden="true" />}>
                 规则 {items.length} 个
               </Badge>
+              {external.length > 0 && <Badge tone="violet">外部插件 {external.length} 个</Badge>}
               <Badge tone={applied ? 'success' : 'neutral'}>已应用修复 {applied} 次</Badge>
               {warned.length > 0 && (
                 <Badge tone="warning" icon={<AlertTriangle className="h-3 w-3" aria-hidden="true" />}>
@@ -78,15 +94,16 @@ export function Plugins() {
               )}
             </div>
             <p className="text-2xs leading-relaxed text-ink-500">
-              规则插件随 IRIS 自带，<span className="text-ink-300">当前不支持从外部安装或上传</span>：
-              规则在仿真前被加载并逐条匹配，页面只能读取，不提供编辑入口；要在
-              <code className="mx-1 rounded bg-surface-code px-1 font-mono text-[10px]">rules/</code>
-              目录增加 YAML 文档后重启服务，本页会自动出现该条目
+              上传的 YAML
+              <span className="mx-1 rounded bg-surface-code px-1 font-mono text-[10px]">.yaml</span>
+              会先被规则引擎完整校验再落盘：只要有一个键引擎不认识，或加载时产生任何告警，就拒绝安装并把原因原样退回，磁盘上不留文件
+              ；格式与可用键见仓库
+              <code className="mx-1 rounded bg-surface-code px-1 font-mono text-[10px]">docs/09-规则插件开发指南.md</code>
             </p>
             {items.length === 0 && (
               <EmptyState
                 title="未读到任何规则文档"
-                detail={`后端返回的目录是 ${rules.data?.source ?? '—'}，该目录不可读时页面如实显示为空，而不是假装有一份默认规则库`}
+                detail={`后端读取的目录是 ${rules.data?.dirs.join(' 与 ') || '—'}，这些目录不可读时页面如实显示为空，而不是假装有一份默认规则库`}
               />
             )}
           </div>
@@ -111,12 +128,125 @@ export function Plugins() {
             <Button variant="ghost" onClick={() => setDetail(null)}>
               关闭
             </Button>
+            {detail?.origin === 'external' && (
+              <UninstallButton plugin={detail} onDone={() => setDetail(null)} />
+            )}
           </div>
         }
       >
         {detail && <PluginDetail plugin={detail} />}
       </Modal>
+
+      <UploadPluginModal open={uploading} onClose={() => setUploading(false)} />
     </div>
+  )
+}
+
+/** Uninstall lives in the detail window rather than on the card.
+ *
+ *  A card here is a `<button>`, and a button cannot contain a button -- the browser
+ *  silently drops the inner one, which would leave a control that renders and does
+ *  nothing. Putting it in the window also puts a destructive action behind the one
+ *  place the operator has just read what the rule actually does, and behind an
+ *  explicit label rather than a bare trash icon. */
+function UninstallButton({ plugin, onDone }: { plugin: RulePlugin; onDone: () => void }) {
+  const remove = useRemovePlugin()
+  const failed = remove.error as ApiError | null
+
+  if (failed) {
+    return (
+      <p className="mr-auto max-w-xs truncate text-2xs text-danger" title={failed.detail}>
+        {failed.detail}
+      </p>
+    )
+  }
+  return (
+    <Button
+      variant="danger"
+      disabled={remove.isPending}
+      icon={<PackageMinus className="h-3 w-3" aria-hidden="true" />}
+      onClick={() => remove.mutate(plugin.source_file, { onSuccess: onDone })}
+    >
+      {remove.isPending ? '卸载中' : `卸载 ${plugin.source_file}`}
+    </Button>
+  )
+}
+
+/** The install window: pick a document, send it, and report exactly what the loader
+ *  said about it.
+ *
+ *  A 422's `detail` is shown verbatim rather than replaced with a fixed sentence.
+ *  The server answers with the loader's own objection -- which key it did not
+ *  recognise, where in the document it was, what the text next to it was -- and
+ *  replacing that with "上传失败" would throw away the only part the author of the
+ *  document can act on. */
+function UploadPluginModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const install = useInstallPlugin()
+  const [file, setFile] = useState<File | null>(null)
+  const failed = install.error as ApiError | null
+
+  return (
+    <Modal
+      open={open}
+      title="上传规则插件"
+      subtitle="上传的文档会先被引擎校验，通过后存入插件目录并立即参与规则匹配"
+      width="max-w-xl"
+      onClose={() => {
+        setFile(null)
+        install.reset()
+        onClose()
+      }}
+      footer={
+        <div className="ml-auto flex items-center gap-2">
+          <Button
+            variant="ghost"
+            onClick={() => {
+              setFile(null)
+              install.reset()
+              onClose()
+            }}
+          >
+            取消
+          </Button>
+          <Button
+            variant="primary"
+            disabled={!file || install.isPending}
+            onClick={() => {
+              if (file) install.mutate(file, { onSuccess: () => setFile(null) })
+            }}
+          >
+            {install.isPending ? '校验并安装中' : '安装'}
+          </Button>
+        </div>
+      }
+    >
+      <div className="flex flex-col gap-3 text-2xs">
+        <FileInput
+          label="规则文档"
+          hint="只接受 .yaml 与 .yml，单个文件不超过 1 MiB；上传后按文档里的 id 存为 <id>.yaml"
+          file={file}
+          accept=".yaml,.yml"
+          disabled={install.isPending}
+          onPick={setFile}
+        />
+        {failed && (
+          <div className="flex flex-col gap-1.5 rounded-card border border-danger/35 bg-danger/8 p-2.5">
+            <p className="font-medium text-danger">
+              {failed.status === 422 ? '引擎拒绝了这份文档' : `安装失败（HTTP ${failed.status}）`}
+            </p>
+            <p className="leading-relaxed text-ink-300">{failed.detail}</p>
+          </div>
+        )}
+        {install.isSuccess && !failed && (
+          <p className="leading-relaxed text-success">
+            已安装 {install.data.id}，存为 {install.data.source_file}，规则列表已刷新
+          </p>
+        )}
+        <p className="leading-relaxed text-ink-700">
+          上传不会覆盖同名规则：id 与既有规则重复时安装被拒。内置规则不在插件目录里，无法通过卸载按钮移除
+        </p>
+      </div>
+    </Modal>
   )
 }
 
@@ -139,7 +269,17 @@ function PluginCard({ plugin, onOpen }: { plugin: RulePlugin; onOpen: () => void
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
             <p className="truncate font-mono text-xs font-medium text-ink-100">{plugin.id}</p>
-            <p className="mt-0.5 text-[10px] text-ink-500">目标阶段：{plugin.stage}</p>
+            <p className="mt-0.5 text-[10px] text-ink-500">
+              目标阶段：{plugin.stage}
+              {/* The origin sits next to the id rather than in the bottom strip: it
+                  decides what the reader may do next (uninstall, or not), and it is
+                  the one field whose absence would make a card's affordances a
+                  guess. */}
+              <span className={plugin.origin === 'external' ? 'text-violet' : 'text-ink-700'}>
+                {' · '}
+                {plugin.origin === 'external' ? '外部安装' : 'IRIS 内置'}
+              </span>
+            </p>
           </div>
           <span className="flex shrink-0 items-center gap-1.5">
             <Badge tone={plugin.applied ? 'success' : 'neutral'}>已应用 {plugin.applied}</Badge>
@@ -166,10 +306,13 @@ function PluginCard({ plugin, onOpen }: { plugin: RulePlugin; onOpen: () => void
               {kind}
             </Badge>
           ))}
-          <span className="ml-auto flex items-center gap-1 text-ink-700">
-            完整信息
-            <ArrowRight className="h-3 w-3" aria-hidden="true" />
-          </span>
+          {/* Direction only, no label. "完整信息 →" spelled out an affordance the
+              whole card already is: the card is the button, so a corner announcing
+              it is a label for the label. The arrow keeps the card readable as
+              "there is more past this edge" for anyone who does not take
+              `cursor: pointer` as an invitation, and the card's `aria-label`
+              carries the same fact to anyone not looking at it. */}
+          <ArrowRight className="ml-auto h-3 w-3 shrink-0 text-ink-700" aria-hidden="true" />
         </div>
 
         {plugin.warnings.length > 0 && (
@@ -183,12 +326,23 @@ function PluginCard({ plugin, onOpen }: { plugin: RulePlugin; onOpen: () => void
   )
 }
 
-/** What the card left out, in one window: the whole description, every declared
- *  condition, action and post-fix check, the warnings with their text, and the
- *  bookkeeping note that says what the counts do and do not mean. */
+/** What the card left out, in one window: where the document came from, the whole
+ *  description, every declared condition, action and post-fix check, the warnings with
+ *  their text, and the bookkeeping note that says what the counts do and do not
+ *  mean. */
 function PluginDetail({ plugin }: { plugin: RulePlugin }) {
   return (
     <div className="flex flex-col gap-3 text-2xs">
+      <DetailRow title="来源">
+        <Badge tone={plugin.origin === 'external' ? 'violet' : 'neutral'}>
+          {plugin.origin === 'external' ? '外部安装的插件' : 'IRIS 内置规则'}
+        </Badge>
+        <span className="font-mono text-ink-300">{plugin.source_file}</span>
+        <span className="text-ink-700">
+          {plugin.origin === 'external' ? '可在下方卸载' : '内置规则不可卸载'}
+        </span>
+      </DetailRow>
+
       <p className="leading-relaxed text-ink-300">{plugin.description}</p>
 
       <DetailRow title="匹配条件">
@@ -248,4 +402,3 @@ function DetailRow({ title, children }: { title: string; children: ReactNode }) 
     </div>
   )
 }
-

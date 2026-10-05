@@ -24,12 +24,19 @@ import contextlib
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 
 from iris.api import host_metrics, web_data
-from iris.api.server import Caller
+from iris.api.plugins import (
+    MAX_PLUGIN_BYTES,
+    PluginRejected,
+    install_plugin,
+    remove_plugin,
+)
+from iris.api.server import Caller, _read_upload
 from iris.api.web_terminal import close_all_bridges, notify_shutdown, terminal_endpoint
 from iris.config import get_settings
 from iris.db.active import list_owned, release
@@ -72,6 +79,34 @@ def dist_dir() -> Path:
         if (candidate / "index.html").is_file():
             return candidate
     return _DIST_FALLBACK
+
+
+class PluginMutationResponse(BaseModel):
+    """What an install actually put on disk.
+
+    ``extra="forbid"`` for the reason ``HealthResponse`` gives: the default drops
+    unknown fields silently, so a typo in a field name would return a response that
+    quietly omits it and leave the mutation untested. ``source_file`` is reported
+    rather than the host path -- the page shows the name, and a name is enough to
+    uninstall with. It is not necessarily the uploaded name: a ``.yml`` is stored
+    under the rule's id, so that a second document with the same id cannot sit
+    beside it under a different spelling.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    origin: str
+    source_file: str
+
+
+class PluginRemovalResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    #: The file name that was deleted, echoed so the caller can match it against what
+    #: it listed -- a bare 200 would leave "which one went?" open when a page holds
+    #: several plugins.
+    removed: str
 
 
 def install(app: FastAPI) -> FastAPI:
@@ -207,6 +242,40 @@ def _add_api_routes(app: FastAPI) -> None:
     @app.get("/api/v1/rules")
     async def read_rules(_caller: Caller) -> dict:
         return web_data.rule_plugins()
+
+    @app.post("/api/v1/plugins", response_model=PluginMutationResponse)
+    async def upload_plugin(
+        _caller: Caller,
+        file: UploadFile = File(..., description="a rule document (.yaml or .yml)"),
+    ) -> PluginMutationResponse:
+        """Install an externally authored rule plugin.
+
+        The body is read through the same bounded reader the firmware upload uses, so
+        an oversized document is cut off at the cap instead of being buffered whole.
+
+        Rejections come back as 422 with the reason in Chinese, written for the plugin
+        author rather than for the log: whatever the engine would object to on load
+        comes back verbatim, because "上传成功但规则不生效" has no other useful answer.
+        """
+        content = await _read_upload(file, MAX_PLUGIN_BYTES)
+        try:
+            return PluginMutationResponse(**install_plugin(file.filename or "", content))
+        except PluginRejected as exc:
+            raise HTTPException(status_code=422, detail=exc.detail) from exc
+
+    @app.delete("/api/v1/plugins/{name}", response_model=PluginRemovalResponse)
+    async def uninstall_plugin(name: str, _caller: Caller) -> PluginRemovalResponse:
+        """Remove one installed plugin by file name.
+
+        404 rather than 422 for "no such file": the path is the caller's own upload,
+        so a stale page is the likely cause and the browser should re-fetch rather than
+        retry the delete.
+        """
+        try:
+            removed = remove_plugin(name)
+        except PluginRejected as exc:
+            raise HTTPException(status_code=404, detail=exc.detail) from exc
+        return PluginRemovalResponse(removed=removed.name)
 
     @app.get("/api/v1/console/{iid}")
     async def read_console(iid: int, _caller: Caller, start_line: int = Query(0, ge=0),

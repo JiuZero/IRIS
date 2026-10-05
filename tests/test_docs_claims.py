@@ -26,6 +26,7 @@ import pytest
 PROJECT = Path(__file__).resolve().parents[1]
 README = PROJECT / "README.md"
 EVAL_LOG = PROJECT / "docs" / "eval-log.md"
+DOCS = PROJECT / "docs"
 
 
 @pytest.fixture(scope="module")
@@ -167,3 +168,78 @@ class TestNoDeadDirectoriesAreAdvertised:
             )
             assert line is not None, f"{name} disappeared from the tree listing"
             assert "规划中" in line, f"{name} is listed without a 规划中 marker"
+
+class TestEveryDocumentTheReadmeLinksExists:
+    """A broken link in the index is worse than no index.
+
+    The `docx/` → `docs/` move left three stale links here for a while, and nothing
+    failed: documents do not fail CI, which is the whole reason this file exists.
+    Checked against the filesystem rather than a list of names, so a document that
+    moves without updating the README is caught rather than trusted.
+    """
+
+    def test_no_readme_link_points_at_a_missing_file(self, readme: str) -> None:
+        missing = []
+        for target in re.findall(r"\]\((?!https?:)([^)#]+\.md)\)", readme):
+            if not (PROJECT / target).is_file():
+                missing.append(target)
+        assert not missing, f"README links to documents that are not there: {missing}"
+
+    def test_the_retired_docx_directory_is_not_referenced(self, readme: str) -> None:
+        """`docx/` was folded into `docs/`. A pointer to it now names a directory
+        that does not exist."""
+        assert "docx/" not in readme
+
+    def test_every_indexed_document_is_registered(self, readme: str) -> None:
+        """The reverse direction: a document on disk that the index does not list is
+        the other half of the same problem -- it exists, and nobody can find it."""
+        listed = set(re.findall(r"\]\((docs/[^)#]+\.md)\)", readme))
+        on_disk = {f"docs/{p.name}" for p in DOCS.glob("*.md")}
+        assert on_disk <= listed, f"documents present but absent from the README index: {sorted(on_disk - listed)}"
+
+
+class TestThePluginGuideMatchesTheEngine:
+    """The development guide is a promise about which keys the engine accepts.
+
+    It is also the only place an external plugin author learns the format, so a key
+    added to the engine without the guide following silently makes the documented
+    format a subset of the real one -- and a key *removed* from the engine makes the
+    guide wrong in the direction that costs someone an afternoon.
+    """
+
+    @pytest.fixture(scope="module")
+    def guide(self) -> str:
+        path = DOCS / "09-规则插件开发指南.md"
+        assert path.is_file(), "the plugin development guide is missing from docs/"
+        return path.read_text(encoding="utf-8")
+
+    def test_every_accepted_key_is_documented(self, guide: str) -> None:
+        from iris.rules.engine import ACTION_KEYS, DETECT_KEYS, RULE_KEYS
+
+        for key in sorted(RULE_KEYS | DETECT_KEYS | ACTION_KEYS):
+            assert key in guide, f"the engine accepts {key!r} but the guide never mentions it"
+
+    def test_the_documented_install_cap_matches_the_constant(self, guide: str) -> None:
+        """Stated in MiB rather than KiB because that is how a rule author reads a
+        size limit; the assertion therefore does the same conversion rather than
+        searching for the byte count."""
+        from iris.api.plugins import MAX_PLUGIN_BYTES
+
+        mib = MAX_PLUGIN_BYTES // (1024 * 1024)
+        assert f"{mib} MiB" in guide, (
+            f"the guide states a size limit that is not the enforced {mib} MiB"
+        )
+
+    def test_the_documented_id_pattern_is_the_enforced_one(self, guide: str) -> None:
+        from iris.api.plugins import _ID_RE
+
+        assert _ID_RE.pattern in guide, (
+            "the guide quotes a different id pattern than the installer enforces"
+        )
+
+    def test_the_guide_does_not_promise_that_stage_filters(self, guide: str) -> None:
+        """`stage` is recorded and displayed but nothing filters on it, and a guide
+        that implied otherwise would send plugin authors after a stage field that has
+        no effect. Asserted in the negative because the claim is easy to add by
+        habit: every other field here does filter."""
+        assert "不参与任何筛选" in guide

@@ -4,6 +4,65 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.21] - 2026-10-05
+
+四条反馈。核心是**让规则库从只读清单变成可扩展的接口**，并把两份文档归回 `docs/`。
+
+### 新增
+
+- **外部规则插件可上传安装与卸载**（新增 `src/iris/api/plugins.py`；
+  `src/iris/config.py`、`src/iris/rules/engine.py`、`src/iris/emulate/auto.py`、
+  `src/iris/cli.py`、`src/iris/api/web_data.py`、`src/iris/api/web_app.py`；
+  `web/src/pages/Plugins.tsx`、`web/src/lib/api.ts`、`web/src/lib/types.ts`、
+  `web/src/hooks/queries.ts`；新增 `tests/test_api_plugins.py`）。
+  插件落在 `<iris_home>/plugins/`（`Settings.plugin_dir`），与 git 跟踪的 `rules/` 分开：
+  内置目录在源码树里，往里写要么污染仓库要么直接失败，而 `iris_home` 是本项目里
+  唯一为「用户产生的数据」准备的地方，副作用是 `IRIS_IRIS_HOME` 会把已装插件一起带走，
+  隔离验证因此只需改这一个变量。引擎经 `load_all_rules(settings.effective_rules_dirs)`
+  读两个目录，顺序即优先级；`Rule` 新增 `source_file`/`source_dir`，因为唯一可靠的归属是
+  「从哪个文件读出来的」，靠 id 反推文件会在 id 与文件名不一致时静默丢规则。
+  运行期若 id 冲突（有人手工塞文件），先到者保留、后到者记 warning 跳过。
+  界面：`POST /api/v1/plugins`（multipart，有界流式读取，超限 413）与
+  `DELETE /api/v1/plugins/{name}`，均挂 `Caller` 依赖；插件卡片标注来源，
+  只有外部的可卸载——卸载键放在详情窗口而非卡片上，因为卡片是 `<button>`，
+  按钮里再放按钮会被浏览器整个丢掉。
+  **上传即安装，不接受「装上了但不干活」**：引擎对不认识的键是「记告警并忽略」，
+  所以安装器在校验语法之后还要落盘重新加载一次，**有任何告警就删文件并把告警原文退回**。
+  一份把 `file_glob` 拼成 `fil_glob` 的文档如果只做语法校验会被报为成功，
+  而它的条件永远不会被求值。
+- **插件开发文档**（新增 `docs/09-规则插件开发指南.md`）。
+  可用键逐个说明（含 `within` / `executable` 的修饰对象、`etc/` → `etc_ro/` 自动回退、
+  `all`/`any` 的范围合并规则）、安装校验链 11 步、动作四种的完整参数、排错对照表。
+  两处反直觉的事实按实现写实：`stage` **当前只记录与展示，不参与任何筛选**；
+  `file_glob` 单独使用时恒成立，是否命中体现在作用范围上。
+
+### 修复
+
+- **嵌套条件里的错键不再静默失效**（`src/iris/rules/engine.py`）。
+  `_unknown_keys` 原先只检查 `detect`/`actions` 列表的顶层元素，不进 `all`/`any` 子条件。
+  而子条件与顶层条件由同一个 `_evaluate` 求值、只认同一批键，所以
+  `all:` 里把 `file_glob` 拼成 `fil_glob` 会让那个子条件永久为假，且**任何地方都不记一条日志**——
+  一条「需要 inittab 存在**且**装了守护进程」的规则就这样静静永不触发。
+  现在递归下去，路径带上 `detect all any` 这样的来源标记。内置 6 条规则实测零新告警。
+- **插件目录缺失不再被当成「没有任何规则」**（`src/iris/emulate/auto.py`）。
+  两处调用点的守卫从 `if rules_dir.is_dir()` 改为「任一目录存在」，
+  否则一个只装了插件、没带内置规则目录的部署会整段跳过规则应用。
+- **插件移除拒绝路径穿越，而不是归约后删掉另一个文件**（`src/iris/api/plugins.py`）。
+  `Path("../../rules/x.yaml").name` 是 `x.yaml`；沿用安装器的做法，先检查名字
+  归约前后是否一致，不一致就拒绝。否则一次 DELETE 会静默删掉插件目录下的同名文件并返回 200。
+
+### 变更
+
+- **「设置」的令牌功能键移到输入框下方**（`web/src/components/SettingsSheet.tsx`）。
+  此前输入框与「显示 / 复制 / 清除」并排（`flex items-end`），380px 的列宽下输入框只剩
+  约 200px，粘贴一个令牌要横向滚动。堆叠后这一列里最宽的东西就是用户输入的东西。
+- **插件卡片移除「完整信息」字样，保留箭头与整卡可点**（`web/src/pages/Plugins.tsx`）。
+  角落的「完整信息 →」是在给一个整张卡片已经是按钮的控件写标签；箭头留下，
+  继续承担「这条边后面还有东西」的方向提示，卡片的 `aria-label` 承担同一件事。
+- **`docx/` 两份文档迁入 `docs/`，目录取消**：`AI值守与稳定性治理.md` → `docs/10-AI值守与稳定性治理.md`，
+  `免安装使用指南.md` → `docs/11-免安装使用指南.md`，README 目录树与文档索引同步更新。
+  本文件历史条目里的 `docx/` 路径保持原样——那些条目记录的是当时发生的迁入动作。
+
 ## [0.3.20] - 2026-10-05
 
 四条界面反馈。核心是**承认三件此前被当成小事的事：卡片可以是一扇门、侧栏不该有第二种状态、

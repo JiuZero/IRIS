@@ -223,8 +223,8 @@ export interface FirmwareInfo {
   arch: string
 }
 
-/** `GET /api/v1/rules`: one shipped rule document, as `iris.api.web_data.rule_plugins`
- *  summarises it.
+/** `GET /api/v1/rules`: one rule document the engine would load, as
+ *  `iris.api.web_data.rule_plugins` summarises it.
  *
  *  `detect` and `actions` are *kinds*, not patterns: `["path_exists", "all"]` says
  *  the rule gates on the presence of paths, and deliberately does not publish the
@@ -234,6 +234,14 @@ export interface RulePlugin {
   id: string
   description: string
   stage: string
+  /** Which directory this rule was read from: `builtin` for the rules IRIS ships,
+   *  `external` for one installed through the workbench. Only an external rule can
+   *  be uninstalled, so the two are never presented as the same kind of thing. */
+  origin: 'builtin' | 'external'
+  /** The file name inside that directory. A document's id and its file name are
+   *  independent -- an uploaded document is stored under its id -- so the name
+   *  travels with the rule rather than being reconstructed from the id. */
+  source_file: string
   detect: string[]
   actions: string[]
   verify: string[]
@@ -247,9 +255,19 @@ export interface RulePlugin {
 }
 
 export interface RuleLibrary {
-  /** The directory the rules were read from, so an empty list is explainable. */
-  source: string
+  /** Every directory rules are read from, in precedence order, so an empty list is
+   *  explainable: the page can name which paths it looked in. Two entries rather
+   *  than one because an installed plugin lives outside the source tree. */
+  dirs: string[]
   items: RulePlugin[]
+}
+
+/** `POST /api/v1/plugins`: what the installer actually put on disk. `source_file`
+ *  is not necessarily the uploaded name -- a `.yml` is stored under the rule's id. */
+export interface PluginInstalled {
+  id: string
+  origin: string
+  source_file: string
 }
 
 export interface EmulateResponse {

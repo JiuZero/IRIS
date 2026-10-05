@@ -16,10 +16,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from iris.arch import census_to_runnable
+from iris.config import get_settings
 from iris.extract.rootfs_extract import _census_elfs
 from iris.extract.rootfs_extract import extract_rootfs as do_extract
 from iris.fsutil import safe_is_dir
-from iris.rules.engine import apply_rules, load_rules
+from iris.rules.engine import apply_rules, load_all_rules
+
+
+def _rule_dirs(explicit: Path | None) -> list[Path]:
+    """The built-in rules directory plus the operator's plugin directory.
+
+    ``explicit`` keeps its meaning as an override for the built-in directory, and the
+    plugin directory is *appended* rather than substituted: an emulation that finds
+    no built-in rules should still run the plugins that were installed, and one that
+    finds built-in rules should not have to be told about plugins at all. Missing
+    directories are dropped by the loader, so neither caller has to check.
+    """
+    return [explicit or Path("rules"), get_settings().plugin_dir]
 
 
 @dataclass
@@ -141,11 +154,14 @@ def prepare_from_firmware(
 
     # Apply L3 rules (dry-run by default for safety; set dry_run_rules=False to write)
     if apply_rules_flag and safe_is_dir(prepared.rootfs_dir):
-        rules_dir = rules_dir or Path("rules")
-        if rules_dir.is_dir():
+        rule_dirs = _rule_dirs(rules_dir)
+        # Any directory that exists, not just the built-in one: a plugin-only setup
+        # used to be skipped here entirely, which would have made an installed
+        # plugin look exactly like an absent one.
+        if any(directory.is_dir() for directory in rule_dirs):
             reports = apply_rules(
                 prepared.rootfs_dir,
-                load_rules(rules_dir),
+                load_all_rules(rule_dirs),
                 dry_run=dry_run_rules,
             )
             for r in reports:
@@ -192,9 +208,9 @@ def prepare_from_rootfs(
         prepared.notes.append(f"ELF census: {count} files ({top_5})")
 
     # Apply L3 rules
-    rules_dir = rules_dir or Path("rules")
-    if rules_dir.is_dir():
-        reports = apply_rules(rootfs_dir, load_rules(rules_dir), dry_run=dry_run_rules)
+    rule_dirs = _rule_dirs(rules_dir)
+    if any(directory.is_dir() for directory in rule_dirs):
+        reports = apply_rules(rootfs_dir, load_all_rules(rule_dirs), dry_run=dry_run_rules)
         for r in reports:
             if r.matched:
                 prepared.matched_rule_ids.append(r.rule_id)

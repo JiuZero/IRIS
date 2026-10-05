@@ -26,6 +26,7 @@ import type {
   EvalSet,
   FirmwareInfo,
   InstanceStats,
+  PluginInstalled,
   RootCauseCard,
   RuleLibrary,
   RunDetail,
@@ -159,10 +160,31 @@ export const api = {
 
   run: (id: number) => request<RunDetail>(`/api/v1/runs/${id}`),
 
-  /** The rule plugins shipped in `rules/`. A page that listed invented extensions
-   *  would be the one panel on this workbench whose contents mean nothing, so this
-   *  is the documents themselves, read through the engine's own loader. */
+  /** The rule plugins the engine would load: the ones IRIS ships plus any installed
+   *  through the workbench. A page that listed invented extensions would be the one
+   *  panel on this workbench whose contents mean nothing, so this is the documents
+   *  themselves, read through the engine's own loader. */
   rules: () => request<RuleLibrary>('/api/v1/rules'),
+
+  /** Install a rule plugin from a file the browser holds.
+   *
+   * Multipart for the same reason `uploadLaunch` is: the body *is* the file, and only
+   * the browser's own Content-Type carries a boundary that matches. A 422 arrives
+   * with a reason written for the plugin author -- the loader's own complaints,
+   * verbatim -- which is why the page shows `detail` rather than a generic failure.
+   */
+  installPlugin: (file: File) => {
+    const form = new FormData()
+    form.append('file', file, file.name)
+    return request<PluginInstalled>('/api/v1/plugins', { method: 'POST', body: form })
+  },
+
+  /** Uninstall one rule plugin by the file name the listing reported. Built-in
+   *  rules are not reachable this way: they are not in the plugin directory. */
+  removePlugin: (name: string) =>
+    request<{ removed: string }>(`/api/v1/plugins/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    }),
 
   /** Erase one recorded run. Counted rather than a boolean: 404 and "removed
    *  nothing" are different answers and the page reports the difference. */

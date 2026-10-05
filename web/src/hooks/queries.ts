@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api } from '../lib/api'
 
@@ -92,15 +92,43 @@ export function useConsoleLog(iid: number | null, enabled: boolean) {
 export function useFirmware() {
   return useQuery({ queryKey: ['firmware'], queryFn: api.firmware, staleTime: 30_000 })
 }
-/** The rule plugin library, read from `rules/` on the server.
+/** The rule plugin library, read from `rules/` and the plugin directory on the
+ *  server.
  *
- *  Not polled: the documents only change when the package is rebuilt, so a
- *  refresh is a reload rather than a wait. The tallies it carries do move -- a
- *  launch records a repair against a rule id -- and they move on the pages that
- *  invalidate after one, which is why the plugin page is invalidated with the
- *  rest rather than left polling a mostly-static document. */
+ *  Not polled: the documents only change when a package is rebuilt or a plugin is
+ *  installed, and both of those go through this file's mutations, which invalidate
+ *  the query. The tallies it carries do move -- a launch records a repair against a
+ *  rule id -- and they move on the pages that invalidate after one, which is why the
+ *  plugin page is invalidated with the rest rather than left polling. */
 export function useRules() {
   return useQuery({ queryKey: ['rules'], queryFn: api.rules, staleTime: 60_000 })
+}
+
+/** Install a rule plugin, then re-read the library.
+ *
+ *  Invalidating rather than pushing the new item into the cache: the listing is the
+ *  engine's own view, and after an install the server has re-read the document from
+ *  disk to decide whether to accept it at all. A cache patched locally would show a
+ *  plugin the engine had not yet agreed to load. */
+export function useInstallPlugin() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (file: File) => api.installPlugin(file),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ['rules'] })
+    },
+  })
+}
+
+/** Uninstall a rule plugin, then re-read the library for the same reason. */
+export function useRemovePlugin() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (name: string) => api.removePlugin(name),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ['rules'] })
+    },
+  })
 }
 
 /** One recorded run, in full: the four-layer evidence, the failure profiles and the

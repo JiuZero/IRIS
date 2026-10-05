@@ -565,12 +565,13 @@ def corpus_eval(
 
 @rules_app.command("list")
 def rules_list() -> None:
-    """Show all L3 boot-fix rules."""
-    from iris.rules.engine import load_rules
+    """Show all L3 boot-fix rules, built-in and installed plugins alike."""
+    from iris.rules.engine import load_all_rules
 
+    settings = get_settings()
     rows = [
         f"{r.id:<26} stage={r.stage:<10} {(r.description.splitlines() or [''])[0][:64]}"
-        for r in load_rules(get_settings().rules_dir)
+        for r in load_all_rules(settings.effective_rules_dirs)
     ]
     out.block("info", "L3 boot-fix rules", rows)
 
@@ -581,9 +582,13 @@ def rules_apply(
     apply: bool = typer.Option(False, "--apply", help="write changes (default: dry-run report)"),
 ) -> None:
     """Detect boot-failure patterns in a rootfs and apply rule fixes."""
-    from iris.rules.engine import apply_rules, load_rules, report_json
+    from iris.rules.engine import apply_rules, load_all_rules, report_json
 
-    reports = apply_rules(rootfs, load_rules(get_settings().rules_dir), dry_run=not apply)
+    reports = apply_rules(
+        rootfs,
+        load_all_rules(get_settings().effective_rules_dirs),
+        dry_run=not apply,
+    )
     # The one place in the CLI that writes a bare line: this is a machine-readable
     # report, not a log record, and `iris rules apply ... | jq` has to keep working.
     # A timestamp in front of the JSON would make the output unparseable.

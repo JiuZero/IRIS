@@ -318,36 +318,43 @@ function TokenGroup() {
       </div>
       <p className="settings-group-hint">仅当服务以 IRIS_API_TOKEN 启动时才需要</p>
 
-      <div className="mt-2 flex items-end gap-1.5">
-        <div className="min-w-0 flex-1">
-          <TextInput
-            label="令牌"
-            type="password"
-            autoComplete="off"
-            placeholder="与 IRIS_API_TOKEN 相同的值"
-            value={token}
-            onChange={(event) => {
-              setToken(event.target.value)
-              setProbe('idle')
-            }}
-          />
-        </div>
-        <Button variant="primary" onClick={() => void apply()} disabled={probe === 'checking'}>
-          <KeyRound className="h-3.5 w-3.5" aria-hidden="true" />
-          保存并验证
-        </Button>
-        <Button
-          variant="ghost"
-          onClick={() => {
-            setToken('')
-            writeToken('')
+      {/* The buttons sit *below* the field rather than beside it. Beside it, the
+          380px column left the input about 200px wide, which is enough for `••••`
+          and nothing else -- pasting a token means either a very short field or
+          scrolling inside it, and the two buttons are what make the panel wide in
+          the first place. Stacked, the field spans the column and the buttons form
+          one row under it, so the widest thing in the group is the thing you type
+          into. */}
+      <div className="mt-2">
+        <TextInput
+          label="令牌"
+          type="password"
+          autoComplete="off"
+          placeholder="与 IRIS_API_TOKEN 相同的值"
+          value={token}
+          onChange={(event) => {
+            setToken(event.target.value)
             setProbe('idle')
-            setDetail('已清除本地令牌')
           }}
-        >
-          <X className="h-3.5 w-3.5" aria-hidden="true" />
-          清除
-        </Button>
+        />
+        <div className="mt-2 flex items-center gap-1.5">
+          <Button variant="primary" onClick={() => void apply()} disabled={probe === 'checking'}>
+            <KeyRound className="h-3.5 w-3.5" aria-hidden="true" />
+            保存并验证
+          </Button>
+          <Button
+            variant="ghost"
+            onClick={() => {
+              setToken('')
+              writeToken('')
+              setProbe('idle')
+              setDetail('已清除本地令牌')
+            }}
+          >
+            <X className="h-3.5 w-3.5" aria-hidden="true" />
+            清除
+          </Button>
+        </div>
       </div>
       {detail && (
         <p className="mt-1.5 flex items-center gap-1 text-2xs" role="status">

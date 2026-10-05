@@ -450,14 +450,23 @@ class TestRulePlugins:
     def test_an_unreadable_rule_directory_shows_nothing_rather_than_failing(
             self, client, db, monkeypatch, tmp_path) -> None:
         """A wheel install has no ``rules/`` beside it, and a plugin centre that 500s
-        takes a page down over a missing optional directory."""
-        monkeypatch.setattr(web_data, "_rules_dir", lambda: tmp_path / "absent")
+        takes a page down over a missing optional directory.
+
+        ``Settings.rules_dir`` is patched as a property on the class because it is
+        computed by walking up from the working directory -- there is no instance
+        attribute to point elsewhere, and in a checkout it resolves to the real
+        repository. The response now names *both* directories it looked in, so an
+        empty list is explainable rather than merely empty.
+        """
+        from iris.config import Settings
+
+        monkeypatch.setattr(Settings, "rules_dir", property(lambda self: tmp_path / "absent"))
 
         resp = client.get("/api/v1/rules")
 
         assert resp.status_code == 200
         assert resp.json()["items"] == []
-        assert "absent" in resp.json()["source"]
+        assert "absent" in " ".join(resp.json()["dirs"])
 
 
 def resp_text(client) -> str:

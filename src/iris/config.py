@@ -50,6 +50,30 @@ class Settings(BaseSettings):
                 return base / "rules"
         return Path("rules")
 
+    #: Third-party rule plugins, kept out of ``rules_dir`` on purpose.
+    #:
+    #: ``rules_dir`` is IRIS's own source tree -- in a checkout it is a git-tracked
+    #: directory, and in a wheel install it is next to the package or absent. Writing
+    #: an operator's plugin there would either dirty the repository or fail outright,
+    #: so external plugins get their own directory under ``iris_home``, which is the
+    #: one place in this project that is meant to hold data the user produced.
+    #: It also means ``IRIS_IRIS_HOME`` moves the plugin set with everything else,
+    #: which is what makes an isolated verification run isolated.
+    @property
+    def plugin_dir(self) -> Path:
+        return self.iris_home / "plugins"
+
+    @property
+    def effective_rules_dirs(self) -> list[Path]:
+        """Every rule directory to load, IRIS's own first.
+
+        Order is the precedence order. A plugin whose ``id`` collides with a
+        built-in rule is refused at upload time, so the only way to reach a collision
+        here is to drop a file into the directory by hand; the loader keeps the first
+        and says so in the log rather than silently letting the second one win.
+        """
+        return [self.rules_dir, self.plugin_dir]
+
     @property
     def corpus_dir(self) -> Path:
         return self.iris_home / "corpus"

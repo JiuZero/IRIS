@@ -419,12 +419,15 @@ def instance_stats(iid: int) -> dict[str, Any]:
 
 
 def rule_plugins() -> dict[str, Any]:
-    """The YAML rule plugins shipped in ``rules/``, with their ledger tallies.
+    """The rule plugins the engine would load -- IRIS's own plus installed ones.
 
     A plugin centre that lists made-up extensions would be the one panel on this
     workbench whose contents mean nothing, so this reads the actual rule documents
     through the engine's own loader rather than keeping a parallel inventory: a rule
-    added to ``rules/`` appears here, and one deleted disappears.
+    added to ``rules/`` appears here, and one deleted disappears. It also goes
+    through ``plugins.list_plugins``, so a document uploaded through the workbench
+    shows up without a second code path -- and ``origin`` says which directory it
+    came from, because "can I uninstall this" is only answerable for an external one.
 
     The tallies come from ``repair_action``, which is a ledger of repairs that were
     *attempted and recorded*. That is not the same as "the rule matched": the
@@ -443,41 +446,39 @@ def rule_plugins() -> dict[str, Any]:
                 recorded + 1,
             )
     return {
-        "source": str(_rules_dir()),
+        "dirs": [str(directory) for directory in get_settings().effective_rules_dirs],
         "items": [
             {
-                "id": rule.id,
-                "description": rule.description.strip(),
-                "stage": rule.stage,
-                "detect": _summarise_conditions(rule.detect),
-                "actions": _summarise_actions(rule.actions),
-                "verify": sorted(rule.post_action_verify),
-                "warnings": rule.warnings,
-                "applied": tallies.get(rule.id, (0, 0, 0))[0],
-                "promoted": tallies.get(rule.id, (0, 0, 0))[1],
-                "recorded": tallies.get(rule.id, (0, 0, 0))[2],
+                "id": item["rule"].id,
+                "description": item["rule"].description.strip(),
+                "stage": item["rule"].stage,
+                "origin": item["origin"],
+                "source_file": item["source_file"],
+                "detect": _summarise_conditions(item["rule"].detect),
+                "actions": _summarise_actions(item["rule"].actions),
+                "verify": sorted(item["rule"].post_action_verify),
+                "warnings": item["rule"].warnings,
+                "applied": tallies.get(item["rule"].id, (0, 0, 0))[0],
+                "promoted": tallies.get(item["rule"].id, (0, 0, 0))[1],
+                "recorded": tallies.get(item["rule"].id, (0, 0, 0))[2],
             }
-            for rule in rules
+            for item in rules
         ],
     }
 
 
-def _rules_dir() -> Path:
-    return _repo_root() / "rules"
-
-
-def _load_rule_plugins() -> list[Any]:
-    """Every rule document, or an empty list when the directory is unreachable.
+def _load_rule_plugins() -> list[dict[str, Any]]:
+    """Every rule document with its origin, or an empty list when unreadable.
 
     Absent rather than raising: a wheel install has no ``rules/`` beside it, and a
     plugin centre that 500s is worse than one that honestly shows nothing. The
-    empty case is distinguishable by the caller's own rendering, which says the
-    directory could not be read.
+    empty case is distinguishable by the caller's own rendering, which reports the
+    directories it could not read.
     """
-    try:
-        from iris.rules.engine import load_rules
+    from iris.api.plugins import list_plugins
 
-        return load_rules(_rules_dir())
+    try:
+        return list_plugins()
     except OSError as exc:
         logger.warning(f"could not read rule plugins: {exc}")
         return []
@@ -489,7 +490,7 @@ def _summarise_conditions(detect: list[dict]) -> list[str]:
     Only the *shape* is reported, never the patterns themselves: the fingerprints
     are long regexes and path globs whose readable form is the vendor's file
     layout, and a wall of those is not what a reader of a plugin list needs. The
-    full document stays on disk in ``rules/``.
+    full document stays on disk in the directory the rule came from.
     """
     keys: set[str] = set()
 
