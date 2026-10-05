@@ -283,6 +283,10 @@ class TestDashboardRoutes:
         assert client.get("/api/v1/config").json()["api_token_configured"] in {True, False}
 
     def test_instance_stats_of_an_instance_you_do_not_own_is_a_404(self, client, db) -> None:
+        """Load-bearing now that a stopped instance answers 200 with ``state="gone"``:
+        that 200 must not become a way to tell a live id from a dead one, or the route
+        would hand out exactly what the ownership model exists to withhold."""
+
         from iris.db.active import register
 
         with web_app._session() as session:
@@ -302,6 +306,58 @@ class TestDashboardRoutes:
         body = client.get("/api/v1/instances/7001/stats")
         assert body.status_code == 200
         assert body.json()["sampled"] is False
+
+    def test_a_live_instance_of_your_own_is_reported_as_running(self, client, db, monkeypatch) -> None:
+        from iris.api import web_data
+        from iris.db.active import register
+
+        with web_app._session() as session:
+            register(session, iid=7011, client_id="local", arch="mipsel",
+                     rootfs_path="/tmp/a", container_id="c1")
+        monkeypatch.setattr(web_data, "container_stats", lambda name: None)
+        body = client.get("/api/v1/instances/7011/stats")
+        assert body.json()["state"] == "running"
+
+    def test_a_stopped_instance_says_gone_rather_than_404(self, client, db, monkeypatch) -> None:
+        """What the panel behind a stop has to learn.
+
+        A 404 cannot carry that news: it is the same answer the route gives for an id
+        that was never real, and the two call for opposite reactions -- one is a stale
+        link to retry, the other is a terminal state to render and stop asking about.
+        """
+        from iris.api import web_data
+
+        monkeypatch.setattr(web_data, "container_stats", lambda name: None)
+        body = client.get("/api/v1/instances/7012/stats")
+        assert body.status_code == 200
+        assert body.json()["state"] == "gone"
+
+    def test_a_stopped_instance_reports_no_reading_rather_than_zero(self, client, db, monkeypatch) -> None:
+        """``0%`` on an instance with no container is a measurement of nothing, and it
+        is indistinguishable on the page from a guest that really is idle."""
+
+        from iris.api import web_data
+
+        monkeypatch.setattr(web_data, "container_stats", lambda name: None)
+        body = client.get("/api/v1/instances/7013/stats").json()
+        assert body["state"] == "gone"
+        assert body["sampled"] is False
+        assert body["cpu_pct"] is None
+        assert body["mem_mb"] is None
+
+    def test_the_stats_response_carries_nothing_beyond_the_documented_fields(
+            self, client, db, monkeypatch) -> None:
+        """``extra="forbid"`` is only worth anything if the contract is asserted from
+        the outside: a field the frontend reads that no test names is a field nothing
+        guarantees to stay."""
+
+        from iris.api import web_data
+
+        monkeypatch.setattr(web_data, "container_stats", lambda name: None)
+        body = client.get("/api/v1/instances/7014/stats").json()
+        assert set(body) == {"iid", "container", "state", "sampled", "cpu_pct", "mem_mb",
+                             "mem_limit_mb", "serial_port", "console_available"}
+
 
 
 # --------------------------------------------------------------- erasing history

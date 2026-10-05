@@ -35,6 +35,7 @@ logger = get_logger(__name__)
 __all__ = [
     "ActiveRecord",
     "container_alive",
+    "get_live",
     "list_owned",
     "reconcile",
     "register",
@@ -119,6 +120,20 @@ def list_owned(session: Session, client_id: str) -> list[ActiveRecord]:
         .order_by(ActiveEmulation.iid)
     )
     return [to_dict(row) for row in rows]
+
+
+def get_live(session: Session, iid: int) -> ActiveRecord | None:
+    """The row for ``iid`` whoever owns it, or None when nothing is running under it.
+
+    Not an ownership bypass: the caller still has to compare ``client_id`` against
+    its own. What it adds is the ability to tell "your instance stopped" apart from
+    "that id is not yours" -- two answers :func:`release` collapses into one on
+    purpose, because for a stop request they must look identical. A panel polling a
+    resource has no such requirement, and cannot render either state without the
+    difference.
+    """
+    row = session.scalar(select(ActiveEmulation).where(ActiveEmulation.iid == iid))
+    return None if row is None else to_dict(row)
 
 
 def release(session: Session, *, iid: int, client_id: str) -> ActiveRecord | None:

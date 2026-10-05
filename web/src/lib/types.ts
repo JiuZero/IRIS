@@ -161,6 +161,10 @@ export interface ConsoleLog {
 export interface InstanceStats {
   iid: number
   container: string
+  /** Whether anything is still running under this id. A closed vocabulary because a
+   *  panel branches on it, and `gone` is the state that ends the polling: the answer
+   *  it carries can no longer change. */
+  state: 'running' | 'gone'
   /** False means "not measured yet", not "idle". */
   sampled: boolean
   cpu_pct: number | null

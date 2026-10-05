@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import itertools
 import json
 from typing import Any
 
@@ -34,6 +35,26 @@ _bridges: dict[int, SerialBridge] = {}
 CLOSE_NOT_FOUND = 4404
 CLOSE_NO_CONSOLE = 4403
 CLOSE_UNAVAILABLE = 1011
+
+#: Monotonic per-connection counter, appended to the peer address to name a
+#: subscriber. The peer address alone is the whole machine as far as a browser is
+#: concerned, and every tab on it shares one: keyed on that, a second tab silently
+#: replaced the first in the bridge's registry, and the first tab's cleanup then
+#: removed the second -- leaving a terminal that reported itself connected and never
+#: received another byte, which reads as an unstable link rather than a bug.
+_subscriber_seq = itertools.count(1)
+
+
+def subscriber_name(websocket: WebSocket) -> str:
+    """The registry key for one connection.
+
+    Unique per connection, so one tab's teardown can never evict another's
+    subscription. The peer prefix is kept because the input-holder readout is far
+    more recognisable as "this machine" than as "#7" -- but it cannot be the whole
+    key: every browser tab on a machine shares one peer address.
+    """
+    peer = websocket.client.host if websocket.client else "anonymous"
+    return f"{peer}#{next(_subscriber_seq)}"
 
 
 def _authorise(websocket: WebSocket, token: str) -> str | None:
@@ -151,7 +172,7 @@ async def terminal_endpoint(websocket: WebSocket) -> None:
         return
 
     await websocket.accept()
-    name = websocket.client.host if websocket.client else "anonymous"
+    name = subscriber_name(websocket)
 
     try:
         bridge = await bridge_for(iid, port)

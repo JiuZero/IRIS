@@ -90,12 +90,20 @@ function ActiveTable({
   onLaunch: () => void
 }) {
   const client = useQueryClient()
+  const pinned = useUiStore((state) => state.pinnedInstance)
+  const setPinned = useUiStore((state) => state.setPinnedInstance)
   const stop = useMutation({
     mutationFn: (iid: number) => api.stopEmulation(iid),
-    onSuccess: () => {
-      // Both caches, because a stopped container must disappear from the sidebar too.
+    onSuccess: (_result, iid) => {
+      // Both lists, because a stopped container must disappear from the sidebar too.
       void client.invalidateQueries({ queryKey: ['emulations'] })
       void client.invalidateQueries({ queryKey: ['stats'] })
+      // This one's resource reading is dropped rather than invalidated: there is no
+      // longer an instance behind that key, and invalidating would fire one more
+      // request at it. The console snapshot is the exception -- it is written when the
+      // run ends, so re-reading it is how the panel picks up the final lines.
+      client.removeQueries({ queryKey: ['instance-stats', iid] })
+      if (pinned === iid) setPinned(null)
     },
   })
 

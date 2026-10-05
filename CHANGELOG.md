@@ -4,6 +4,87 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.22] - 2026-10-05
+
+五条反馈。核心是**让「实例已停止」成为一个能传达到的状态，而不是一个不断重试的失败**，
+外加两处由用户观察暴露出的真实缺陷：终端的重复输出，和串口订阅者之间的互相顶替。
+
+### 新增
+
+- **实例资源占用端点返回 `state`**（`src/iris/api/web_app.py`、`web_data.py`、
+  `src/iris/db/active.py`；`web/src/lib/types.ts`、`web/src/layout/Inspector.tsx`、
+  `web/src/hooks/queries.ts`、`web/src/pages/Instances.tsx`）。
+  `GET /api/v1/instances/{iid}/stats` 此前对「已停止」与「地址写错」一律回 404，
+  前端只能把它渲染成「docker stats 不可用」——而 docker 从未失败过，失败的是所有权校验，
+  标题因此在指着一个没出问题的组件。现在回三态：`owned` 给读数，`gone` 回 **200**
+  且带 `state="gone"`，`not-yours` 仍是 404。**中间那态必须是 200**：404 同时也是
+  「这个 id 从来不存在」的答案，而这两种情况的正确反应正好相反（重试 vs 停止）。
+  `not-yours` 保持 404 是因为 200 会把「活跃」与「已死」变成可枚举的差别。
+  `iris.db.active.get_live` 按 iid 取行而不按 caller 过滤，调用方仍须自行比对
+  `client_id`；`release` 刻意把「不是你的」与「没有」合成一个 None，停止请求必须这样，
+  而一个轮询资源的面板不需要——它分不出这两者就无法渲染任何一个。
+  响应模型 `extra="forbid"`，字段集合由测试从外部断言。
+- **终端页显示「本连接已收字节」并说明输出来源**（`web/src/pages/TerminalPage.tsx`）。
+  此前只有「丢弃字节」一个链路指标，无法区分「链路正常但 guest 安静」与「链路断了」。
+  另加一句说明：`IRIS-RC:` 与固件自身的启动告警属正常日志。
+
+### 修复
+
+- **终端里每行日志出现两次**（`web/src/pages/TerminalPage.tsx`）。
+  `write` 读的是组件级共享 ref，而一个已关闭的 socket 在收到 close 帧之前仍会继续
+  触发 `onmessage`——此时 ref 已被重连创建的新终端顶替，于是旧 socket 的字节被写进
+  新终端。开发模式的 StrictMode 双挂载必然触发，手动点「重连」同理；boot 期数据量最大，
+  所以重复几乎必然被看到。现在 `write` 闭包捕获本次 effect 创建的 terminal，
+  并用 `live` 标志在 cleanup 后拒绝写入，物理上不可能写错对象。
+- **同机第二个终端标签页会顶掉第一个，随后第一个的清理又把第二个摘掉**
+  （`src/iris/api/web_terminal.py`、`serial_bridge.py`；新增 `tests/test_web_terminal.py`）。
+  订阅者以 `client.host` 为键，而浏览器里每个标签页的 peer 都是同一台机器：
+  第二个连接在注册表里覆盖第一个，第一个断开时的 `unsubscribe` 再把第二个摘掉——
+  剩下的那个终端界面上仍显示「串口就绪」，却再也收不到字节，看起来正是「通讯不稳定」。
+  键改为 `peer#序号`。`pump_subscriber` 另补异常保护：发送失败会结束该协程并记 warning，
+  此前是静默终止，而这个 task 在 endpoint 的 finally 里被 await，异常还会从那里冒出来。
+  该文件此前**零测试**；新增 8 个用例，其中 4 个在把命名临时退回旧写法后会失败（已验证）。
+  注意：跨 `TestClient` 的两个 websocket 会各自带一个 portal，关掉一个会连带销毁桥所在的
+  事件循环，所以「关一个、另一个仍收得到」只能在桥层测，不能靠两个 TestClient 会话。
+- **文件选择框内不显示文件名**（`web/src/components/ui.tsx`、`web/src/tokens.css`）。
+  原因是重置逻辑而非浏览器缺陷：为了支持同一文件重复选择，选中后立刻
+  `event.target.value = ''`，原生控件随之回到占位文案，于是页面上呈现出
+  「框内写着未选择文件、文件名跟在后面」——这是该设计下必然可见的结果，不是样式失误。
+  现在原生 input 透明地铺在自绘控件之上（`position:absolute; inset:0; opacity:0; z-index:1`）：
+  它仍是点击落点与文件来源，可见部分全部自绘，文件名因此落在框内。
+  `z-index` 是显式写死的：自绘层是 flex 容器（CSS 归类为 block-level），
+  叠放次序不值得留给绘制顺序去推断。focus 环画在自绘层上（相邻兄弟选择器），
+  因为 `opacity:0` 会把原生 outline 一起带走。`value` 重置保留，两处调用方
+  （新建实例窗口、插件中心）同时受益。
+- **资源占用与串口快照在实例停止后仍显示旧信息**（`web/src/layout/Inspector.tsx`、
+  `web/src/hooks/queries.ts`）。轮询没有终止条件：react-query v5 的 `refetchInterval`
+  定时器与错误状态无关，无条件 `setInterval`，所以 404 每两秒打两次（全局 `retry: 1` 再翻倍）。
+  现在 `refetchInterval` 改为函数形式，`state === 'gone'` 即停；串口快照在拿到后停
+  （它是运行结束时落盘的一次性产物）。停止成功后 `removeQueries` 掉该实例的资源缓存
+  （失效会再发一次已经没有实例可问的请求），并在它正是当前 pin 时清 pin。
+  检查器改为顶层读一次 stats 交给两个面板复用。串口快照**保留**并标注「已归档」：
+  它是失败归因要读的证据，删掉才是倒退，要改的是它自称是什么。
+
+### 变更
+
+- **新建实例成功后跳转到实例信息页**（`web/src/components/LaunchDialog.tsx`、
+  `web/src/pages/InstanceDetail.tsx`）。原先只把结论留在窗口里并给一个链接。
+  跳转**只能**发生在接口返回之后：服务端在 `emulate_firmware` 返回**之后**才调
+  `_remember` 注册实例（`src/iris/api/server.py:523-533`），按下去就跳会落到一个
+  声称「未托管」的页面上。结论随 router 的 location state 一起过去——
+  启动耗时、解包统计、命中规则这些数据服务端并不保留，只此一份。
+  刷新后 state 消失属预期，页面不依赖它也能完整工作。
+
+### 文档
+
+- 记录本次两条「不做什么」的理由：`GET /api/v1/console/{iid}` **不**补 `require_owned`
+  ——运行历史（`/api/v1/runs`）本就是全局可见的，而 `emulation_run` 没有 `client_id` 列，
+  按活跃表补校验会让停止后的快照彻底读不到。
+- 第五条的 `lookup webTimeout failed` 已定位为固件自带 goahead 的一次性启动告警
+  （`libgo.so` 里的 `lookup %s failed` 格式串与 `webTimeout` action 名，
+  10 个实例的串口快照各出现 1 次），与 IRIS 链路无关；用户看到的「重复」来自上面那条
+  前端缺陷。
+
 ## [0.3.21] - 2026-10-05
 
 四条反馈。核心是**让规则库从只读清单变成可扩展的接口**，并把两份文档归回 `docs/`。

@@ -686,9 +686,21 @@ export function Select({
   )
 }
 
-/** The file picker. The visible filename is the page's own text next to a themed
- *  button, so the browser's untranslated "Choose File" -- which is also the
- *  platform's grey, and cannot be themed -- never appears. */
+/** The file picker.
+ *
+ *  Two elements, one control: the native input stays stretched over the drawn one,
+ * transparent, because it is what a click lands on and what the browser hands the
+ * picked file to. Everything visible is drawn, which is what lets the filename sit
+ * *inside* the field next to the button.
+ *
+ *  The obvious alternative -- keeping the native control and restyling
+ *  `::file-selector-button` -- cannot work here, and the reason is worth recording:
+ *  a file input clears its own visible text the moment `value` is reset, so the
+ *  control falls back to the browser's untranslated "No file chosen" while the page
+ *  renders the name beside it. That is the "filename trailing the picker" layout,
+ *  and it is unavoidable in that design rather than a styling mistake. Resetting
+ *  `value` is not optional either: without it, picking the same file twice in a row
+ *  fires no `change` and the second selection is silently ignored. */
 export function FileInput({
   label,
   hint,
@@ -708,26 +720,31 @@ export function FileInput({
 }) {
   return (
     <FieldShell label={label} hint={hint} className={className}>
-      <span className="flex items-center gap-2">
+      <span className="relative block">
         <input
           type="file"
           accept={accept}
           disabled={disabled}
-          className="field field-file w-auto flex-none"
+          className="field-file-native"
           onChange={(event) => {
             const picked = event.target.files?.[0] ?? null
             onPick(picked)
-            // Reset so picking the same file twice in a row still fires `change`;
-            // without this, the second selection is silently ignored.
             event.target.value = ''
           }}
         />
-        {file && (
-          <span className="min-w-0 truncate font-mono text-2xs text-ink-300" title={file.name}>
-            {file.name}
-            <span className="ml-1.5 text-ink-500">{formatBytes(file.size)}</span>
+        <span className={classNames('field-file', disabled && 'opacity-45')} aria-hidden="true">
+          <span className="field-file-button">选择文件</span>
+          <span className="min-w-0 truncate font-mono text-2xs" title={file?.name}>
+            {file ? (
+              <>
+                <span className="text-ink-300">{file.name}</span>
+                <span className="ml-1.5 text-ink-500">{formatBytes(file.size)}</span>
+              </>
+            ) : (
+              <span className="text-ink-700">未选择文件</span>
+            )}
           </span>
-        )}
+        </span>
       </span>
     </FieldShell>
   )

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Play } from 'lucide-react'
 
@@ -13,8 +13,12 @@ import type { EmulateResponse, UploadLaunchResponse } from '../lib/types'
 
 /** Either launch route's answer. `UploadLaunchResponse` extends
  *  `EmulateResponse`, so the boot verdict is read off one field name and the
- *  upload-only extras are narrowed by `'source' in result`. */
-type LaunchOutcome = EmulateResponse | UploadLaunchResponse
+ *  upload-only extras are narrowed by `'source' in result`.
+ *
+ *  Exported because the instance page reads it back out of the router's location
+ *  state: that is the only copy of the unpack numbers and the boot duration, and
+ *  the server keeps neither. */
+export type LaunchVerdict = EmulateResponse | UploadLaunchResponse
 
 type LaunchSource = 'ready' | 'rootfs-archive' | 'firmware'
 
@@ -38,13 +42,21 @@ type LaunchSource = 'ready' | 'rootfs-archive' | 'firmware'
  * need the dashboard: the decision is "which firmware, which port", and both are
  * knowable from any screen. A form pinned to one page means the people on the
  * other four have to go somewhere first, and the fastest path to the terminal they
- * already left is not via the overview. The verdict stays in the window rather than
- * closing on success -- a launch that answers "Web 不可达, link-no-arp" is exactly
- * the answer somebody needs to read before moving on.
+ * already left is not via the overview.
+ *
+ * On success it hands the window over to the instance page. That used to leave the
+ * verdict in the window and offer a link, which is one more click to the thing the
+ * launch was for. The verdict travels along in the router's location state rather
+ * than being dropped: half of what it reports -- how long the boot took, what the
+ * unpack did, which rules matched -- exists nowhere else, and the instance page has
+ * no way to ask the server for it after the fact. Location state is the right
+ * carrier because it is exactly a hand-off: a reload legitimately loses it, and the
+ * page is built to read its own four tabs without it.
  */
 export function LaunchDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const firmware = useFirmware()
   const client = useQueryClient()
+  const navigate = useNavigate()
   const [source, setSource] = useState<LaunchSource>('ready')
   const [selected, setSelected] = useState('')
   const [archive, setArchive] = useState<File | null>(null)
@@ -52,7 +64,7 @@ export function LaunchDialog({ open, onClose }: { open: boolean; onClose: () => 
   const [arch, setArch] = useState('')
   const [port, setPort] = useState('0')
   const [timeoutValue, setTimeoutValue] = useState('200')
-  const [lastResult, setLastResult] = useState<LaunchOutcome | null>(null)
+  const [lastResult, setLastResult] = useState<LaunchVerdict | null>(null)
 
   const shared = {
     port: Number.parseInt(port, 10) || 0,
@@ -60,7 +72,7 @@ export function LaunchDialog({ open, onClose }: { open: boolean; onClose: () => 
   }
 
   const start = useMutation({
-    mutationFn: async (): Promise<LaunchOutcome> => {
+    mutationFn: async (): Promise<LaunchVerdict> => {
       if (source === 'ready') {
         const target = (firmware.data ?? []).find((item) => item.path === selected)
         if (!target) throw new Error('请先选择一个已提取的 rootfs')
@@ -91,6 +103,11 @@ export function LaunchDialog({ open, onClose }: { open: boolean; onClose: () => 
       void client.invalidateQueries({ queryKey: ['emulations'] })
       void client.invalidateQueries({ queryKey: ['stats'] })
       void client.invalidateQueries({ queryKey: ['runs'] })
+      // Not before the answer: the server registers the instance *after* the boot
+      // returns (`iris.api.server._remember`), so navigating the moment the button is
+      // pressed would land on a page that says the instance is not hosted here.
+      onClose()
+      navigate(`/instances/${result.iid}`, { state: { launch: result } })
     },
   })
 
@@ -228,20 +245,33 @@ export function LaunchDialog({ open, onClose }: { open: boolean; onClose: () => 
             启动失败：{(start.error as Error).message}
           </p>
         )}
-        {lastResult && <LaunchOutcome result={lastResult} />}
+        {lastResult && (
+          <div className="border-t border-surface-border pt-3">
+            <LaunchOutcome result={lastResult} />
+          </div>
+        )}
       </div>
     </Modal>
   )
 }
 
-/** What the window shows after a launch: the boot verdict, plus -- for an upload --
- *  where the input came from and what the unpack did. The upload extras are not
- *  decoration: a skipped symlink is the first thing to look at when a guest that
- *  came out of a tar will not boot. */
-function LaunchOutcome({ result }: { result: LaunchOutcome }) {
+/** What the launch produced: the boot verdict, plus -- for an upload -- where the
+ *  input came from and what the unpack did. The upload extras are not decoration: a
+ *  skipped symlink is the first thing to look at when a guest that came out of a tar
+ *  will not boot.
+ *
+ *  Rendered in two places, and `linkToDetail` is the only difference: on the instance
+ *  page it would be a link to the page it is already on. */
+export function LaunchOutcome({
+  result,
+  linkToDetail = true,
+}: {
+  result: LaunchVerdict
+  linkToDetail?: boolean
+}) {
   const upload = 'source' in result ? result : null
   return (
-    <div className="flex flex-col gap-2 border-t border-surface-border pt-3 text-2xs">
+    <div className="flex flex-col gap-2 text-2xs">
       <div className="flex flex-wrap items-center gap-2">
         <Badge tone={result.web_ok ? 'success' : 'danger'}>{result.web_ok ? 'Web 可达' : 'Web 不可达'}</Badge>
         {upload && <Badge tone="violet">{upload.source === 'rootfs' ? 'rootfs 归档' : '厂商固件'}</Badge>}
@@ -265,9 +295,11 @@ function LaunchOutcome({ result }: { result: LaunchOutcome }) {
           </a>
         )}
         {result.error && <span className="text-danger">{result.error}</span>}
-        <Link to={`/instances/${result.iid}`} className="ml-auto text-iris-400 hover:underline">
-          查看实例详情
-        </Link>
+        {linkToDetail && (
+          <Link to={`/instances/${result.iid}`} className="ml-auto text-iris-400 hover:underline">
+            查看实例详情
+          </Link>
+        )}
       </div>
 
       {upload && (

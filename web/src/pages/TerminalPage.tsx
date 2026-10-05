@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
@@ -76,11 +76,8 @@ export function TerminalPage() {
   const [isHolder, setIsHolder] = useState(false)
   const [subscribers, setSubscribers] = useState(1)
   const [dropped, setDropped] = useState(0)
+  const [received, setReceived] = useState(0)
   const [attempt, setAttempt] = useState(0)
-
-  const write = useCallback((text: string) => {
-    termRef.current?.write(text)
-  }, [])
 
   useEffect(() => {
     const host = hostRef.current
@@ -119,6 +116,18 @@ export function TerminalPage() {
     socket.binaryType = 'arraybuffer'
     socketRef.current = socket
     setLink('connecting')
+    setReceived(0)
+
+    // Bound to *this* terminal and guarded by `live`, never routed through
+    // `termRef`. A closed socket keeps delivering until its close frame lands, and
+    // by then a reconnect has already replaced the ref -- so the outgoing socket's
+    // bytes used to land in the incoming terminal and every guest line appeared
+    // twice. Writing to the terminal this effect created makes that impossible:
+    // after cleanup `live` is false, so a late frame has nowhere to go.
+    let live = true
+    const write = (text: string) => {
+      if (live) term.write(text)
+    }
 
     const send = (frame: ClientFrame) => {
       if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(frame))
@@ -135,7 +144,9 @@ export function TerminalPage() {
       if (typeof event.data !== 'string') {
         // Guest bytes. Decoded as UTF-8 with replacement: a serial line is allowed
         // to contain anything, and a decode error must not kill the socket.
-        write(new TextDecoder('utf-8', { fatal: false }).decode(event.data as ArrayBuffer))
+        const chunk = event.data as ArrayBuffer
+        setReceived((total) => total + chunk.byteLength)
+        write(new TextDecoder('utf-8', { fatal: false }).decode(chunk))
         return
       }
       let frame: ServerTextFrame
@@ -149,11 +160,10 @@ export function TerminalPage() {
           const hello = frame as HelloFrame
           setSubscribers(hello.subscriber_count)
           setHolder(hello.input_holder)
-          // Not "the keyboard is mine because nobody holds it": the server names a
-          // subscriber by its peer address, which for a browser is the whole
-          // machine, so this tab cannot tell from the hello frame whether it is the
-          // holder. Only an explicit `claim` answer settles it, which is what the
-          // button does.
+          // Not "the keyboard is mine because nobody holds it": the server names
+          // subscribers by peer address plus a connection number and never tells
+          // this tab which of those it is, so only an explicit `claim` answer
+          // settles it -- which is what the button does.
           setIsHolder(false)
           setNote(
             hello.resize_supported
@@ -217,6 +227,7 @@ export function TerminalPage() {
     const keepAlive = window.setInterval(() => send({ type: 'ping' }), 15_000)
 
     return () => {
+      live = false
       window.clearInterval(keepAlive)
       onData.dispose()
       socket.close()
@@ -225,8 +236,9 @@ export function TerminalPage() {
       termRef.current = null
     }
     // `attempt` re-runs the whole effect, which is the retry: a new socket, a new
-    // terminal, a clean slate.
-  }, [iid, attempt, write])
+    // terminal, a clean slate. `write` is no longer a dependency because it is
+    // created inside the effect and closes over this run's terminal.
+  }, [iid, attempt])
 
   // Repaint the existing terminal on a theme change instead of rebuilding it.
   // Rebuilding would drop the scrollback and close the socket, which is a far
@@ -307,6 +319,8 @@ export function TerminalPage() {
         <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-ink-700">
           <span>订阅者 {subscribers}</span>
           <span>·</span>
+          <span>本连接已收字节 {received}</span>
+          <span>·</span>
           <span>本订阅者丢弃字节 {dropped}</span>
           <span>·</span>
           <span>输入持有者：{holder ?? '无'}</span>
@@ -316,6 +330,11 @@ export function TerminalPage() {
             返回实例详情
           </Link>
         </div>
+        <p className="mt-1 text-2xs text-ink-700">
+          上方窗口是 guest 的原始串口输出，其中{' '}
+          <code className="rounded bg-surface-code px-1 font-mono text-[10px]">IRIS-RC:</code> 与固件自身的启动告警（如{' '}
+          <code className="rounded bg-surface-code px-1 font-mono text-[10px]">lookup xxx failed</code>）属正常日志，不代表链路异常；链路是否正常请看本行的已收字节与丢弃字节
+        </p>
         {note && (
           <p className="mt-1 text-2xs text-ink-500" role="status">
             {note}

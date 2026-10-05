@@ -389,12 +389,18 @@ def export_csv(*, limit: int = 5000) -> str:
     return buffer.getvalue()
 
 
-def instance_stats(iid: int) -> dict[str, Any]:
+def instance_stats(iid: int, *, running: bool = True) -> dict[str, Any]:
     """Live resource use for one running instance, with the serial port attached.
 
     ``sampled`` is separate from the values because a container that has just
     started has no reading yet, and a card showing ``0%`` for a container that is
     merely unmeasured is a card lying.
+
+    ``state`` is the second such distinction, and the more important one: a caller
+    that stopped the instance and kept the panel open gets ``"gone"`` rather than a
+    404 it can do nothing about. 404 says "this address is wrong", which is false --
+    the instance was real, it is the *answer* that has stopped changing, and a client
+    that retries it every two seconds is burning requests on a constant.
     """
     container = f"iris-qemu-{iid}"
     cached = _stats_cache.get(container)
@@ -409,6 +415,7 @@ def instance_stats(iid: int) -> dict[str, Any]:
     return {
         "iid": iid,
         "container": container,
+        "state": "running" if running else "gone",
         "sampled": payload is not None,
         "cpu_pct": None if payload is None else payload["cpu_pct"],
         "mem_mb": None if payload is None else payload["mem_mb"],

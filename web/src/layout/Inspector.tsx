@@ -20,14 +20,21 @@ import { useTicker } from '../hooks'
  * different fact from "nothing was captured".
  */
 export function Inspector({ iid }: { iid: number | null }) {
+  // Read once here and handed to both panels that need it. They were each asking on
+  // their own, and worse: a query mounted twice is still one cache entry, so the
+  // second panel inherited whatever the first had rendered -- which is how a stopped
+  // instance kept showing a container's CPU next to the list that no longer had it.
+  const stats = useInstanceStats(iid)
+  const state = stats.data?.state
+
   return (
     <aside
       aria-label="检查器"
       className="scroll-y flex h-full min-h-0 flex-col gap-3 border-l border-surface-border bg-surface-sunken/60 p-3"
     >
       <InstancePanel iid={iid} />
-      <ResourcePanel iid={iid} />
-      <ConsolePanel iid={iid} />
+      <ResourcePanel iid={iid} query={stats} />
+      <ConsolePanel iid={iid} state={state} />
       <CorpusPanel />
       <KnowledgePanel />
       <BuildPanel />
@@ -120,9 +127,13 @@ function InstancePanel({ iid }: { iid: number | null }) {
   )
 }
 
-function ResourcePanel({ iid }: { iid: number | null }) {
-  const stats = useInstanceStats(iid)
-
+function ResourcePanel({
+  iid,
+  query,
+}: {
+  iid: number | null
+  query: ReturnType<typeof useInstanceStats>
+}) {
   if (iid === null) {
     return (
       <Section icon={<Cpu className="h-3.5 w-3.5" aria-hidden="true" />} title="资源占用">
@@ -130,21 +141,42 @@ function ResourcePanel({ iid }: { iid: number | null }) {
       </Section>
     )
   }
-  if (stats.isLoading) {
+  if (query.isLoading) {
     return (
       <Section icon={<Cpu className="h-3.5 w-3.5" aria-hidden="true" />} title="资源占用">
         <Skeleton className="h-14 w-full" />
       </Section>
     )
   }
-  if (stats.isError) {
+  // The title used to claim docker was the problem. It never was: the request failed
+  // because the caller was not allowed to read this instance, and every failure here
+  // looked like a monitoring outage on the host.
+  if (query.isError) {
     return (
       <Section icon={<Cpu className="h-3.5 w-3.5" aria-hidden="true" />} title="资源占用">
-        <ErrorState title="docker stats 不可用" detail={(stats.error as Error).message} />
+        <ErrorState title="读不到该实例的资源占用" detail={(query.error as Error).message} />
       </Section>
     )
   }
-  const data = stats.data
+  // A terminal state, not an error: the instance was stopped and the answer will not
+  // change again. Saying so is what lets the reader tell it apart from a container
+  // that is merely quiet.
+  if (query.data?.state === 'gone') {
+    return (
+      <Section icon={<Cpu className="h-3.5 w-3.5" aria-hidden="true" />} title="资源占用">
+        <EmptyState
+          title="实例已停止"
+          detail="容器已删除，不再有 CPU 或内存读数；串口快照仍保留在下方"
+          action={
+            <Link to="/instances" className="text-2xs text-iris-400 hover:underline">
+              查看实例列表
+            </Link>
+          }
+        />
+      </Section>
+    )
+  }
+  const data = query.data
   return (
     <Section
       icon={<Cpu className="h-3.5 w-3.5" aria-hidden="true" />}
@@ -170,7 +202,13 @@ function ResourcePanel({ iid }: { iid: number | null }) {
   )
 }
 
-function ConsolePanel({ iid }: { iid: number | null }) {
+function ConsolePanel({
+  iid,
+  state,
+}: {
+  iid: number | null
+  state: 'running' | 'gone' | undefined
+}) {
   const log = useConsoleLog(iid, iid !== null)
 
   if (iid === null) {
@@ -180,11 +218,22 @@ function ConsolePanel({ iid }: { iid: number | null }) {
       </Section>
     )
   }
+  if (log.isError) {
+    return (
+      <Section icon={<ScrollText className="h-3.5 w-3.5" aria-hidden="true" />} title="串口快照">
+        <ErrorState title="读不到串口快照" detail={(log.error as Error).message} />
+      </Section>
+    )
+  }
   return (
     <Section
       icon={<ScrollText className="h-3.5 w-3.5" aria-hidden="true" />}
       title="串口快照"
-      aside={<Badge tone={log.data?.available ? 'iris' : 'neutral'}>{log.data?.available ? '已捕获' : '无'}</Badge>}
+      aside={
+        <Badge tone={log.data?.available ? (state === 'gone' ? 'neutral' : 'iris') : 'neutral'}>
+          {log.data?.available ? (state === 'gone' ? '已归档' : '已捕获') : '无'}
+        </Badge>
+      }
     >
       {log.isLoading && <Skeleton className="h-12 w-full" />}
       {log.data?.available === false && (
@@ -202,6 +251,23 @@ function ConsolePanel({ iid }: { iid: number | null }) {
           <p className="text-[10px] text-ink-700">
             共 {log.data.total_lines ?? log.data.lines.length} 行 · 此处不包含终端输入
           </p>
+          {/* The snapshot outlives the container on purpose -- it is the evidence a
+              failure diagnosis reads -- so it stays on screen after a stop. What has
+              to change is what it claims to be: a panel of past output next to a
+              live CPU reading reads as a live console. */}
+          {state === 'gone' && (
+            <p className="text-[10px] leading-relaxed text-ink-700">
+              这是已停止实例的历史快照，不会再增长
+              {iid !== null && (
+                <>
+                  {' · '}
+                  <Link to={`/instances/${iid}`} className="text-iris-400 hover:underline">
+                    查看完整日志
+                  </Link>
+                </>
+              )}
+            </p>
+          )}
         </>
       )}
     </Section>

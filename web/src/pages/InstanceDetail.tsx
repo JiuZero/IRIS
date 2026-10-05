@@ -1,9 +1,10 @@
 import { useEffect } from 'react'
-import { Link, useParams, useSearchParams } from 'react-router-dom'
+import { Link, useLocation, useParams, useSearchParams } from 'react-router-dom'
 import { useQuery, type UseQueryResult } from '@tanstack/react-query'
 import { CircleDot, FileText, Network, ScrollText, Terminal as TerminalIcon, Wrench } from 'lucide-react'
 
 import { Badge, Button, DataRow, EmptyState, ErrorState, Panel, Skeleton, StatusDot } from '../components/ui'
+import { LaunchOutcome, type LaunchVerdict } from '../components/LaunchDialog'
 import { api } from '../lib/api'
 import { classNames, DASH, dateTime, failureLabel, layerLabel, seconds, shortDateTime, sinceLabel, sortLayers } from '../lib/format'
 import { useConsoleLog, useEmulations } from '../hooks/queries'
@@ -33,8 +34,14 @@ export function InstanceDetail() {
   const params = useParams()
   const iid = Number.parseInt(params.iid ?? '', 10)
   const [search, setSearch] = useSearchParams()
+  const location = useLocation()
   const tab = (search.get('tab') as TabKey | null) ?? 'link'
   const setPinned = useUiStore((state) => state.setPinnedInstance)
+
+  // The launch window hands its verdict over in the location state. Optional by
+  // construction: a reload drops it, and this page has to be complete without it --
+  // so it is rendered as an extra panel rather than as the source of anything below.
+  const launch = (location.state as { launch?: LaunchVerdict } | null)?.launch
 
   useEffect(() => {
     if (Number.isFinite(iid)) setPinned(iid)
@@ -120,6 +127,16 @@ export function InstanceDetail() {
           ))}
         </nav>
       </Panel>
+
+      {launch && launch.iid === iid && (
+        <Panel
+          title="本次启动结果"
+          subtitle="由新建实例窗口在跳转时一并带过来；刷新本页后不再显示，完整证据在下方各页签"
+          bodyClassName="p-3"
+        >
+          <LaunchOutcome result={launch} linkToDetail={false} />
+        </Panel>
+      )}
 
       {tab === 'link' && <LinkTab iid={iid} record={record} runs={runs.data?.items ?? []} />}
       {tab === 'console' && <ConsoleTab iid={iid} />}

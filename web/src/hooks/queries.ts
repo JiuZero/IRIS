@@ -76,7 +76,11 @@ export function useInstanceStats(iid: number | null) {
     // previous data, which is what stops the panel flashing empty while the user
     // switches between instances.
     enabled: iid !== null,
-    refetchInterval: POLL.resource,
+    // Polled until the server says the instance is gone, and not one interval
+    // longer. A fixed interval here is what made a stopped instance look busy: the
+    // request kept succeeding, so nothing looked like an error, and the panel sat
+    // there re-asking a question whose answer had stopped changing.
+    refetchInterval: (query) => (query.state.data?.state === 'gone' ? false : POLL.resource),
   })
 }
 
@@ -85,7 +89,10 @@ export function useConsoleLog(iid: number | null, enabled: boolean) {
     queryKey: ['console', iid],
     queryFn: () => api.console(iid as number),
     enabled: enabled && iid !== null,
-    refetchInterval: POLL.console,
+    // The snapshot is written once, when the run ends. While there is none the poll
+    // is the only way to notice the moment it lands; once there is one, it is a
+    // finished artefact and re-reading it every four seconds buys nothing.
+    refetchInterval: (query) => (query.state.data?.available ? false : POLL.console),
   })
 }
 

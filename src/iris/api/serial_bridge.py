@@ -23,6 +23,10 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from iris.log import get_logger
+
+logger = get_logger(__name__)
+
 #: 单个订阅者的待发缓冲上限(字节)。超出后丢最旧的字节并计数。
 #:
 #: 宁可在报告里承认丢了字节,也不要让一个卡住的客户端把宿主的内存吃光。256 KiB
@@ -266,16 +270,27 @@ class SerialBridge:
     # -------------------------------------------------------- 订阅者泵
 
     async def pump_subscriber(self, sub: Subscription) -> None:
-        """把某个订阅者的缓冲发出去,直到它被取消。
+        """把某个订阅者的缓冲发出去,直到它被取消或发不出去。
 
         每个订阅者一个协程,而不是在一个协程里 await 全体:一个慢客户端只能拖慢
         自己那个循环。
+
+        发送失败就结束这个协程,并把它记进日志:吞掉异常只会让一个已经掉线的订阅者
+        在界面上继续显示"串口就绪",而它的字节从此无人送达——和真的链路故障看起来
+        一模一样,却既查不出来也修不掉。
         """
         while True:
             await sub.wake.wait()
             data = sub.take()
-            if data:
+            if not data:
+                continue
+            try:
                 await sub.send_bytes(data)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - a gone client is not a bridge fault
+                logger.warning(f"serial subscriber {sub.name} stopped receiving: {exc}")
+                return
 
     @staticmethod
     def subscriber_dropped(sub: Subscription) -> int:

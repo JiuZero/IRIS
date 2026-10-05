@@ -23,6 +23,7 @@ import asyncio
 import contextlib
 import os
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
@@ -39,7 +40,7 @@ from iris.api.plugins import (
 from iris.api.server import Caller, _read_upload
 from iris.api.web_terminal import close_all_bridges, notify_shutdown, terminal_endpoint
 from iris.config import get_settings
-from iris.db.active import list_owned, release
+from iris.db.active import get_live, release
 from iris.db.models import ActiveEmulation
 from iris.emulate.orchestrator import stop_emulation
 from iris.log import get_logger
@@ -107,6 +108,33 @@ class PluginRemovalResponse(BaseModel):
     #: it listed -- a bare 200 would leave "which one went?" open when a page holds
     #: several plugins.
     removed: str
+
+
+class InstanceStatsResponse(BaseModel):
+    """One instance's resource reading, with the states spelled out.
+
+    ``extra="forbid"`` for the reason ``HealthResponse`` gives: a typo in a field
+    name would otherwise return a response that quietly omits it.
+
+    ``state`` is what lets a client stop asking. Everything else on this model
+    describes a live container; a client that has just stopped the instance cannot
+    learn that from a 404, because a 404 is equally the answer for an address it
+    typed wrong, and the honest reaction to those two is different.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    iid: int
+    container: str
+    #: ``"running"`` or ``"gone"``. A closed vocabulary on purpose: the frontend
+    #: branches on it, and a third state it does not know would render as "running".
+    state: Literal["running", "gone"]
+    sampled: bool
+    cpu_pct: float | None
+    mem_mb: float | None
+    mem_limit_mb: float | None
+    serial_port: int | None
+    console_available: bool
 
 
 def install(app: FastAPI) -> FastAPI:
@@ -282,10 +310,21 @@ def _add_api_routes(app: FastAPI) -> None:
                            max_lines: int = Query(2000, ge=1, le=20000)) -> dict:
         return web_data.serial_log(iid, start_line=start_line, max_lines=max_lines)
 
-    @app.get("/api/v1/instances/{iid}/stats")
-    async def read_instance_stats(iid: int, caller: Caller) -> dict:
-        require_owned(caller, iid)
-        return web_data.instance_stats(iid)
+    @app.get("/api/v1/instances/{iid}/stats", response_model=InstanceStatsResponse)
+    async def read_instance_stats(iid: int, caller: Caller) -> InstanceStatsResponse:
+        """Resource use for one instance, and whether it is still there.
+
+        Three answers rather than two. An instance the caller owns gets its reading;
+        one that has been stopped gets ``200`` with ``state="gone"``, so a panel left
+        open behind a stop renders an honest empty state instead of a retry loop
+        against an answer that can never change; one that belongs to somebody else
+        still gets 404, because for *that* id the caller's guess is wrong and saying
+        so is the whole point of the ownership model.
+        """
+        state = live_state(caller, iid)
+        if state == "not-yours":
+            raise HTTPException(status_code=404, detail=f"emulation {iid} not found")
+        return InstanceStatsResponse(**web_data.instance_stats(iid, running=state == "owned"))
 
     @app.get("/api/v1/knowledge/root-cause")
     async def read_root_causes(_caller: Caller, recent: int = Query(10, ge=1, le=100)) -> dict:
@@ -328,15 +367,34 @@ def require_owned(caller: str, iid: int) -> None:
     Not 403: telling a caller that an id exists but belongs to someone else is the
     one piece of information the ownership model exists to withhold.
     """
+    if live_state(caller, iid) != "owned":
+        raise HTTPException(status_code=404, detail=f"emulation {iid} not found")
+
+
+#: What a lookup of one instance id can conclude. ``owned`` and ``not-yours`` are the
+#: two halves of :func:`require_owned`, which reports them identically; ``gone`` is the
+#: third answer, kept separate for the one caller -- a panel polling a live resource
+#: -- that has to tell "you stopped this" from "that id was never yours".
+LiveState = Literal["owned", "not-yours", "gone"]
+
+
+def live_state(caller: str, iid: int) -> LiveState:
+    """Whether a *running* instance under ``iid`` belongs to ``caller``.
+
+    503 rather than a silent "no" when the table cannot be read: answering a probe
+    that never reached the database would retire the panel of an instance that is
+    running perfectly well, and the user would see it as the instance having stopped.
+    """
     try:
         with _session() as session:
-            mine = [record for record in list_owned(session, caller) if record.iid == iid]
+            record = get_live(session, iid)
     except Exception as exc:
         logger.warning(f"could not verify ownership of instance {iid}: {exc}")
         raise HTTPException(status_code=503,
                             detail="active emulation table unavailable") from exc
-    if not mine:
-        raise HTTPException(status_code=404, detail=f"emulation {iid} not found")
+    if record is None:
+        return "gone"
+    return "owned" if record.client_id == caller else "not-yours"
 
 
 def _add_spa(app: FastAPI) -> None:

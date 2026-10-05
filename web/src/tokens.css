@@ -383,15 +383,56 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  /* The native file button is the one control a theme cannot restyle with a
-     border, so it is replaced with the product's own button. The visible text
-     next to it comes from the page, not from the browser's "Choose File". */
-  .field-file {
-    padding: 0 0.25rem;
+  /* The file picker is drawn, not restyled.
+     The native input is stretched over its own drawn twin and made transparent: it
+     has to stay in the layout and stay clickable -- `display: none` would take the
+     click target with it -- while every visible pixel comes from `.field-file`. That
+     is the only way to get the filename *inside* the field, because a native file
+     input clears its own text the moment `value` is reset and falls back to the
+     browser's untranslated "No file chosen". */
+  .field-file-native {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
     cursor: pointer;
+    /* Explicit, because "which of the two stacked siblings takes the click" is not
+       worth leaving to paint order: the drawn twin is a flex container, which CSS
+       classifies as block-level, and an absolutely positioned box with
+       `z-index: auto` only reliably paints above block-level content. Saying so is
+       one line; discovering the picker stopped opening is not. */
+    z-index: 1;
   }
-  .field-file::file-selector-button {
-    margin-right: 0.5rem;
+  .field-file-native:disabled {
+    cursor: not-allowed;
+  }
+  .field-file {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    height: 2rem;
+    padding: 0 0.5rem;
+    border-radius: 10px;
+    border: 1px solid var(--surface-border);
+    background-color: var(--surface-input);
+    transition:
+      border-color 140ms cubic-bezier(0.22, 0.61, 0.36, 1),
+      box-shadow 140ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+  .field-file:hover {
+    border-color: var(--surface-border-strong);
+  }
+  /* Focus lands on the transparent input, so the ring has to be drawn on the twin:
+     `opacity: 0` takes the native outline away with the rest of the control. The
+     adjacent sibling, not a class: the two are one control and only this pairing
+     says which one has the focus. */
+  .field-file-native:focus-visible + .field-file {
+    border-color: var(--iris-400);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--iris-400) 22%, transparent);
+  }
+  .field-file-button {
+    flex: none;
     cursor: pointer;
     border-radius: 8px;
     border: 1px solid var(--surface-border-strong);
@@ -404,7 +445,7 @@
       border-color 140ms cubic-bezier(0.22, 0.61, 0.36, 1),
       color 140ms cubic-bezier(0.22, 0.61, 0.36, 1);
   }
-  .field-file::file-selector-button:hover {
+  .field-file:hover .field-file-button {
     border-color: var(--iris-400);
     color: var(--text-primary);
   }
