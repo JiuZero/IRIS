@@ -489,6 +489,28 @@
     color: var(--iris-400);
   }
 
+  /* One block inside the settings sheet: a titled group on its own sunken surface,
+     so a 380px column of switches reads as four blocks rather than one list of
+     twenty controls. The reference design draws these the same way; only the colours
+     are ours. */
+  .settings-group {
+    border: 1px solid var(--surface-border);
+    border-radius: 10px;
+    background-color: color-mix(in srgb, var(--surface-sunken) 60%, transparent);
+    padding: 0.75rem;
+  }
+  .settings-group-title {
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--text-primary);
+  }
+  .settings-group-hint {
+    margin-top: 0.25rem;
+    font-size: 0.625rem;
+    line-height: 1rem;
+    color: var(--text-muted);
+  }
+
   /* The trough the segments sit in. */
   .segment-group {
     display: inline-flex;

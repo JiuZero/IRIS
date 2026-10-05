@@ -3,6 +3,7 @@ import { Outlet, useNavigate, useParams } from 'react-router-dom'
 
 import { CommandPalette } from '../components/CommandPalette'
 import { LaunchDialog } from '../components/LaunchDialog'
+import { SettingsSheet } from '../components/SettingsSheet'
 import { useBreakpoint } from '../hooks'
 import { useHotkeys, type Hotkey } from '../hooks/hotkeys'
 import { Inspector } from './Inspector'
@@ -40,14 +41,14 @@ export function Shell() {
   const launchOpen = useUiStore((state) => state.launchOpen)
   const closeLaunch = useUiStore((state) => state.closeLaunch)
 
-  const collapsed = useUiStore((state) => state.sidebarCollapsed)
   const sidebarWidth = useUiStore((state) => state.sidebarWidth)
   const inspectorWidth = useUiStore((state) => state.inspectorWidth)
   const inspectorOpen = useUiStore((state) => state.inspectorOpen)
   const setInspectorOpen = useUiStore((state) => state.setInspectorOpen)
   const setPanelWidth = useUiStore((state) => state.setPanelWidth)
-  const toggleSidebar = useUiStore((state) => state.toggleSidebar)
   const toggleLogPanel = useUiStore((state) => state.toggleLogPanel)
+  const settingsOpen = useUiStore((state) => state.settingsOpen)
+  const closeSettings = useUiStore((state) => state.closeSettings)
 
   // Below 1200 the inspector is an overlay, so it is forced shut rather than left
   // open as an empty 340px column.
@@ -57,7 +58,6 @@ export function Shell() {
   const hotkeys = useMemo<Hotkey[]>(
     () => [
       { combo: 'mod+k', description: '命令面板', handler: () => setPaletteOpen((open) => !open) },
-      { combo: 'mod+b', description: '收起/展开侧栏', handler: toggleSidebar },
       { combo: 'mod+j', description: '失败抽屉', handler: toggleLogPanel },
       {
         combo: 'mod+i',
@@ -76,7 +76,7 @@ export function Shell() {
         },
       },
     ],
-    [navigate, routeIid, setInspectorOpen, toggleLogPanel, toggleSidebar],
+    [navigate, routeIid, setInspectorOpen, toggleLogPanel],
   )
   useHotkeys(hotkeys)
 
@@ -85,36 +85,27 @@ export function Shell() {
       <Header onOpenPalette={() => setPaletteOpen(true)} />
 
       <div className="flex min-h-0 flex-1">
-        {!collapsed && (
-          <>
-            <div style={{ width: sidebarWidth }} className="shrink-0">
-              <Sidebar />
-            </div>
-            {band !== 'narrow' && (
-              <Resizer
-                orientation="vertical"
-                value={sidebarWidth}
-                min={PANEL_BOUNDS.sidebar.min}
-                max={PANEL_BOUNDS.sidebar.max}
-                label="侧栏宽度"
-                onChange={(value) => setPanelWidth('sidebar', value)}
-              />
-            )}
-          </>
+        {/* The rail is not collapsible (2026-10-05): no collapse control, no
+            `Ctrl+B`, no 56px icon-only variant. Resizing it with the handle is
+            still allowed -- giving up the labels is not the same as giving up the
+            width. */}
+        <div style={{ width: sidebarWidth }} className="shrink-0">
+          <Sidebar />
+        </div>
+        {band !== 'narrow' && (
+          <Resizer
+            orientation="vertical"
+            value={sidebarWidth}
+            min={PANEL_BOUNDS.sidebar.min}
+            max={PANEL_BOUNDS.sidebar.max}
+            label="侧栏宽度"
+            onChange={(value) => setPanelWidth('sidebar', value)}
+          />
         )}
 
         <main className="flex min-w-0 flex-1 flex-col">
           <div className="flex h-8 shrink-0 items-center gap-2 border-b border-surface-border px-3">
             <LogPanelToggle />
-            {collapsed && (
-              <button
-                type="button"
-                onClick={toggleSidebar}
-                className="text-2xs text-ink-500 transition-colors hover:text-ink-300"
-              >
-                展开侧栏 (Ctrl+B)
-              </button>
-            )}
           </div>
           <div className="scroll-y min-h-0 flex-1">
             <Outlet />
@@ -155,6 +146,7 @@ export function Shell() {
       <Footer />
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       <LaunchDialog open={launchOpen} onClose={closeLaunch} />
+      <SettingsSheet open={settingsOpen} onClose={closeSettings} />
     </div>
   )
 }

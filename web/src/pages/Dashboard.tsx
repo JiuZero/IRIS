@@ -28,6 +28,7 @@ export function Dashboard() {
   const evalSet = useEvalSet()
   const causes = useRootCauses(6)
   const openLaunch = useUiStore((state) => state.openLaunch)
+  const openSettings = useUiStore((state) => state.openSettings)
 
   if (stats.isError) {
     const error = stats.error as { status?: number; message?: string; isAuth?: boolean }
@@ -38,14 +39,14 @@ export function Dashboard() {
             title={error?.isAuth ? '需要 API 令牌' : 'IRIS 服务不可用'}
             detail={
               error?.isAuth
-                ? '当前服务配置了 IRIS_API_TOKEN。请在设置页填入同一个令牌，或用 iris web 启动而不配置令牌（仅回环地址）'
+                ? '当前服务配置了 IRIS_API_TOKEN，请在设置里填入同一个令牌，或用 iris web 启动而不配置令牌（仅回环地址）'
                 : error?.message
             }
             hint={
               error?.isAuth ? (
-                <Link to="/settings" className="text-2xs text-iris-400 hover:underline">
-                  去设置页填入令牌
-                </Link>
+                <button type="button" onClick={openSettings} className="text-2xs text-iris-400 hover:underline">
+                  打开设置填入令牌
+                </button>
               ) : null
             }
             onRetry={() => void stats.refetch()}

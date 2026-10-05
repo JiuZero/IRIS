@@ -411,7 +411,7 @@ function ActionsTab({
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
       <Panel title="停止">
         <p className="text-2xs leading-relaxed text-ink-500">
-          停止会删除容器并从托管表移除该行。此动作不可撤销，页面上没有撤销入口，
+          停止会删除容器并从托管表移除该行，此动作不可撤销，页面上没有撤销入口，
           停止之后要重新跑一次仿真
         </p>
         <div className="mt-2">

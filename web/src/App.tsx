@@ -1,4 +1,4 @@
-import { useLayoutEffect } from 'react'
+import { useEffect, useLayoutEffect } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { TooltipProvider } from '@radix-ui/react-tooltip'
 
@@ -7,15 +7,15 @@ import { Dashboard } from './pages/Dashboard'
 import { InstanceDetail } from './pages/InstanceDetail'
 import { Instances } from './pages/Instances'
 import { Plugins } from './pages/Plugins'
-import { Settings } from './pages/Settings'
 import { TerminalPage } from './pages/TerminalPage'
 import { WorkPolicy } from './pages/WorkPolicy'
 import { applyAppearance, useAppearanceStore } from './store/appearance'
+import { useUiStore } from './store/ui'
 
 /**
  * The routes.
  *
- * Seven screens, and the terminal is a *separate* route from the instance detail
+ * Six screens, and the terminal is a *separate* route from the instance detail
  * rather than a tab inside it. That is the one place this layout departs from a
  * plain tabbed page, and the reason is the shortcut: Ctrl/Cmd+` has to land on a
  * full-width terminal from anywhere, including from another instance's page. A tab
@@ -23,6 +23,13 @@ import { applyAppearance, useAppearanceStore } from './store/appearance'
  *
  * `/instances/:id/*` covers the three sub-tabs, so a link to a tab is a real URL
  * and the browser's back button steps out of a tab instead of off the instance.
+ *
+ * Settings is deliberately **not** in this list: it is a sheet over whatever you
+ * were looking at, opened from the footer icon or the palette, because a preference
+ * is a question about the current page and answering it should not cost you the
+ * page. The `/settings` route survives as a bookmark that opens the sheet and lands
+ * back on the dashboard -- a saved link to preferences still works, it just does not
+ * cost a screen.
  */
 export function App() {
   const theme = useAppearanceStore((state) => state.theme)
@@ -53,7 +60,9 @@ export function App() {
           <Route path="instances/:iid/terminal" element={<TerminalPage />} />
           <Route path="plugins" element={<Plugins />} />
           <Route path="work-policy" element={<WorkPolicy />} />
-          <Route path="settings" element={<Settings />} />
+          {/* A saved link to preferences still works; it opens the sheet and hands the
+              screen back to the dashboard, because the sheet is not a page. */}
+          <Route path="settings" element={<SettingsRoute />} />
           {/* A typo in a path should land on the dashboard, not on a blank page with
               no way back except the browser button. */}
           <Route path="*" element={<Navigate to="/" replace />} />
@@ -61,4 +70,16 @@ export function App() {
       </Routes>
     </TooltipProvider>
   )
+}
+
+/** Open the settings sheet once, then redirect. The effect has no cleanup on
+ *  purpose: unmounting on redirect must not close the sheet the redirect opened. */
+function SettingsRoute() {
+  const openSettings = useUiStore((state) => state.openSettings)
+
+  useEffect(() => {
+    openSettings()
+  }, [openSettings])
+
+  return <Navigate to="/" replace />
 }

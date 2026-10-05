@@ -77,8 +77,8 @@ export function WorkPolicy() {
           <Badge tone={ready === items.length && items.length > 0 ? 'success' : 'neutral'}>
             就绪 {ready} / {items.length}
           </Badge>
-          「AI 值守」一行标注为不适用：本项目的自愈器是规则加状态机，不含任何模型调用。L4 的状态来自对
-          scripts/emulate/run_qemu.sh 的探测，因此一个未应用串口改造的构建会显示「待改造」，而不是宣称有交互式终端。
+          「AI 值守」一行标注为不适用：本项目的自愈器是规则加状态机，不含任何模型调用；L4 的状态来自对
+          scripts/emulate/run_qemu.sh 的探测，因此一个未应用串口改造的构建会显示「待改造」，而不是宣称有交互式终端
         </p>
       </Panel>
 
@@ -101,25 +101,25 @@ function InnovationPanel() {
       icon: <Network className="h-4 w-4" aria-hidden="true" />,
       title: '四层链路证据',
       detail:
-        '路由、ARP、ICMP、服务逐层给出 ok/blocked/unknown 与判定依据，first_break 指向第一个不通的层。证据随运行落盘，历史详情里可复查，而不是只留一句「失败」。',
+        '路由、ARP、ICMP、服务逐层给出 ok/blocked/unknown 与判定依据，first_break 指向第一个不通的层；证据随运行落盘，历史详情里可复查，而不是只留一句「失败」',
     },
     {
       icon: <GitBranch className="h-4 w-4" aria-hidden="true" />,
       title: '规则插件化自愈',
       detail:
-        'rules/ 下的规则以 YAML 声明匹配条件与修复动作，加载时校验键名并对不支持的条件给出告警。每次修复写进账本，含是否应用、是否已沉淀为确定性规则。',
+        'rules/ 下的规则以 YAML 声明匹配条件与修复动作，加载时校验键名并对不支持的条件给出告警；每次修复写进账本，含是否应用、是否已沉淀为确定性规则',
     },
     {
       icon: <Layers className="h-4 w-4" aria-hidden="true" />,
       title: '失败画像与归因',
       detail:
-        '一次失败的运行通常有多个叠加原因，每个信号各占一行 failure_profile，并带上阶段与日志指纹。于是「先修网卡」这类结论能从数据里回答，而不是靠猜。',
+        '一次失败的运行通常有多个叠加原因，每个信号各占一行 failure_profile，并带上阶段与日志指纹，于是「先修网卡」这类结论能从数据里回答，而不是靠猜',
     },
     {
       icon: <Terminal className="h-4 w-4" aria-hidden="true" />,
       title: '可写串口与输入权仲裁',
       detail:
-        'QEMU 串口为可写 chardev，浏览器直接接入并可回车执行命令；同一实例的输入权有持有者标识，多个标签页不会互相抢键。',
+        'QEMU 串口为可写 chardev，浏览器直接接入并可回车执行命令；同一实例的输入权有持有者标识，多个标签页不会互相抢键',
     },
   ]
   return (

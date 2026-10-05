@@ -50,6 +50,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
   const navigate = useNavigate()
   const emulations = useEmulations()
   const openLaunch = useUiStore((state) => state.openLaunch)
+  const openSettings = useUiStore((state) => state.openSettings)
   const theme = useAppearanceStore((state) => state.theme)
   const density = useAppearanceStore((state) => state.density)
   const setTheme = useAppearanceStore((state) => state.setTheme)
@@ -67,7 +68,19 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
       { id: 'instances', label: '实例记录', group: '导航', icon: <Cpu className="h-3.5 w-3.5" />, run: go('/instances') },
       { id: 'plugins', label: '插件中心', group: '导航', icon: <Boxes className="h-3.5 w-3.5" />, run: go('/plugins') },
       { id: 'work-policy', label: '工作策略', group: '导航', icon: <ListChecks className="h-3.5 w-3.5" />, run: go('/work-policy') },
-      { id: 'settings', label: '设置与主题', group: '导航', icon: <SettingsIcon className="h-3.5 w-3.5" />, run: go('/settings') },
+      // An action, not a navigation: settings is a sheet over the current page, so
+      // going there means opening it and staying exactly where you are.
+      {
+        id: 'settings',
+        label: '设置与主题',
+        hint: '外观、密度、动效与 API 令牌',
+        group: '动作',
+        icon: <SettingsIcon className="h-3.5 w-3.5" />,
+        run: () => {
+          openSettings()
+          onClose()
+        },
+      },
       // First among the actions, because it is the one that does the work. It opens a
       // window rather than navigating: the form is not on any page any more, so a
       // navigation would have nothing to show.
@@ -156,7 +169,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
       },
     })
     return list
-  }, [density, emulations.data, navigate, onClose, openLaunch, setDensity, setTheme, theme])
+  }, [density, emulations.data, navigate, onClose, openLaunch, openSettings, setDensity, setTheme, theme])
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase()

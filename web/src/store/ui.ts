@@ -58,7 +58,6 @@ interface UiState {
   sidebarWidth: number
   inspectorWidth: number
   logPanelHeight: number
-  sidebarCollapsed: boolean
   inspectorOpen: boolean
   logPanelOpen: boolean
   /** null means "follow the route". Set by the command palette and the header. */
@@ -70,26 +69,32 @@ interface UiState {
    *  one boolean. Not persisted: a window that reopens on reload would hide the page
    *  somebody was reading. */
   launchOpen: boolean
+  /** Whether the settings sheet is open. Same reasoning as `launchOpen`: the footer
+   *  icon, the command palette, and the dashboard's auth-error shortcut live in
+   *  three different subtrees, and the alternative is a callback threaded through
+   *  all three to reach one boolean. Also not persisted, for the same reason. */
+  settingsOpen: boolean
   setPanelWidth: (name: PanelName, value: number) => void
   resetPanelWidth: (name: PanelName) => void
-  toggleSidebar: () => void
   setInspectorOpen: (open: boolean) => void
   toggleLogPanel: () => void
   setLogPanelOpen: (open: boolean) => void
   setPinnedInstance: (iid: number | null) => void
   openLaunch: () => void
   closeLaunch: () => void
+  openSettings: () => void
+  closeSettings: () => void
 }
 
 export const useUiStore = create<UiState>((set, get) => ({
   sidebarWidth: readWidth('sidebar'),
   inspectorWidth: readWidth('inspector'),
   logPanelHeight: readWidth('logpanel'),
-  sidebarCollapsed: false,
   inspectorOpen: true,
   logPanelOpen: false,
   pinnedInstance: null,
   launchOpen: false,
+  settingsOpen: false,
 
   setPanelWidth: (name, value) => {
     const bounds = PANEL_BOUNDS[name]
@@ -108,13 +113,14 @@ export const useUiStore = create<UiState>((set, get) => ({
     get().setPanelWidth(name, bounds.default)
   },
 
-  toggleSidebar: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
   setInspectorOpen: (open) => set({ inspectorOpen: open }),
   toggleLogPanel: () => set((state) => ({ logPanelOpen: !state.logPanelOpen })),
   setLogPanelOpen: (open) => set({ logPanelOpen: open }),
   setPinnedInstance: (iid) => set({ pinnedInstance: iid }),
   openLaunch: () => set({ launchOpen: true }),
   closeLaunch: () => set({ launchOpen: false }),
+  openSettings: () => set({ settingsOpen: true }),
+  closeSettings: () => set({ settingsOpen: false }),
 }))
 
 /** The viewport band a layout decision is made in. Derived once per resize rather

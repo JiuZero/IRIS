@@ -61,8 +61,8 @@ _NETWORK_KINDS = ("link-no-arp", "link-no-route", "link-no-icmp")
 #: 这个区别,否则渲染出的空文案会被读成"探测没发现异常"。
 _LINK_DETAIL_NOTE = (
     "链路表来自 failure_profile 里落库的探测摘要:四层状态与首个断点完整,"
-    "每层的原始探测文案与探测不可用原因未落库,因此这些字段为空。"
-    "只有四层中出现阻断的运行才有这份摘要 -- 全通的运行不探测,探测不可用的运行不记证据。"
+    "每层的原始探测文案与探测不可用原因未落库,因此这些字段为空；"
+    "只有四层中出现阻断的运行才有这份摘要 -- 全通的运行不探测,探测不可用的运行不记证据"
 )
 
 
@@ -330,8 +330,8 @@ def eval_set() -> dict[str, Any]:
                     for arch, (seen, ok) in sorted(aggregate.by_arch.items())},
         "denominator_note": (
             "分母为全部已记录的仿真运行，分子为 web 面有响应的运行；"
-            "提取阶段失败的固件不计入，因为本表度量的是仿真阶段而不是提取阶段。"
-            "与主页统计卡同源（iris.db.runs.run_stats），两处数字必然一致。"
+            "提取阶段失败的固件不计入，因为本表度量的是仿真阶段而不是提取阶段；"
+            "与主页统计卡同源（iris.db.runs.run_stats），两处数字必然一致"
         ),
         "items": page["items"],
         "items_note": (

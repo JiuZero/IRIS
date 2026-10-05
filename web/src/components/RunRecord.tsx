@@ -101,8 +101,8 @@ function RecordBody({ run }: { run: NonNullable<ReturnType<typeof useRun>['data'
         <SectionTitle>四层链路</SectionTitle>
         {run.link === null ? (
           <p className="text-2xs leading-relaxed text-ink-500">
-            这次运行没有留下链路证据。干净的运行不做探测，无法探测的运行也就没有证据可留 —— 两者都
-            显示为空，而不是补一个「全部通过」。
+            这次运行没有留下链路证据：干净的运行不做探测，无法探测的运行也就没有证据可留 —— 两者都
+            显示为空，而不是补一个「全部通过」
           </p>
         ) : (
           <>
@@ -143,7 +143,7 @@ function RecordBody({ run }: { run: NonNullable<ReturnType<typeof useRun>['data'
         <SectionTitle>失败画像（{run.failures.length}）</SectionTitle>
         {run.failures.length === 0 ? (
           <p className="text-2xs leading-relaxed text-ink-500">
-            没有记录到失败信号。一次失败的运行通常有多个叠加原因，每个信号各占一行，这里全空说明确实没有。
+            没有记录到失败信号：一个失败的运行通常有多个叠加原因，每个信号各占一行，这里全空说明确实没有
           </p>
         ) : (
           <ul className="flex flex-col gap-1.5">
@@ -176,8 +176,8 @@ function RecordBody({ run }: { run: NonNullable<ReturnType<typeof useRun>['data'
         <SectionTitle>修复账本（{run.repairs.length}）</SectionTitle>
         {run.repairs.length === 0 ? (
           <p className="text-2xs leading-relaxed text-ink-500">
-            这次运行没有写入任何修复动作。没有修复不等于没有失败信号：规则未匹配与未执行修复是两种情况，
-            上面的失败画像是前者唯一的证据。
+            这次运行没有写入任何修复动作，但没有修复不等于没有失败信号：规则未匹配与未执行修复是两种情况，
+            上面的失败画像是前者唯一的证据
           </p>
         ) : (
           <table className="w-full text-left text-2xs">

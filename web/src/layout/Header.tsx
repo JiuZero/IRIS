@@ -1,10 +1,8 @@
-import { Link, useLocation } from 'react-router-dom'
 import { Activity, Command, PanelRightClose, PanelRightOpen, Server, Settings as SettingsIcon } from 'lucide-react'
 
 import { Badge, Button, StatusDot } from '../components/ui'
 import { classNames } from '../lib/format'
 import { useCapabilities, useConfig, useEmulations, useStats } from '../hooks/queries'
-
 import { useUiStore } from '../store/ui'
 
 /**
@@ -99,7 +97,8 @@ export function Header({ onOpenPalette }: { onOpenPalette: () => void }) {
 export function Footer() {
   const stats = useStats()
   const emulations = useEmulations()
-  const onSettings = useLocation().pathname === '/settings'
+  const settingsOpen = useUiStore((state) => state.settingsOpen)
+  const openSettings = useUiStore((state) => state.openSettings)
 
   return (
     <footer
@@ -127,20 +126,23 @@ export function Footer() {
             It is the one control on screen that changes nothing about the work, so
             it does not belong among the rail's pages -- but it does have to stay
             reachable from anywhere, which is why it sits on the bar every screen
-            already has. `aria-current` rather than a filled background, because
-            without a label a filled square is a state nobody can read. */}
-        <Link
-          to="/settings"
+            already has. It opens a sheet over the page rather than navigating: a
+            preference is a question about what you are looking at, and answering it
+            should not replace what you were looking at. `aria-expanded` rather than
+            `aria-current`, because it is a disclosure and not a location. */}
+        <button
+          type="button"
+          onClick={openSettings}
           title="界面设置与主题"
           aria-label="设置"
-          aria-current={onSettings ? 'page' : undefined}
+          aria-expanded={settingsOpen}
           className={classNames(
             'grid h-6 w-6 place-items-center rounded transition-colors hover:bg-surface-hover hover:text-ink-100',
-            onSettings ? 'text-iris-400' : 'text-ink-500',
+            settingsOpen ? 'text-iris-400' : 'text-ink-500',
           )}
         >
           <SettingsIcon className="h-3.5 w-3.5" aria-hidden="true" />
-        </Link>
+        </button>
       </span>
       {emulations.isError && (
         <span className="text-danger" role="status">

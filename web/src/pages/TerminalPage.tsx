@@ -158,7 +158,7 @@ export function TerminalPage() {
           setNote(
             hello.resize_supported
               ? `串口就绪：端口 ${hello.serial_port ?? '—'}，尺寸 ${hello.size.cols}x${hello.size.rows}`
-              : `串口就绪：端口 ${hello.serial_port ?? '—'}。QEMU 串口无窗口尺寸通道，固定 ${hello.size.cols}x${hello.size.rows}。`,
+              : `串口就绪：端口 ${hello.serial_port ?? '—'}，QEMU 串口无窗口尺寸通道，固定 ${hello.size.cols}x${hello.size.rows}`,
           )
           break
         }
@@ -289,7 +289,7 @@ export function TerminalPage() {
         {consoleMissing && (
           <p className="mb-2 flex items-start gap-1.5 rounded-card border border-warning/30 bg-warning/10 px-2 py-1.5 text-2xs text-warning">
             <TriangleAlert className="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" />
-            此实例没有发布串口端口。命令行启动的仿真（iris emulate run）不经过 API，因此无法接入控制台。
+            此实例没有发布串口端口，命令行启动的仿真（iris emulate run）不经过 API，因此无法接入控制台
           </p>
         )}
 
