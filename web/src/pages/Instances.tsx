@@ -17,7 +17,7 @@ import {
   TextInput,
 } from '../components/ui'
 import { api } from '../lib/api'
-import { classNames, DASH, failureLabel, seconds, shortDateTime } from '../lib/format'
+import { classNames, DASH, failureLabel, runStateLabel, runStateTone, seconds, shortDateTime } from '../lib/format'
 import { useEmulations } from '../hooks/queries'
 import { useUiStore } from '../store/ui'
 import type { RunsPage, RunItem } from '../lib/types'
@@ -325,6 +325,7 @@ function HistoryTable({
             <tr className="border-b border-surface-border text-2xs text-ink-500">
               <th className="px-3 py-2 font-medium">记录</th>
               <th className="px-3 py-2 font-medium">iid</th>
+              <th className="px-3 py-2 font-medium">状态</th>
               <th className="px-3 py-2 font-medium">架构</th>
               <th className="px-3 py-2 font-medium">Web</th>
               <th className="px-3 py-2 font-medium">耗时</th>
@@ -344,7 +345,13 @@ function HistoryTable({
                   <span className="font-mono text-xs text-iris-400">#{row.id}</span>
                 </td>
                 <td className="px-3 py-2 font-mono text-ink-300">{row.iid}</td>
-                <td className="px-3 py-2 font-mono text-ink-300">{row.arch || DASH}</td>
+                <td className="px-3 py-2">
+                  {/* Which the instance stands in *now*, per the server's own
+                      three-state verdict: the active table, a left-behind scratch
+                      artefact, or neither. The words and the tone come from one
+                      mapping, shared with the record window. */}
+                  <Badge tone={runStateTone(row.state)}>{runStateLabel(row.state)}</Badge>
+                </td>                <td className="px-3 py-2 font-mono text-ink-300">{row.arch || DASH}</td>
                 <td className="px-3 py-2">
                   {/* Three states, not two: `null` means the run ended before the
                       web probe answered, which is not the same as a refusal. */}

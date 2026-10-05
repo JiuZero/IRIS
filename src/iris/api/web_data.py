@@ -19,7 +19,7 @@ import csv
 import io
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import select
 
@@ -28,7 +28,7 @@ from iris.api.server import _session
 from iris.config import get_settings
 from iris.db.active import list_owned
 from iris.db.knowledge import promote_candidates, root_cause_cards
-from iris.db.models import EmulationRun, FailureProfile, RepairAction
+from iris.db.models import ActiveEmulation, EmulationRun, FailureProfile, RepairAction
 from iris.db.runs import (
     clear_runs,
     delete_run,
@@ -185,6 +185,36 @@ def stats(caller: str) -> dict[str, Any]:
     }
 
 
+#: Where one recorded run's instance stands *now*. ``running`` is an entry in the
+#: active table; ``stopped`` is a scratch artefact left behind by a run that ended
+#: (a stop keeps the directory on purpose -- the serial snapshot inside it is the
+#: evidence a diagnosis reads); ``deleted`` is no artefact at all. Closed because
+#: the table renders a badge on it, and an open string would let a typo pass as a
+#: state.
+RunState = Literal["running", "stopped", "deleted"]
+
+
+def _run_state(iid: int, live_iids: set[int], scratch_iids: set[str]) -> RunState:
+    if iid in live_iids:
+        return "running"
+    return "stopped" if str(iid) in scratch_iids else "deleted"
+
+
+def _scratch_run_dirs() -> set[str]:
+    """The instance artefact directories under ``scratch``, named after their iid.
+
+    Only the numeric ones: ``scratch`` also holds firmware-shaped directories
+    (``*-rootfs`` and friends) from the unpack step, and those are corpora, not
+    instances. An unreadable directory counts as none -- a fresh install has no
+    ``iris-home`` at all, and "the artefact is gone" is then the true answer.
+    """
+    try:
+        return {p.name for p in get_settings().scratch_dir.iterdir()
+                if p.is_dir() and p.name.isdigit()}
+    except OSError:
+        return set()
+
+
 def runs_page(*, limit: int = 50, offset: int = 0, arch: str = "",
               result_kind: str = "", query: str = "") -> dict[str, Any]:
     """Newest-first page of recorded runs, with the filters the list view offers.
@@ -210,6 +240,12 @@ def runs_page(*, limit: int = 50, offset: int = 0, arch: str = "",
             stmt.order_by(EmulationRun.started_at.desc(), EmulationRun.id.desc())
             .offset(offset).limit(limit)
         ))
+        # Two batched lookups rather than one per row: the active table is one
+        # query and the scratch listing is one readdir, whatever the page size.
+        # A per-row lookup would read the same directory twenty times for no
+        # information the first read did not already carry.
+        live_iids = set(session.scalars(select(ActiveEmulation.iid)))
+        scratch_iids = _scratch_run_dirs()
         return {
             "total": total,
             "offset": offset,
@@ -218,6 +254,7 @@ def runs_page(*, limit: int = 50, offset: int = 0, arch: str = "",
                 {
                     "id": run.id,
                     "iid": run.iid,
+                    "state": _run_state(run.iid, live_iids, scratch_iids),
                     "image_id": run.image_id,
                     "arch": run.arch or "",
                     "web_ok": run.web_reachable,
@@ -276,6 +313,11 @@ def run_detail(run_id: int) -> dict[str, Any] | None:
         return {
             "id": run.id,
             "iid": run.iid,
+            "state": _run_state(
+                run.iid,
+                set(session.scalars(select(ActiveEmulation.iid))),
+                _scratch_run_dirs(),
+            ),
             "image_id": run.image_id,
             "arch": run.arch or "",
             "web_ok": run.web_reachable,

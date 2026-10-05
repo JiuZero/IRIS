@@ -3,7 +3,7 @@ import { ExternalLink, Info } from 'lucide-react'
 
 import { Modal } from './Modal'
 import { Badge, DataRow, ErrorState, Skeleton, StatusDot } from './ui'
-import { DASH, failureLabel, layerLabel, seconds, shortDateTime } from '../lib/format'
+import { DASH, failureLabel, layerLabel, runStateLabel, runStateTone, seconds, shortDateTime } from '../lib/format'
 import { useRun } from '../hooks/queries'
 
 /**
@@ -49,6 +49,10 @@ function RecordBody({ run }: { run: NonNullable<ReturnType<typeof useRun>['data'
       <section>
         <SectionTitle>结论</SectionTitle>
         <div className="flex flex-wrap items-center gap-2">
+          {/* Where the instance stands *now*, next to what the run concluded then.
+              Two different questions: a run whose artefacts were deleted still reads
+              perfectly well, and saying so here is what keeps the row honest. */}
+          <Badge tone={runStateTone(run.state)}>{runStateLabel(run.state)}</Badge>
           <Badge tone={run.web_ok === null ? 'neutral' : run.web_ok ? 'success' : 'danger'}>
             {run.web_ok === null ? 'Web 未探测' : run.web_ok ? 'Web 可达' : 'Web 不可达'}
           </Badge>

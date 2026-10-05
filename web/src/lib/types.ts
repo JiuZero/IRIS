@@ -48,6 +48,11 @@ export interface ActiveEmulation {
 export interface RunItem {
   id: number
   iid: number
+  /** Where the instance stands now: `running` is an entry in the active table,
+   *  `stopped` is a scratch artefact left behind by a run that ended (a stop
+   *  keeps the directory on purpose), `deleted` is no artefact at all. Closed
+   *  vocabulary because the history table renders a badge on it. */
+  state: 'running' | 'stopped' | 'deleted'
   image_id: number | null
   arch: string
   /** `null` when the run ended before the web probe answered. */

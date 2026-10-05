@@ -220,6 +220,96 @@ class TestExportRoute:
         assert client.get("/api/v1/runs/99999").status_code == 404
 
 
+# ------------------------------------------------------------------- run state
+
+
+def _recorded_run(session, iid: int) -> int:
+    """One recorded run, the way the table reads them."""
+    from iris.db.models import EmulationRun
+
+    row = EmulationRun(iid=iid, arch="mipsel", web_reachable=True)
+    session.add(row)
+    session.commit()
+    return row.id
+
+
+class TestRunStateInHistory:
+    """The history table's three-state verdict: the active table, the artefact, or
+    neither.
+
+    Driven through the endpoint with the scratch directory redirected, because the
+    real one holds directories from real runs -- a test asserting against whatever
+    the host last produced is a test that will go red on a machine with history.
+    """
+
+    def test_an_instance_in_the_active_table_is_running(self, client, db, monkeypatch,
+                                                        tmp_path) -> None:
+        from iris.config import Settings
+        from iris.db.active import register
+
+        monkeypatch.setattr(web_data, "get_settings",
+                            lambda: Settings(iris_home=str(tmp_path)))
+        with web_app._session() as session:
+            register(session, iid=7101, client_id="local", arch="mipsel",
+                     rootfs_path="/tmp/a", container_id="c1")
+            _recorded_run(session, 7101)
+        items = client.get("/api/v1/runs").json()["items"]
+        assert [item["state"] for item in items] == ["running"]
+
+    def test_a_run_with_its_artefact_left_behind_is_stopped(self, client, db, monkeypatch,
+                                                            tmp_path) -> None:
+        from iris.config import Settings
+
+        monkeypatch.setattr(web_data, "get_settings",
+                            lambda: Settings(iris_home=str(tmp_path)))
+        (tmp_path / "scratch" / "7102").mkdir(parents=True)
+        with web_app._session() as session:
+            _recorded_run(session, 7102)
+        items = client.get("/api/v1/runs").json()["items"]
+        assert [item["state"] for item in items] == ["stopped"]
+
+    def test_a_run_with_no_artefact_at_all_is_deleted(self, client, db, monkeypatch,
+                                                      tmp_path) -> None:
+        from iris.config import Settings
+
+        monkeypatch.setattr(web_data, "get_settings",
+                            lambda: Settings(iris_home=str(tmp_path)))
+        with web_app._session() as session:
+            _recorded_run(session, 7103)
+        items = client.get("/api/v1/runs").json()["items"]
+        assert [item["state"] for item in items] == ["deleted"]
+
+    def test_the_active_table_outranks_the_artefact(self, client, db, monkeypatch,
+                                                    tmp_path) -> None:
+        """A live instance always has its scratch directory, so a directory proves
+        nothing on its own -- it can only distinguish stopped from deleted."""
+        from iris.config import Settings
+        from iris.db.active import register
+
+        monkeypatch.setattr(web_data, "get_settings",
+                            lambda: Settings(iris_home=str(tmp_path)))
+        (tmp_path / "scratch" / "7104").mkdir(parents=True)
+        with web_app._session() as session:
+            register(session, iid=7104, client_id="local", arch="mipsel",
+                     rootfs_path="/tmp/a", container_id="c1")
+            _recorded_run(session, 7104)
+        items = client.get("/api/v1/runs").json()["items"]
+        assert [item["state"] for item in items] == ["running"]
+
+    def test_the_record_window_carries_the_same_state(self, client, db, monkeypatch,
+                                                      tmp_path) -> None:
+        """``RunDetail`` extends the list item, so the detail route has to answer the
+        same question the same way or the type says one thing and the wire another."""
+        from iris.config import Settings
+
+        monkeypatch.setattr(web_data, "get_settings",
+                            lambda: Settings(iris_home=str(tmp_path)))
+        (tmp_path / "scratch" / "7105").mkdir(parents=True)
+        with web_app._session() as session:
+            run_id = _recorded_run(session, 7105)
+        assert client.get(f"/api/v1/runs/{run_id}").json()["state"] == "stopped"
+
+
 # ------------------------------------------------------------------- read views
 
 

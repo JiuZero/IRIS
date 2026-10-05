@@ -117,6 +117,33 @@ export function failureLabel(kind: string): string {
   return FAILURE_LABELS[kind] ?? kind
 }
 
+/** `iris.api.web_data.RunState` as the words and the badge tone the history table
+ *  renders it with. One mapping for every surface that shows it, so the table and
+ *  the record window cannot disagree about what a state looks like.
+ *
+ *  `running` shares the success tone with "Web 可达" because both mean the same
+ *  thing to the operator; `deleted` warns rather than errors -- a removed
+ *  artefact is a fact about the past run, not a fault. */
+export const RUN_STATE_LABELS: Record<string, string> = {
+  running: '运行中',
+  stopped: '已停止',
+  deleted: '已删除',
+}
+
+export const RUN_STATE_TONES: Record<string, 'success' | 'neutral' | 'warning'> = {
+  running: 'success',
+  stopped: 'neutral',
+  deleted: 'warning',
+}
+
+export function runStateLabel(state: string): string {
+  return RUN_STATE_LABELS[state] ?? state
+}
+
+export function runStateTone(state: string): 'success' | 'neutral' | 'warning' {
+  return RUN_STATE_TONES[state] ?? 'neutral'
+}
+
 /** `iris.emulate.linkprobe.LayerState` layer names.
  *
  *  The values are lower case because `LinkLayer` is a `StrEnum` whose *values* are

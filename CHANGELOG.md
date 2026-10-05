@@ -4,6 +4,32 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.24] - 2026-10-05
+
+历史运行记录补上「状态」列：每条记录现在能回答它对应的实例**现在**是什么状态。
+
+### 新增
+
+- **历史运行记录表新增「状态」列**（`src/iris/api/web_data.py`；`web/src/pages/Instances.tsx`、
+  `web/src/components/RunRecord.tsx`、`web/src/lib/types.ts`、`web/src/lib/format.ts`）。
+  三态由服务端判定并封闭为 `RunState`：`running`（活跃表有行）、
+  `stopped`（活跃表无行但 `scratch/<iid>/` 还在——stop 只停容器、刻意留着串口快照）、
+  `deleted`（两者皆无，产物已清理）。
+  判定用**两次批量读取**（活跃表一次查询 + scratch 一次列目录）而不是每行一次，
+  分页 20 行时不会把同一目录读二十遍。
+  详情端点 `GET /api/v1/runs/{id}` 同步返回该字段：前端 `RunDetail extends RunItem`，
+  类型要求必填，否则类型与线上契约会说法不一。
+  文案与徽章色调收敛到 `web/src/lib/format.ts` 的共享映射，表格与详情弹窗复用同一份
+- **`scratch` 目录两种命名形态在注释里写明**（`_scratch_run_dirs`）：只有纯数字 iid
+  目录是实例产物，`*-rootfs` 那一类固件目录是语料，混进来会让「产物没了」误判
+
+### 测试
+
+- 新增 `TestRunStateInHistory`（5 用例，端点级驱动）：三态各一例、活跃表优先于
+  产物、详情端点与列表口径一致；scratch 目录在用例里重定向，避免断言宿主历史。
+  变异验证：把判定优先级颠倒（先看产物再看活跃表）后仅
+  `test_the_active_table_outranks_the_artefact` 变红，恢复后全绿
+
 ## [0.3.23] - 2026-10-05
 
 整洁核查批次：逻辑完整性核对 + 死代码与临时文件清理，外加两处自审发现的文案与链接缺口。
