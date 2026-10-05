@@ -134,8 +134,11 @@ pip install -e ".[dev]"
 
 # 2) 初始化数据库 + 构建仿真镜像（首次约 5~10 分钟）
 iris db init
-docker build -t iris-emulate:latest         -f docker/emulate/Dockerfile .
-docker build -t iris-emulate-baked:latest   -f docker/emulate/Dockerfile.baked .
+docker build -t iris-emulate:latest -f docker/emulate/Dockerfile .
+# 只需要这一条：iris-emulate-baked:<内容指纹> 由编排器在首次仿真时按 scripts/emulate/*.sh
+# 的内容指纹自动构建，脚本变更后自动重建并清理旧标签
+# （src/iris/emulate/orchestrator.py 的 _build_baked_image / _drop_other_baked_tags）。
+# 手动构建 iris-emulate-baked:latest 是多余的——该标签会被判为过期标签删除，白等一次构建。
 
 # 3) 分析一个固件包：识别格式/架构，提取 rootfs
 iris extract inspect "path/to/firmware.bin"
