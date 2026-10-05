@@ -9,6 +9,17 @@
       name="description"
       content="IRIS 固件仿真工作台：仿真状态、交互终端、网络链路与资源占用"
     />
+    <!-- 品牌标识：favicon 用 64×64（浏览器标签页），og 用 256×256（分享卡片）。
+         两版都是 logo.png（1535×1535 / 1.9 MB）的等比压缩版，见 web/public/。 -->
+    <link rel="icon" type="image/png" sizes="64x64" href="/favicon.png" />
+    <link rel="apple-touch-icon" href="/logo.png" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="IRIS 固件仿真工作台" />
+    <meta
+      property="og:description"
+      content="IoT Rehosting &amp; Interconnection Simulator：固件包输入，网络可达的仿真设备输出，失败可归因。"
+    />
+    <meta property="og:image" content="/logo.png" />
     <script>
       /* Applied before the first paint, from the same four localStorage keys as
          store/appearance.ts. Without this the page paints the default theme and

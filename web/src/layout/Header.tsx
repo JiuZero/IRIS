@@ -1,4 +1,4 @@
-import { Activity, Command, PanelRightClose, PanelRightOpen, Server, Settings as SettingsIcon } from 'lucide-react'
+import { Activity, Command, PanelRightClose, PanelRightOpen, Settings as SettingsIcon } from 'lucide-react'
 
 import { Badge, Button, StatusDot } from '../components/ui'
 import { classNames } from '../lib/format'
@@ -28,7 +28,10 @@ export function Header({ onOpenPalette }: { onOpenPalette: () => void }) {
   return (
     <header className="flex h-header shrink-0 items-center gap-3 border-b border-surface-border bg-surface-sunken/70 px-3 backdrop-blur-glass">
       <div className="flex items-center gap-2">
-        <Server className="h-4 w-4 text-iris-400" aria-hidden="true" />
+        {/* 品牌标识：站点 logo（web/public/logo.png，256×256，压缩版）取代了原来的
+            lucide `Server` 图标。它是品牌资产而不是一个语义图标，所以用 <img> +
+            alt 而不是 aria-hidden 的装饰元素——屏幕阅读器应当念出 "IRIS"。 */}
+        <img src="/logo.png" alt="IRIS" className="h-6 w-6" />
         {/* The one serif in the product: a logotype set in the UI font reads as a
             heading, and this row already has a heading next to it. */}
         <h1 className="brand-wordmark text-base">IRIS</h1>
