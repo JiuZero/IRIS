@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -7,7 +8,28 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="IRIS_", env_file=".env", extra="ignore")
 
     iris_home: Path = Path("iris-home")
-    database_url: str = "sqlite:///iris-home/iris.db"
+    #: Empty rather than a literal path, because the default is *derived* from
+    #: ``iris_home`` below. Hardcoding ``sqlite:///iris-home/iris.db`` here is what
+    #: made ``IRIS_HOME=<temp>`` half-isolate: the corpus and the scratch area moved,
+    #: the database did not, and a run against the throwaway home still wrote into the
+    #: real corpus.
+    database_url: str = ""
+
+    @model_validator(mode="after")
+    def _database_url_follows_iris_home(self) -> "Settings":
+        """Put the database inside ``iris_home`` unless told otherwise.
+
+        Two settings that name the same store but are read independently is the
+        worst shape a default can have: pointing one at a temporary directory looks
+        like full isolation and is not, so whatever the next command writes is
+        written to the real thing. An explicit ``IRIS_DATABASE_URL`` -- which is
+        what points at PostgreSQL -- still wins, because only an empty value gets
+        derived.
+        """
+        if not self.database_url:
+            self.database_url = f"sqlite:///{(self.iris_home / 'iris.db').as_posix()}"
+        return self
+
     log_level: str = "INFO"
 
     download_mirror: str = "https://gh-proxy.com/"
