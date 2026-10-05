@@ -13,6 +13,9 @@ build/
 # 前端依赖（web/package-lock.json 入库，node_modules 不入库）
 node_modules/
 web/.vite/
+# vite 在读取配置文件时落下的临时产物（每次构建都会生成、正常退出时自行删除，
+# 异常退出会残留；文件名含时间戳，属于噪声，不入库）
+web/vite.config.ts.timestamp-*.mjs
 
 # 外部设计参考（Wails 应用，含 node_modules 与 dist，只读不入库）
 前端设计参考/
