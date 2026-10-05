@@ -6,7 +6,7 @@ import { Play } from 'lucide-react'
 import { Modal } from './Modal'
 import { Badge, Button, FileInput, Segmented, Select, TextInput } from './ui'
 import { api } from '../lib/api'
-import { formatBytes, seconds } from '../lib/format'
+import { classNames, formatBytes, seconds } from '../lib/format'
 import { useFirmware } from '../hooks/queries'
 import { useTicker } from '../hooks'
 import type { EmulateResponse, UploadLaunchResponse } from '../lib/types'
@@ -104,6 +104,10 @@ export function LaunchDialog({ open, onClose }: { open: boolean; onClose: () => 
       title="新建实例"
       subtitle="来源可选已提取的 rootfs、rootfs 归档或厂商固件镜像；接口会等启动过程结束才返回，通常需要数十秒到数分钟"
       onClose={onClose}
+      // Wider than the other window on purpose: the four controls on one row need
+      // the room, and a form that wraps its last field is what put 启动超时 on a
+      // line of its own.
+      width="max-w-3xl"
       footer={
         <>
           <Badge tone={start.isPending ? 'iris' : 'neutral'}>
@@ -144,30 +148,37 @@ export function LaunchDialog({ open, onClose }: { open: boolean; onClose: () => 
           ]}
         />
 
-        {/* One row, one baseline: every control is `h-8` inside a `flex flex-col`,
-            so `items-end` aligns the boxes themselves rather than the text inside
-            them, and the port sits next to the fields that change what it does. */}
-        <div className="flex flex-wrap items-end gap-2">
+        {/* One row, three baselines. Every field is a `.field-cell` spanning the
+            label, control and hint tracks of this grid, so a field with a hint and a
+            field without one put their controls on the same line -- which a flex row
+            with `items-end` cannot do, and which it also cannot do after wrapping,
+            and it wrapped: 624px of controls and gaps against a 632px body. The three
+            and four column templates differ because the architecture box appears only
+            for the two upload routes; one template would slide 宿主端口 sideways every
+            time the source changed. */}
+        <div className={classNames('field-row', source === 'ready' ? 'field-row-3' : 'field-row-4')}>
           {source === 'ready' ? (
             <Select
               label="rootfs"
               value={selected}
-              onChange={(event) => setSelected(event.target.value)}
-              className="w-64"
-            >
-              <option value="">
-                {firmware.isLoading
-                  ? '读取中…'
-                  : firmware.data?.length
-                    ? '选择一个已提取的固件'
-                    : '暂存目录中没有 *-rootfs'}
-              </option>
-              {(firmware.data ?? []).map((item) => (
-                <option key={item.path} value={item.path}>
-                  {item.name} · {item.arch}
-                </option>
-              ))}
-            </Select>
+              onChange={setSelected}
+              options={[
+                {
+                  value: '',
+                  placeholder: true,
+                  label: firmware.isLoading
+                    ? '读取中…'
+                    : firmware.data?.length
+                      ? '选择一个已提取的固件'
+                      : '暂存目录中没有 *-rootfs',
+                },
+                ...(firmware.data ?? []).map((item) => ({
+                  value: item.path,
+                  label: `${item.name} · ${item.arch}`,
+                })),
+              ]}
+              hint="iris extract 已解出的 rootfs"
+            />
           ) : (
             <FileInput
               label={source === 'rootfs-archive' ? 'rootfs 归档' : '固件镜像'}
@@ -191,9 +202,9 @@ export function LaunchDialog({ open, onClose }: { open: boolean; onClose: () => 
             <TextInput
               label="架构"
               value={arch}
-              placeholder="留空则自动判定"
+              placeholder="如 mipsel"
               onChange={(event) => setArch(event.target.value)}
-              className="w-32"
+              hint="留空则自动判定"
             />
           )}
           <TextInput
@@ -202,14 +213,13 @@ export function LaunchDialog({ open, onClose }: { open: boolean; onClose: () => 
             value={port}
             hint="0 = 自动选择"
             onChange={(event) => setPort(event.target.value)}
-            className="w-28"
           />
           <TextInput
             label="启动超时（秒）"
             type="number"
             value={timeoutValue}
             onChange={(event) => setTimeoutValue(event.target.value)}
-            className="w-32"
+            hint="接口等启动结束才返回"
           />
         </div>
 

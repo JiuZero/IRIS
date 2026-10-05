@@ -4,6 +4,58 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.19] - 2026-10-05
+
+四条界面反馈。核心不是样式，是**一个此前没被承认的事实：全站的下拉都是操作系统的**。
+
+### 修复
+
+- **下拉框自绘，替换原生 `<select>`**（`web/src/components/ui.tsx`）。
+  原生 `<select>` 的展开列表由操作系统绘制——系统配色、系统字体、系统行高、
+  系统高亮，任何样式表都够不着它。`appearance: none` 只能让**收起态**变成主题色，
+  展开态仍是系统面板，这正是「选项卡设计不美观（原生）」那条反馈的成因。
+  新的 `Select` 是一个 button 触发器 + portal 到 `document.body` 的 listbox：
+  按触发器的 `getBoundingClientRect()` 定位，下方空间不足时向上翻转，滚动或缩放时重定位。
+  行为对齐原生那一套：点击/Enter/Space/↓ 开列表，↑↓/Home/End/PageUp/PageDown 移动高亮
+  且首尾循环、跳过禁用项，Enter/Space 提交，Esc 关闭且**不提交**，Tab 关闭并让焦点继续，
+  指针悬停与键盘高亮是同一个信号。焦点始终留在触发器上，高亮项用 `aria-activedescendant` 指名。
+  Esc 事件被 `stopPropagation` 拦下——它在新建实例窗口里，那里的 Esc 属于窗口本身，
+  「选完这一项」和「关掉整个窗口」不该是同一个答案。
+  三个调用点全部改用新接口（`web/src/components/LaunchDialog.tsx`、
+  `web/src/pages/Instances.tsx` 的架构与失败类型筛选）；`web/src/tokens.css` 里
+  `.field-select` 与全站最后一处原生 `<select>` 一起移除。
+- **新建实例窗口的字段行严格水平对齐**（`web/src/components/LaunchDialog.tsx`、
+  `web/src/tokens.css`）。此前是 `flex flex-wrap items-end`，两个缺陷叠加：
+  四列控件 624px 加间距 648px 超过弹窗 body 的 632px，于是**「启动超时」被挤到第二行**；
+  即使不换行，`items-end` 也不可能对齐，因为带 hint 的字段是三行、不带的是两行，
+  按底部对齐反而把有 hint 的控件整体抬高。现在是一个 grid：label、控件、hint 是三条行轨，
+  每个字段 `grid-row: 1 / span 3` 全部跨过这三条轨（subgrid，附 `repeat(3, auto)` 回退），
+  有没有 hint 都落在同一基线上；首列 `minmax(0, 1fr)`，不换行。
+  按内容分 3 列与 4 列两套模板，因为架构框只在两条上传路由出现——
+  一套模板会让「宿主端口」在切换来源时横向滑动。弹窗宽度从 `max-w-2xl` 放宽到 `max-w-3xl`。
+- **侧栏顶部移除搜索框与 IRIS 标识**（`web/src/layout/Sidebar.tsx`、
+  `web/src/layout/Shell.tsx`）。搜索入口此前在两处并存（侧栏「搜索与跳转」与顶栏
+  「命令面板」都是 Ctrl+K），品牌字标也在顶栏与侧栏各一份。现在侧栏第一个控件就是
+  「新建实例」，搜索统一由顶栏「命令面板」承担（图标从 `CircleDot` 换成 `Command`，
+  与文案一致）；`Sidebar` 的 `onOpenPalette` prop 一并删除。
+
+### 新增
+
+- `Select` 的 `options` 改为 `{value, label, hint?, placeholder?, disabled?}` 数组。
+  失败类型筛选项因此能同时显示中文名与 API 用的代码（`二层：ARP 无应答` ↔ `link-no-arp`），
+  勾选其一不必猜选完会传回什么。`placeholder` 标记「这是提示不是已选值」，
+  未选择时以 `--text-faint` 显示，避免表单看起来已经答完。
+
+### 诚实记录
+
+- **隔离变量的真名是 `IRIS_IRIS_HOME`，`IRIS_HOME` 从来不是配置项。** 本轮做端到端验证时
+  又一次用 `IRIS_HOME=<临时目录>` 起了 `iris web`，`/api/v1/config` 读回的
+  `database_url` 仍是 `sqlite:///iris-home/iris.db`——服务连的是真实库，所幸该实例
+  `read_only: true` 且全程只发 GET，事后核对真实库 sha/mtime/五张表行数均未变。
+  0.3.18 那次事故的真实原因至此才说清：不是「变量管不到库路径」，而是变量名就写错了，
+  两个缺陷各自都足以让「改一个变量就是全隔离」看起来成立。CHANGELOG 0.3.18 段落里
+  同样写错的「只设 `IRIS_HOME`」已一并更正。
+
 ## [0.3.18] - 2026-10-05
 
 配置隔离的根因修复。上一版加了「清空仿真记录」，我在端到端验证它时把真实语料库清空了：
@@ -28,9 +80,9 @@
 - **`tests/test_config_isolation.py`**（8 例）。四个分组各钉一个方向：默认值与文档一致
   且相对工作目录、搬迁 home 时数据库跟着搬、scratch 与数据库指向同一处 home、
   显式 URL（PostgreSQL 与自定义路径）不被推导顶掉。CLI 端到端那两例走真实子进程并
-  **只设 `IRIS_HOME`**（`IRIS_DATABASE_URL` 显式从环境里摘掉），断言 `iris db init`
+  **只设 `IRIS_IRIS_HOME`**（`IRIS_DATABASE_URL` 显式从环境里摘掉），断言 `iris db init`
   建出的文件落在临时 home 内、且打印的路径就是那个文件——单元构造证明不了
-  `IRIS_HOME` 有没有真的到达应用层，而这正是当初失效的那一环。
+  `IRIS_IRIS_HOME` 有没有真的到达应用层，而这正是当初失效的那一环。
   两次变异验证均确认变红后恢复：把默认值改回硬编码字面量 → 4 例红（两个跟随用例 +
   两个 CLI 用例），去掉「仅在空时推导」的条件 → 2 例红（显式配置组）。
 

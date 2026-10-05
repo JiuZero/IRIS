@@ -280,19 +280,108 @@
     -webkit-appearance: none;
     margin: 0;
   }
-  /* A select still needs an affordance saying "there is a list under here" once
-     its own arrow is gone, so the arrow is drawn here from the text ramp. */
-  .field-select {
-    padding-right: 1.5rem;
-    background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
-      linear-gradient(135deg, currentColor 50%, transparent 50%);
-    background-position:
-      right 0.85rem center,
-      right 0.6rem center;
-    background-size:
-      5px 5px,
-      5px 5px;
-    background-repeat: no-repeat;
+  /* The dropdown trigger, and the field's own shell with `appearance: none`
+     already applied. The chevron is an icon from the same set as the rest of the
+     chrome rather than two CSS gradients: a gradient triangle cannot rotate when
+     the list opens, and a `<select>`'s own arrow is the platform's, not the theme's.
+
+     Nothing about the *open* list can be styled here -- an expanded native
+     `<select>` is drawn by the operating system, in the OS palette, with the OS
+     font, outside the page. That is why the list itself is page DOM (see
+     `.select-menu`): `appearance: none` buys a themed closed box and nothing
+     more. */
+  .select-trigger {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    text-align: left;
+  }
+  .select-trigger[data-open='true'] {
+    border-color: var(--iris-400);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--iris-400) 22%, transparent);
+  }
+  .select-trigger:disabled {
+    cursor: not-allowed;
+  }
+  .select-value {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* The value the field does not have reads differently from a value it does: a
+     greyed "选择一个已提取的固件" has to be told apart from the arch of the rootfs
+     actually selected, or the form looks like it is already answered. */
+  .select-value[data-empty='true'] {
+    color: var(--text-faint);
+  }
+  .select-value svg {
+    flex: none;
+    color: var(--iris-400);
+  }
+
+  /* The list. Portalled to `document.body` and positioned from the trigger's
+     rectangle, because an in-flow menu is clipped by whichever ancestor scrolls --
+     the launch window's body is a scroll container and the instance table's filter
+     bar sits inside a modal. It is the one popover in the product, so it is also
+     the one place that has to sit above a modal scrim (z-50). */
+  .select-menu {
+    z-index: 60;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    max-height: 17rem;
+    padding: 0.25rem;
+    background: var(--surface-raised);
+    backdrop-filter: blur(20px) saturate(160%);
+    -webkit-backdrop-filter: blur(20px) saturate(160%);
+    border: 1px solid var(--surface-border-strong);
+    border-radius: 12px;
+  }
+  .select-option {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    gap: 0.5rem;
+    border-radius: 8px;
+    padding: 0.375rem 0.5rem;
+    font-size: 0.6875rem;
+    line-height: 1rem;
+    text-align: left;
+    color: var(--text-secondary);
+    transition:
+      background-color 120ms cubic-bezier(0.22, 0.61, 0.36, 1),
+      color 120ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+  /* Hover and keyboard highlight are the same signal, so a list driven with the
+     arrow keys highlights exactly what a pointer would have highlighted. */
+  .select-option[data-active='true'] {
+    background-color: var(--surface-hover);
+    color: var(--text-primary);
+  }
+  .select-option[aria-selected='true'] {
+    color: var(--text-primary);
+    font-weight: 500;
+  }
+  .select-option[aria-selected='true'][data-active='true'] {
+    background-color: color-mix(in srgb, var(--iris-400) 16%, transparent);
+  }
+  .select-option[aria-selected='true'] .select-tick {
+    visibility: visible;
+  }
+  .select-option[data-active='true'] .select-tick {
+    color: var(--iris-400);
+  }
+  .select-option-label {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   /* The native file button is the one control a theme cannot restyle with a
      border, so it is replaced with the product's own button. The visible text
@@ -318,6 +407,48 @@
   .field-file::file-selector-button:hover {
     border-color: var(--iris-400);
     color: var(--text-primary);
+  }
+
+  /* A row of fields on one baseline.
+     A flex row with `items-end` is the obvious way to line controls up and it does
+     not: a field with a hint is three lines tall and a field without one is two,
+     so bottom-aligning the shells lifts every control above the ones carrying a
+     hint. Flex also *wraps*, and a row that wraps cannot be aligned at all --
+     624px of controls plus gaps do not fit in a 632px modal body, which is how
+     启动超时 ended up alone on a second line.
+     So the row is one grid: the labels, the controls and the hints are three rows,
+     and every field spans all three (`.field-cell`). Grid then gives all four
+     columns the same height for each row, with or without a hint, and nothing
+     wraps because the first column is `minmax(0, 1fr)`.
+     Two column sets rather than one, because the launch window shows an
+     architecture box only for the two upload routes: a single four-column template
+     would slide 宿主端口 one column left whenever the source changed. */
+  .field-row {
+    display: grid;
+    column-gap: 0.5rem;
+    align-items: start;
+  }
+  .field-row-3 {
+    grid-template-columns: minmax(0, 1fr) 7rem 8rem;
+  }
+  .field-row-4 {
+    grid-template-columns: minmax(0, 1fr) 7rem 7rem 8rem;
+  }
+  /* `grid-row: 1 / span 3` rather than `span 3`: auto-placement would hand the
+     second field rows 4-6 and the row's three baselines would be six rows, one set
+     per field, which is the same misalignment in a new place. Naming row 1 as the
+     start pins every field onto the same three tracks and leaves auto-placement to
+     choose the column. Outside a grid parent the declaration is inert and the shell
+     is an ordinary two- or three-line stack, which is what the filter bars want. */
+  .field-cell {
+    display: grid;
+    grid-row: 1 / span 3;
+    /* Fallback first: a browser without subgrid still gets a three-line cell, it
+       just stops sharing the rows above it. */
+    grid-template-rows: repeat(3, auto);
+    grid-template-rows: subgrid;
+    row-gap: 0.25rem;
+    min-width: 0;
   }
 
   /* A group of mutually exclusive choices that reads as one control: the launch

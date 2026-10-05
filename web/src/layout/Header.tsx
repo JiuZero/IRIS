@@ -1,5 +1,5 @@
 import { Link, useLocation } from 'react-router-dom'
-import { Activity, CircleDot, PanelRightClose, PanelRightOpen, Server, Settings as SettingsIcon } from 'lucide-react'
+import { Activity, Command, PanelRightClose, PanelRightOpen, Server, Settings as SettingsIcon } from 'lucide-react'
 
 import { Badge, Button, StatusDot } from '../components/ui'
 import { classNames } from '../lib/format'
@@ -58,8 +58,12 @@ export function Header({ onOpenPalette }: { onOpenPalette: () => void }) {
       </div>
 
       <div className="ml-auto flex items-center gap-2">
+        {/* The one place search lives. It used to be a box at the top of the rail as
+            well, which meant two entries for the same palette on one screen; the
+            header keeps the shortcut visible on every page and the rail keeps its
+            top edge for the thing the rail is for. */}
         <Button size="sm" variant="ghost" onClick={onOpenPalette} title="命令面板 (Ctrl+K)">
-          <CircleDot className="h-3.5 w-3.5" aria-hidden="true" />
+          <Command className="h-3.5 w-3.5" aria-hidden="true" />
           <span className="hidden lg:inline">命令面板</span>
           <kbd className="hidden rounded border border-surface-border px-1 font-mono text-[10px] text-ink-700 lg:inline">
             Ctrl K

@@ -88,7 +88,7 @@ export function Shell() {
         {!collapsed && (
           <>
             <div style={{ width: sidebarWidth }} className="shrink-0">
-              <Sidebar onOpenPalette={() => setPaletteOpen(true)} />
+              <Sidebar />
             </div>
             {band !== 'narrow' && (
               <Resizer

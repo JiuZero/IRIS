@@ -4,12 +4,10 @@ import {
   Boxes,
   Cpu,
   Gauge,
-  Hexagon,
   ListChecks,
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
-  Search,
   Terminal,
 } from 'lucide-react'
 
@@ -29,20 +27,21 @@ const NAV = [
 ]
 
 /**
- * The left rail: navigation, the primary action, the live instances, and what this
+ * The left rail: the primary action, navigation, the live instances, and what this
  * host is doing right now.
  *
- * Two decisions are load-bearing. The **search box stays at the very top** because
- * it is the fastest path to anything in the product and moving it down to make room
- * for an action button would trade a three-keystroke shortcut for a click. And the
- * **create button sits directly under it**, because in this product creating an
- * instance is the main thing anyone comes to do; navigation is how you get there.
+ * Two decisions are load-bearing. The **create button is the first thing on the
+ * rail**, because in this product creating an instance is the main thing anyone
+ * comes to do; navigation is how you get there. And **nothing above it**: search
+ * lives in the header's command palette, on Ctrl+K, and the wordmark lives in the
+ * header too -- two copies of either on one screen is one more thing to read before
+ * you get to the work, and the rail is the narrowest column on the page.
  *
  * The instance list is here rather than only on its own page because the shortcut
  * that matters during a demo is "get back to the terminal I was in" -- one click on
  * a name, not three clicks through a table.
  */
-export function Sidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
+export function Sidebar() {
   const collapsed = useUiStore((state) => state.sidebarCollapsed)
   const toggle = useUiStore((state) => state.toggleSidebar)
   const openLaunch = useUiStore((state) => state.openLaunch)
@@ -60,36 +59,12 @@ export function Sidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
         collapsed ? 'w-14' : 'w-full',
       )}
     >
-      <div className={classNames('flex items-center gap-2', collapsed ? 'justify-center' : 'px-1')}>
-        <Hexagon className="h-5 w-5 shrink-0 text-iris-400" aria-hidden="true" />
-        {!collapsed && <span className="text-sm font-semibold tracking-tight">IRIS</span>}
-      </div>
-
-      <button
-        type="button"
-        onClick={onOpenPalette}
-        className={classNames(
-          'flex h-8 items-center gap-2 rounded-card border border-surface-border bg-surface-faint text-2xs text-ink-500 transition-colors hover:border-iris-400/50 hover:text-ink-300',
-          collapsed ? 'justify-center px-0' : 'px-2',
-        )}
-        title="命令面板 (Ctrl+K)"
-        aria-label="打开命令面板"
-      >
-        <Search className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-{!collapsed && (
-            <>
-              <span className="flex-1 text-left">搜索与跳转</span>
-              <kbd className="rounded border border-surface-border px-1 font-mono text-[10px] text-ink-700">Ctrl K</kbd>
-            </>
-          )}
-      </button>
-
-      {/* The one action the rail is built around. Anchored at the top because a
-          create button pinned to the bottom of a scrollable rail is the button
-          nobody finds; on a collapsed rail it stays as the icon so the affordance
-          survives at 56px. It opens a window rather than navigating, so launching
-          works from any page -- including from the terminal somebody is about to
-          leave. */}
+      {/* The one action the rail is built around, and the first control on it.
+          Anchored at the top because a create button pinned to the bottom of a
+          scrollable rail is the button nobody finds; on a collapsed rail it stays as
+          the icon so the affordance survives at 56px. It opens a window rather than
+          navigating, so launching works from any page -- including from the terminal
+          somebody is about to leave. */}
       <Button
         variant="primary"
         onClick={openLaunch}

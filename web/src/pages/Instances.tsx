@@ -267,22 +267,27 @@ function HistoryTable({
           onChange={(event) => onQuery(event.target.value)}
           className="w-40"
         />
-        <Select label="架构" value={arch} onChange={(event) => onArch(event.target.value)}>
-          <option value="">全部</option>
-          {['mipsel', 'mipseb', 'armel', 'arm64'].map((value) => (
-            <option key={value} value={value}>
-              {value}
-            </option>
-          ))}
-        </Select>
-        <Select label="失败类型" value={kind} onChange={(event) => onKind(event.target.value)}>
-          <option value="">全部</option>
-          {kinds.map((value) => (
-            <option key={value} value={value}>
-              {failureLabel(value)}
-            </option>
-          ))}
-        </Select>
+        <Select
+          label="架构"
+          value={arch}
+          onChange={onArch}
+          options={[
+            { value: '', label: '全部' },
+            ...['mipsel', 'mipseb', 'armel', 'arm64'].map((value) => ({ value, label: value })),
+          ]}
+        />
+        <Select
+          label="失败类型"
+          value={kind}
+          onChange={onKind}
+          // The code travels with the name: `link-no-arp` is what the API filters on
+          // and what the detail page's copy says, and a filter that hides it leaves
+          // the reader to guess which of four similar Chinese names they picked.
+          options={[
+            { value: '', label: '全部' },
+            ...kinds.map((value) => ({ value, label: failureLabel(value), hint: value })),
+          ]}
+        />
         <div className="ml-auto flex items-center gap-1.5">
           <Button size="sm" variant="ghost" disabled={page === 0} onClick={() => onPage(page - 1)}>
             上一页

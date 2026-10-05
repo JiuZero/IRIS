@@ -14,7 +14,9 @@
  *    row and a table row looking like the same product.
  */
 
-import type { ReactNode } from 'react'
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
+import { Check, ChevronDown } from 'lucide-react'
 
 import { classNames, DASH, formatBytes, percentPoints } from '../lib/format'
 
@@ -360,7 +362,11 @@ export function Skeleton({ className }: { className?: string }) {
 /** Every editable field, one shell. The field itself is `.field` in `tokens.css`
  *  -- radius, border, focus ring and the number-spinner removal all live there,
  *  because a search box that is a slightly different shape from the port box is
- *  the most visible sign that a form was assembled page by page. */
+ *  the most visible sign that a form was assembled page by page.
+ *
+ *  `.field-cell` is what puts a row of these on one baseline: the label, the
+ *  control and the hint are the three tracks of the parent `.field-row`, and every
+ *  field spans all three whether or not it has a hint. */
 function FieldShell({
   label,
   hint,
@@ -373,10 +379,10 @@ function FieldShell({
   children: ReactNode
 }) {
   return (
-    <label className={classNames('flex flex-col gap-1', className)}>
+    <label className={classNames('field-cell', className)}>
       {label && <span className="text-2xs font-medium text-ink-500">{label}</span>}
       {children}
-      {hint && <span className="text-2xs text-ink-500">{hint}</span>}
+      {hint && <span className="text-2xs leading-relaxed text-ink-500">{hint}</span>}
     </label>
   )
 }
@@ -394,17 +400,288 @@ export function TextInput({
   )
 }
 
+export interface SelectOption {
+  value: string
+  label: string
+  /** Shown after the label, right-aligned and dimmer. Where a value is a code that
+   *  has a readable name -- `link-no-arp` beside 「二层：ARP 无应答」-- this is the
+   *  code, because the word alone loses what the API will hand back. */
+  hint?: string
+  /** A prompt rather than a value: "选择一个已提取的固件" is what the field says when
+   *  nothing is chosen, and it has to read differently from a chosen arch, or the
+   *  form looks like it is already answered. */
+  placeholder?: boolean
+  disabled?: boolean
+}
+
+/**
+ * The dropdown, drawn by the page.
+ *
+ * A native `<select>` cannot be finished: `appearance: none` and a drawn arrow make
+ * the closed box match the theme, but the *expanded* list is drawn by the operating
+ * system -- OS palette, OS font, OS row metrics, OS highlight -- and no stylesheet
+ * reaches it. The screenshot that prompted this was exactly that: a themed box with
+ * a stock list under it. So the list is page DOM, portalled and positioned from the
+ * trigger's rectangle, and what remains of the native element is nothing.
+ *
+ * What the native element *was* is worth keeping, so this is built to its
+ * behaviour rather than to its look: the list opens on click, Enter, Space or
+ * ArrowDown, ArrowUp/Home/End/PageUp/PageDown move the highlight, Enter and Space
+ * commit, Escape closes without committing, Tab closes and lets focus continue
+ * onward, and the arrow keys wrap. The highlight follows the pointer as well, so
+ * nothing has to be learned twice. Focus never leaves the trigger -- the active
+ * option is named with `aria-activedescendant` -- which is what keeps a keyboard
+ * user from being dropped at the top of the window when the list closes.
+ *
+ * `options` is a list of `{value, label}` rather than `<option>` children on
+ * purpose: reading a value out of `event.target.value` works for one control and
+ * not for the next thing this needs (a per-option hint, a disabled option), and a
+ * caller that builds an array can filter it before it reaches the DOM.
+ */
 export function Select({
   label,
+  hint,
+  value,
+  options,
+  onChange,
+  disabled,
   className,
-  children,
-  ...rest
-}: { label?: string } & React.SelectHTMLAttributes<HTMLSelectElement>) {
+  menuClassName,
+}: {
+  label?: string
+  /** The field's own third line, so a select takes up the same three tracks as the
+   *  inputs beside it. Without it the row's hint line is short by one field. */
+  hint?: ReactNode
+  value: string
+  options: SelectOption[]
+  onChange: (value: string) => void
+  disabled?: boolean
+  className?: string
+  menuClassName?: string
+}) {
+  const [open, setOpen] = useState(false)
+  const [active, setActive] = useState(-1)
+  const [box, setBox] = useState<{ top: number; left: number; width: number; drop: 'down' | 'up' } | null>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const listId = useId()
+
+  const selected = options.find((option) => option.value === value)
+  const selectable = options.filter((option) => !option.disabled)
+
+  /** Anchored to the trigger rather than laid out in flow: an in-flow list is
+   *  clipped by the nearest scrolling ancestor, and every caller here sits inside
+   *  one -- the launch window's body, the record table's modal. Flipped upward when
+   *  there is not enough room below, because a field near the bottom of a window
+   *  must not open a list off the bottom of the screen. */
+  const place = useCallback(() => {
+    const trigger = triggerRef.current
+    if (!trigger) return
+    const rect = trigger.getBoundingClientRect()
+    const height = menuRef.current?.scrollHeight ?? 0
+    const below = window.innerHeight - rect.bottom - 8
+    const drop = height > below && rect.top > below ? 'up' : 'down'
+    setBox({
+      top: drop === 'down' ? rect.bottom + 4 : Math.max(8, rect.top - 4 - height),
+      left: rect.left,
+      width: rect.width,
+      drop,
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!open) return
+    setActive(Math.max(0, options.findIndex((option) => option.value === value)))
+    place()
+    // Re-placed on any scroll, not just the window's: the list is portalled to the
+    // body, so the trigger can move under a scrolling modal without the page
+    // scrolling at all.
+    const reposition = () => place()
+    window.addEventListener('scroll', reposition, true)
+    window.addEventListener('resize', reposition)
+    return () => {
+      window.removeEventListener('scroll', reposition, true)
+      window.removeEventListener('resize', reposition)
+    }
+  }, [open, options, place, value])
+
+  useEffect(() => {
+    if (!open) return
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target
+      if (target instanceof Node && (menuRef.current?.contains(target) || triggerRef.current?.contains(target))) return
+      setOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown, true)
+    return () => document.removeEventListener('pointerdown', onPointerDown, true)
+  }, [open])
+
+  // The highlighted option is the one on screen, even when the arrow keys moved it.
+  useEffect(() => {
+    if (active < 0) return
+    menuRef.current?.querySelector(`#${CSS.escape(`${listId}-${active}`)}`)?.scrollIntoView({ block: 'nearest' })
+  }, [active, listId])
+
+  const close = (commit: boolean) => {
+    if (commit && active >= 0) {
+      const option = options[active]
+      if (option && !option.disabled && option.value !== value) onChange(option.value)
+    }
+    setOpen(false)
+    // Escape and outside-click both leave the trigger holding focus, so the next
+    // Tab continues from this field instead of from the top of the window.
+    triggerRef.current?.focus()
+  }
+
+  /** Arrow keys wrap, the way a native list does: from the last option, Up lands on
+   *  the last rather than standing still, which is how you get somewhere when the
+   *  cursor is below where you meant to be. Disabled options are stepped over. */
+  const move = (step: number) => {
+    if (selectable.length === 0) return
+    setActive((current) => {
+      const from = current < 0 ? (step > 0 ? -1 : 0) : current
+      let next = from
+      for (let index = 0; index < options.length; index += 1) {
+        next = (next + step + options.length) % options.length
+        if (!options[next]?.disabled) return next
+      }
+      return current
+    })
+  }
+
+  const onKeyDown = (event: React.KeyboardEvent) => {
+    if (disabled) return
+    if (event.key === 'Escape') {
+      if (!open) return
+      event.preventDefault()
+      // Stopped here rather than left to bubble: this field is inside the launch
+      // window, whose own Escape closes the window. Choosing an option and closing
+      // the window are not the same answer.
+      event.stopPropagation()
+      close(false)
+      return
+    }
+    if (!open && ['ArrowDown', 'ArrowUp'].includes(event.key)) {
+      event.preventDefault()
+      setOpen(true)
+      return
+    }
+    if (!open) return
+    if (event.key === 'Tab') {
+      close(false)
+      return
+    }
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      move(1)
+      return
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      move(-1)
+      return
+    }
+    if (event.key === 'Home' || event.key === 'PageUp') {
+      event.preventDefault()
+      setActive(selectable[0] === undefined ? -1 : options.indexOf(selectable[0]))
+      return
+    }
+    if (event.key === 'End' || event.key === 'PageDown') {
+      event.preventDefault()
+      const last = selectable[selectable.length - 1]
+      setActive(last === undefined ? -1 : options.indexOf(last))
+      return
+    }
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault()
+      close(true)
+    }
+  }
+
   return (
-    <FieldShell label={label} className={className}>
-      <select className="field field-select" {...rest}>
-        {children}
-      </select>
+    <FieldShell label={label} hint={hint} className={className}>
+      <button
+        ref={triggerRef}
+        type="button"
+        disabled={disabled}
+        role="combobox"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={open ? listId : undefined}
+        aria-activedescendant={open && active >= 0 ? `${listId}-${active}` : undefined}
+        aria-label={typeof label === 'string' ? label : undefined}
+        data-open={open}
+        // The closed box still answers with a click on the field itself, not just on
+        // the chevron, which is the affordance a native select trains people on.
+        onClick={() => setOpen((state) => !state)}
+        onKeyDown={onKeyDown}
+        title={selected?.label}
+        className="field select-trigger"
+      >
+        <span className="select-value" data-empty={selected?.placeholder || selected === undefined}>
+          {selected?.label ?? '—'}
+        </span>
+        <ChevronDown
+          className={classNames('h-3.5 w-3.5 transition-transform duration-150', open && 'rotate-180')}
+          aria-hidden="true"
+        />
+      </button>
+
+      {open &&
+        box &&
+        createPortal(
+          <div
+            ref={menuRef}
+            id={listId}
+            role="listbox"
+            aria-label={typeof label === 'string' ? label : '选项'}
+            style={{
+              position: 'fixed',
+              top: box.top,
+              left: box.left,
+              // Wide enough for its own longest option, never narrower than the
+              // field it belongs to, never wider than the window: a five-character
+              // field with a nine-character option would otherwise open a list that
+              // hides its own label.
+              width: 'max-content',
+              minWidth: box.width,
+              maxWidth: `${Math.max(0, window.innerWidth - box.left - 8)}px`,
+              ...(box.drop === 'up' ? { transform: 'translateY(-100%)' } : null),
+            }}
+            className={classNames('select-menu shadow-glass', menuClassName)}
+          >
+            {options.map((option, index) => (
+              <div
+                key={option.value}
+                id={`${listId}-${index}`}
+                role="option"
+                aria-selected={option.value === value}
+                aria-disabled={option.disabled || undefined}
+                data-active={index === active}
+                className="select-option"
+                onMouseEnter={() => setActive(index)}
+                // `pointerdown` with a `preventDefault`, so the click never lands on
+                // whatever is behind the list -- on a modal scrim that would be an
+                // unintended dismissal of the whole window.
+                onPointerDown={(event) => {
+                  if (option.disabled) return
+                  event.preventDefault()
+                  setActive(index)
+                  setOpen(false)
+                  triggerRef.current?.focus()
+                  if (option.value !== value) onChange(option.value)
+                }}
+              >
+                <Check className="select-tick h-3 w-3 shrink-0" style={{ visibility: 'hidden' }} aria-hidden="true" />
+                <span className="select-option-label" title={option.label}>
+                  {option.label}
+                </span>
+                {option.hint && <span className="shrink-0 font-mono text-ink-700">{option.hint}</span>}
+              </div>
+            ))}
+          </div>,
+          document.body,
+        )}
     </FieldShell>
   )
 }
@@ -415,6 +692,7 @@ export function Select({
 export function FileInput({
   label,
   hint,
+  className,
   file,
   accept,
   disabled,
@@ -422,13 +700,14 @@ export function FileInput({
 }: {
   label?: string
   hint?: ReactNode
+  className?: string
   file: File | null
   accept?: string
   disabled?: boolean
   onPick: (file: File | null) => void
 }) {
   return (
-    <FieldShell label={label} hint={hint} className="min-w-56 flex-1">
+    <FieldShell label={label} hint={hint} className={className}>
       <span className="flex items-center gap-2">
         <input
           type="file"
