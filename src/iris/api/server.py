@@ -32,7 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from iris import __version__
 from iris.api.auth import require_client
 from iris.arch import normalize_arch
-from iris.config import get_settings
+from iris.config import DEFAULT_BOOT_TIMEOUT_SEC, get_settings
 from iris.db.active import list_owned, reconcile, register, release
 from iris.db.engine import get_engine, init_db, make_session
 from iris.emulate.linkprobe import LayerState
@@ -82,7 +82,7 @@ class EmulateRequest(BaseModel):
     arch: str = Field(..., description="target architecture (mipsel/mipseb/armel)")
     iid: int = Field(0, description="image ID (auto-assigned if 0)")
     port: int = Field(8080, description="host port for web access (0 picks a free one)")
-    timeout: int = Field(120, description="boot timeout in seconds")
+    timeout: int = Field(DEFAULT_BOOT_TIMEOUT_SEC, description="boot timeout in seconds")
 
 
 class UploadLaunchResponse(BaseModel):
@@ -432,7 +432,7 @@ async def pipeline(
     firmware: UploadFile = File(..., description="Firmware binary file"),
     arch: str = "",
     port: int = 8080,
-    timeout: int = 120,
+    timeout: int = DEFAULT_BOOT_TIMEOUT_SEC,
 ) -> PipelineResponse:
     """End-to-end pipeline: upload firmware → extract rootfs → emulate → web access."""
     from iris.extract.firmware import analyze_firmware
@@ -459,6 +459,13 @@ async def pipeline(
 
     info = await asyncio.to_thread(analyze_firmware, content)
     detected_arch = arch or info.arch or ""
+    # Normalized before the whitelist, like every other check here (lines 281 and
+    # 713 both do it). ``info.arch`` is a census label and the census says
+    # "aarch64", while the QEMU configs are keyed "arm64" -- so an arm64 firmware
+    # uploaded through the pipeline was refused as unsupported while the same
+    # firmware booted fine from ``iris emulate run --arch aarch64``. The alias
+    # table is the whole reason that works, and it was simply not consulted here.
+    detected_arch = normalize_arch(detected_arch)
 
     if not detected_arch or detected_arch not in _SUPPORTED_ARCHS:
         return PipelineResponse(
@@ -552,11 +559,15 @@ async def pipeline(
 
 
 #: How long to wait for the blocking body of a launch. The emulation itself is
-#: bounded by the caller's ``timeout`` (default 120s) plus the fixed docker step
-#: timeouts, so this is only the ceiling on the whole request. Long enough that a
-#: slow boot is never cut off mid-way -- a cancelled launch leaves a container
-#: nobody registered -- and short enough that a hung read cannot hold the worker.
-_UPLOAD_LAUNCH_TIMEOUT_SEC = 900
+#: bounded by the caller's ``timeout`` plus the fixed docker step timeouts (the
+#: image build alone allows 180s), so this is only the ceiling on the whole request.
+#:
+#: Derived rather than guessed, because a request that asked for the largest
+#: timeout this endpoint accepts (1800s) plus the largest single docker step has to
+#: fit: a ceiling that cut off a run the caller had explicitly asked to wait for
+#: cancels the launch, and a cancelled launch leaves a container nobody registered.
+#: 600 + 600 clears the default 600s boot with room for the image build on top.
+_UPLOAD_LAUNCH_TIMEOUT_SEC = 1200
 
 
 @app.post("/api/v1/emulate/upload", response_model=UploadLaunchResponse)
@@ -566,7 +577,7 @@ async def emulate_upload(
     kind: str = Query("auto", pattern="^(auto|rootfs|firmware)$"),
     arch: str = Query("", description="target arch; empty or 'auto' infers it"),
     port: int = Query(0, ge=0, le=65535, description="0 picks a free port"),
-    timeout: int = Query(120, ge=1, le=1800),
+    timeout: int = Query(DEFAULT_BOOT_TIMEOUT_SEC, ge=1, le=1800),
 ) -> UploadLaunchResponse:
     """Start an emulation from an uploaded file: a rootfs archive or a firmware image.
 

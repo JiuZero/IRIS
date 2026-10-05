@@ -6,6 +6,7 @@ import { Play } from 'lucide-react'
 import { Modal } from './Modal'
 import { Badge, Button, FileInput, Segmented, Select, TextInput } from './ui'
 import { api } from '../lib/api'
+import { DEFAULT_BOOT_TIMEOUT_SEC } from '../lib/constants'
 import { classNames, formatBytes, seconds } from '../lib/format'
 import { useFirmware } from '../hooks/queries'
 import { useTicker } from '../hooks'
@@ -63,12 +64,12 @@ export function LaunchDialog({ open, onClose }: { open: boolean; onClose: () => 
   const [image, setImage] = useState<File | null>(null)
   const [arch, setArch] = useState('')
   const [port, setPort] = useState('0')
-  const [timeoutValue, setTimeoutValue] = useState('200')
+  const [timeoutValue, setTimeoutValue] = useState(String(DEFAULT_BOOT_TIMEOUT_SEC))
   const [lastResult, setLastResult] = useState<LaunchVerdict | null>(null)
 
   const shared = {
     port: Number.parseInt(port, 10) || 0,
-    timeout: Number.parseInt(timeoutValue, 10) || 200,
+    timeout: Number.parseInt(timeoutValue, 10) || DEFAULT_BOOT_TIMEOUT_SEC,
   }
 
   const start = useMutation({

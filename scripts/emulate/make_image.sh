@@ -1,6 +1,16 @@
 #!/bin/bash
 set -e
 
+# Progress belongs on stderr, so a caller capturing stdout gets the answer and not
+# a transcript. `Image build output: l Channel----` in a run log was 200 characters
+# of the tail of this script's stdout, which said nothing except that the log had
+# truncated the useful part. stdout now carries exactly one line: where the image
+# went. Every tool invoked below (qemu-img, mkfs, tar, e2fsck) also writes to
+# stderr, so progress and diagnostics stay in one stream and never interleave into
+# the result.
+exec 3>&1 1>&2
+progress() { echo "$@" >&3; }
+
 IID=$1
 ARCH=$2
 WORK_DIR=/work/scratch/${IID}
@@ -8,6 +18,17 @@ IMAGE=${WORK_DIR}/image.raw
 IMAGE_DIR=${WORK_DIR}/image
 TARBALL=/work/scratch/${IID}/${IID}.tar.gz
 BINARIES=/work/binaries
+
+# Refuse before anything expensive, not inside tar. On iid 6000 the tarball was
+# absent, and the 1G raw image was created and mkfs'd before
+# `tar: Cannot open: No such file or directory` said so -- a full image build spent
+# to learn the one thing that was already true ten seconds in. This is the check
+# that check should have had.
+if [ ! -s "${TARBALL}" ]; then
+    echo "make_image.sh: no rootfs tarball at ${TARBALL} (missing or empty);" \
+         "nothing to unpack, so no image was built" >&2
+    exit 3
+fi
 
 # Record the launch arch next to the image. A guardian that restarts the
 # container has no other way to learn it: the container's entrypoint is
@@ -24,36 +45,55 @@ mkdir -p "${TMP_BUILD}"
 TMP_IMAGE=${TMP_BUILD}/image.raw
 TMP_IMAGE_DIR=${TMP_BUILD}/image
 
-echo "----Creating QEMU Image (1G raw)----"
+# The loop mount is released on every exit path, including the failures this
+# script already had: `umount` under `set -e` aborts the script the moment the
+# kernel still holds the image busy, which skipped e2fsck and left a mounted 1G
+# image plus its /tmp/build-<iid> behind. A later run then hit
+# `rm: cannot remove '/tmp/build-7672/image': Device or resource busy` and had no
+# way to tell it was its own predecessor's mess. `umount -l` is the second try
+# because the first one legitimately fails while anything holds the mount open.
+MNTED=0
+cleanup() {
+    if [ "${MNTED}" = 1 ]; then
+        umount "${TMP_IMAGE_DIR}" 2>/dev/null \
+            || umount -l "${TMP_IMAGE_DIR}" 2>/dev/null \
+            || true
+    fi
+    return 0
+}
+trap cleanup EXIT
+
+progress "----Creating QEMU Image (1G raw)----"
 FS=ext2
 [ "${ARCH}" = "arm64" ] && FS=ext4   # Alpine arm64 generic kernel ships no ext2 driver
 qemu-img create -f raw "${TMP_IMAGE}" 1G
 chmod a+rw "${TMP_IMAGE}"
 
-echo "----Creating ${FS} filesystem directly----"
+progress "----Creating ${FS} filesystem directly----"
 mkfs.${FS} -F "${TMP_IMAGE}"
 
-echo "----Mounting image----"
+progress "----Mounting image----"
 mkdir -p "${TMP_IMAGE_DIR}"
 mount -o loop "${TMP_IMAGE}" "${TMP_IMAGE_DIR}"
+MNTED=1
 
-echo "----Extracting Filesystem Tarball----"
+progress "----Extracting Filesystem Tarball----"
 tar -xf "${TARBALL}" -C "${TMP_IMAGE_DIR}"
-echo "Extracted $(find ${TMP_IMAGE_DIR} -type f | wc -l) files"
+progress "Extracted $(find ${TMP_IMAGE_DIR} -type f | wc -l) files"
 
-echo "----Creating firmadyne Directories----"
+progress "----Creating firmadyne Directories----"
 mkdir -p "${TMP_IMAGE_DIR}/firmadyne/libnvram"
 mkdir -p "${TMP_IMAGE_DIR}/firmadyne/libnvram.override"
 
 cp /bin/busybox "${TMP_IMAGE_DIR}/firmadyne/busybox" 2>/dev/null || cp /usr/bin/busybox "${TMP_IMAGE_DIR}/firmadyne/busybox"
 
-echo "----Patching Filesystem----"
+progress "----Patching Filesystem----"
 cp /work/scripts/fix_image.sh "${TMP_IMAGE_DIR}/fix_image.sh"
 chmod +x "${TMP_IMAGE_DIR}/fix_image.sh"
 chroot "${TMP_IMAGE_DIR}" /firmadyne/busybox ash /fix_image.sh || true
 rm "${TMP_IMAGE_DIR}/fix_image.sh"
 
-echo "----Injecting Binaries----"
+progress "----Injecting Binaries----"
 for f in busybox console libnvram.so libnvram_ioctl.so; do
     SRC="${BINARIES}/${f}.${ARCH}"
     if [ -e "${SRC}" ]; then
@@ -73,7 +113,7 @@ chmod +x "${TMP_IMAGE_DIR}/firmadyne/network.sh"
 touch "${TMP_IMAGE_DIR}/firmadyne/debug.sh"
 chmod +x "${TMP_IMAGE_DIR}/firmadyne/debug.sh"
 
-echo "----Injecting IRIS Network Fix----"
+progress "----Injecting IRIS Network Fix----"
 # /etc is not always /etc: Tenda AC15 points it at a writable overlay (`etc ->
 # /var/etc`, empty on disk) and keeps the real tree in /etc_ro, which its inittab
 # references directly. Probe for the one that actually holds init.d, or the
@@ -84,7 +124,7 @@ if [ ! -d "${IRIS_ETC}/init.d" ] && [ -d "${TMP_IMAGE_DIR}/etc_ro/init.d" ]; the
     IRIS_ETC="${TMP_IMAGE_DIR}/etc_ro"
 fi
 if [ -d "${IRIS_ETC}/init.d" ]; then
-    echo "init.d found under ${IRIS_ETC}"
+    progress "init.d found under ${IRIS_ETC}"
     cp /work/scripts/iris_net_fix.sh "${IRIS_ETC}/init.d/iris_net_fix"
     chmod +x "${IRIS_ETC}/init.d/iris_net_fix"
     cp /work/scripts/iris_net_fix_bg.sh "${IRIS_ETC}/init.d/iris_net_fix_bg"
@@ -92,7 +132,7 @@ if [ -d "${IRIS_ETC}/init.d" ]; then
     mkdir -p "${IRIS_ETC}/rc.d"
     ln -sf "../init.d/iris_net_fix" "${IRIS_ETC}/rc.d/S99iris_net_fix"
 else
-    echo "WARNING: no init.d under /etc or /etc_ro; guest will get no network/web fallback"
+    progress "WARNING: no init.d under /etc or /etc_ro; guest will get no network/web fallback"
 fi
 
 # Hooks the guest boot. Architecture-independent on purpose: the sysinit hook, the
@@ -101,10 +141,10 @@ fi
 # inject_boot_hooks.sh. Leaving this inside the arm64 block is what starved every
 # other architecture of the fallback.
 if ! /work/scripts/inject_boot_hooks.sh "${TMP_IMAGE_DIR}" /work/scripts; then
-    echo "WARNING: boot hook injection failed; the guest may get no network/web fallback"
+    progress "WARNING: boot hook injection failed; the guest may get no network/web fallback"
 fi
 
-echo "----Arm64 Generic-Kernel Channel----"
+progress "----Arm64 Generic-Kernel Channel----"
 if [ "${ARCH}" = "arm64" ]; then
     # Alpine busybox: the x86_64 one copied above cannot run inside an aarch64 guest
     [ -e "${BINARIES}/busybox.arm64" ] && cp "${BINARIES}/busybox.arm64" "${TMP_IMAGE_DIR}/firmadyne/busybox.arm64"
@@ -129,7 +169,7 @@ if [ "${ARCH}" = "arm64" ]; then
     fi
 fi
 
-echo "----Finding Init----"
+progress "----Finding Init----"
 cp /work/scripts/infer_init.sh "${TMP_IMAGE_DIR}/infer_init.sh"
 chmod +x "${TMP_IMAGE_DIR}/infer_init.sh"
 chroot "${TMP_IMAGE_DIR}" /firmadyne/busybox ash /infer_init.sh || true
@@ -137,13 +177,17 @@ rm "${TMP_IMAGE_DIR}/infer_init.sh"
 
 if [ -e "${TMP_IMAGE_DIR}/firmadyne/init" ]; then
     cp "${TMP_IMAGE_DIR}/firmadyne/init" "${WORK_DIR}/init"
-    echo "Init: $(cat ${WORK_DIR}/init)"
+    progress "Init: $(cat ${WORK_DIR}/init)"
 fi
 
 
-echo "----Unmounting and copying to output----"
+progress "----Unmounting and copying to output----"
 sync
+# Unmounted here rather than only in the EXIT trap, because e2fsck cannot run on a
+# mounted image and the trap runs after the script body. MNTED drops to 0 so the
+# trap does not try again over an already-released mount.
 umount "${TMP_IMAGE_DIR}"
+MNTED=0
 e2fsck -y "${TMP_IMAGE}" || true
 sync
 

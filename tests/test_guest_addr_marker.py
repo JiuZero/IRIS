@@ -122,15 +122,20 @@ class TestTheWriter:
         assert "_is_dotted_quad(guest_ip)" in source
         assert "isdigit" not in source
 
-    def test_only_a_measurement_is_recorded(self):
-        """``guest_ip`` starts out as the 192.168.1.1 assumption. Written
-        unconditionally, the file would pin the assumption as if it had been observed
-        -- and the next launch would read back exactly what it already assumed."""
+    def test_only_a_forward_that_was_established_is_recorded(self):
+        """The marker tells the next launch which address the host bridge pointed at,
+        so it belongs to the branch that built a forward to that address and to nothing
+        else. It used to be gated on ``detected != guest_ip`` instead: the file whose
+        entire job is to stop the next launch from assuming was written only when the
+        assumption turned out to be wrong, so a guest sitting on the assumed address --
+        iid 6715, which then had no forward and answered 000 for its whole timeout --
+        got no marker at all."""
         loop = inspect.getsource(orchestrator._emulate_firmware)
-        call = loop.index("_record_guest_ip(")
-        guard = loop.rindex("if detected", 0, call)
-        assert "detected != guest_ip" in loop[guard:loop.index("\n", guard)]
-        assert "guest_ip = detected" in loop[guard:call]
+        marker = "_record_guest_ip(container_name, iid, forwarded_to)"
+        call = loop.index(marker)
+        branch = loop.rindex("if (target := _forward_target(", 0, call)
+        assert "detected != guest_ip" not in loop[branch:call]
+        assert marker in loop[branch:call + len(marker)]
 
 
 class TestTheReader:

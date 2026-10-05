@@ -4,6 +4,106 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.25] - 2026-10-06
+
+从 21 份实跑日志里归纳出的 P0/P1/P2/P3 清单一次性全量落地。核心是**一处把
+240s 超时归咎于端口的假结论**：iid 6715 的 guest 地址恰好等于代码里的默认假设，
+于是「地址变了吗」那道门一直没开，socat 转发从未建立，`curl 127.0.0.1:{port}`
+必然 000，而失败归因把原因写成了「anything other than :80」。
+
+### 修复
+
+- **guest 地址等于默认假设时转发从未建立**（`src/iris/emulate/orchestrator.py`）。
+  判据从 `if detected and detected != guest_ip` 换成新纯函数 `_forward_target(detected,
+  forwarded_to)`：只有 loopback 或 None 不转发，**地址等于假设照样建转发**。
+  启动循环的 `socat_updated: bool` 一并拆成 `forwarded_to: str | None`，
+  把「地址测到了没有」和「转发建成了没有」两个语义分开——原来那个布尔量同时背了两件事，
+  正是它让「测到了」看起来像「转发好了」
+- **失败归因不再无条件指控端口**（同文件）。拆出 `_read_binds()` 与 `_web_findings()`：
+  bind 从串口日志里读，并支持三种格式（`inet_bind[PID: N (proc)]`、
+  `net_bind: bind IP:PORT`、`Listen on IP:PORT`），按出现位置排序去重；真实比对 `:80`，
+  含 80 → `WEB_UNREACHABLE`（措辞明说端口不是原因），不含 80 且有 bind → `WEB_WRONG_PORT`，
+  连 bind 都没有 → `WEB_UNREACHABLE`（此时不能说端口错）。
+  原代码里那句注释与旧测试 `test_wrong_web_port_is_the_whole_story`
+  从没比对过 `:80`，却把「`bound nginx:80` + 该文案」断言成期望行为
+- **`POST /api/v1/pipeline` 漏掉架构归一化**（`src/iris/api/server.py`）。
+  `POST /api/v1/emulate`（:281）与上传启动（:720）都先 `normalize_arch` 再查白名单，
+  pipeline 没有；而 `info.arch` 是普查标签、普查说「aarch64」，QEMU 配置的键是「arm64」，
+  于是同一份固件走 `iris emulate run --arch aarch64` 能跑、走 pipeline 被拒成
+  `unsupported-arch: 'aarch64' not in supported ['armel', 'arm64', 'mipseb', 'mipsel']`
+- **启动超时默认值收敛为单一来源**（`src/iris/config.py`）。新增
+  `DEFAULT_BOOT_TIMEOUT_SEC = 600`，替换 `server.py`/`cli.py`/`orchestrator.py` 共 5 处
+  落点；前端新增 `web/src/lib/constants.ts`，`LaunchDialog.tsx` 两处字面量改为引用。
+  依据写在常量注释里：实测上界 420s（iid 6715），600s 留 43% 余量。
+  上传启动的 `_UPLOAD_LAUNCH_TIMEOUT_SEC` 900 → 1200，否则它会小于新默认值
+- **内核级崩溃证据缺失且 Oops 被当成失败**（`src/iris/failures.py`）。
+  新增 `GUEST_KERNEL_PANIC`（失败）与 `GUEST_KERNEL_OOPS`（入 `INFORMATIONAL_KINDS`），
+  判据来自真实日志：`emulate-9591` 第 254 行 `Kernel panic - not syncing: No working
+  init found` 且全文 0 个 inet_bind（致命），而 `emulate-6715` bind 在 536 行、Oops 在
+  678 行、`emulate-5192` bind 498 / Oops 645（都是先绑定后 Oops，服务仍可达）。
+  所以「有 Oops 就判失败」是假阳性，改为 panic=失败、oops=informational 记录
+- **`_boot_findings` 对健康 guest 误报 `WEB_UNREACHABLE`**（同文件）。
+  它无从知道 web 是否可达。新增 `web_reachable: bool | None` 贯穿
+  `_boot_findings`/`diagnose_boot_failure`/`_failure_diagnosis`：None=log-only 仍跑探针、
+  True=跳过 web 探针、False=照跑
+- **构建产物为空仍继续往下走**（`orchestrator.py` / `scripts/emulate/make_image.sh`）。
+  新增 `_reject_empty_artifact()` 接在 `_create_tarball` 与 `docker cp` 之后；
+  `_tarball_is_stale` 把 0 字节排除在复用之外（mtime 再新也不复用）；
+  `make_image.sh` 顶部加 `[ ! -s "${TARBALL}" ]` → stderr 报错 + `exit 3`，
+  位置在 `qemu-img create` 与 `mkfs` 之前
+- **loop 卸载无兜底**（`make_image.sh`）。加 `MNTED` 变量 + `cleanup()` + `trap cleanup EXIT`，
+  内容为 `umount || umount -l || true`；显式卸载后置 `MNTED=0`，避免 trap 二次尝试
+
+### 新增
+
+- **日志可落盘**（`src/iris/log.py` / `config.py`）。`log_to_file: bool = False` +
+  派生属性 `log_file`（`<iris_home>/logs/iris.log`），`RotatingFileHandler` 5MB×3。
+  实现约束两条，都是实测逼出来的：structlog 经自己的 `logger_factory` 直写 stdout、
+  **不经过 root handlers**，所以只给 root 挂 FileHandler 只能抓到 uvicorn；
+  而重路由 structlog 走 `logging` 会让 `record.getMessage()` 接管整行、丢掉所有 extras 字段、
+  破坏输出形状。解法是给 `PlainRenderer` 加 `sink` 参数，在渲染时额外写一份**无色**副本，
+  控制台形状不变；有 sink 时 `cache_logger_on_first_use` 必须关，否则旧 logger 保留旧 renderer
+- **uvicorn 日志接入同一套格式化**（`log.py`）。新增 `uvicorn_log_config()`（dictConfig，
+  `disable_existing_loggers: False`，formatters 用 `PlainFormatter`），
+  `cli.py` 三处 `uvicorn.run` 带上它
+- **构建输出与 stderr 分离**（`make_image.sh` / `orchestrator.py`）。脚本顶部
+  `exec 3>&1 1>&2` + `progress()`，10 处进度行改走 fd 3，stdout 只留
+  `==== Image built: ${IMAGE} ====`；新增 `_build_failure_detail()`（双流合并取尾部 800 字符），
+  成功路径改 `logger.info` 打 stdout 全文
+- **前端失败标签补齐到服务端全集**（`web/src/lib/format.ts`）。`FAILURE_LABELS` 由 8 项补为 30 项：
+  原来 4 项服务端已不存在、22 项缺失（含 `GUEST_KERNEL_PANIC` 与 `network-fallback-ok`）
+- **稳定性复现文档补一节**（`docs/04-快速部署.md`）。新增「MSYS 路径转换的作用范围」：
+  转换只发生在「从 Git Bash 手敲 bash 命令」这一层，Python `subprocess.run([...])` 传
+  `/work/scripts/x.sh` 原样送达（`OSTYPE=cygwin` 下实测），所以手工重跑容器内脚本必须
+  `MSYS_NO_PATHCONV=1`
+
+### 测试
+
+- `tests/test_boot_diagnosis.py` 53 → 71：新增 `TestForwardTarget`（7 用例）、真实 6715
+  多端口夹具、busybox bind 格式、bind 与 Oops 的日志顺序；
+  `TestGuestKernelCrashIsNotAnInvisibleVerdict`（14 用例）带 `_NO_INIT_PANIC` /
+  `_OOPS_AFTER_BIND` 两份真实日志。变异验证：还原「地址相等门控」→ 2 变红；
+  去掉 `:80` 真实比对 → 2 变红；去掉 web_reachable 守卫 → 2 变红；
+  Oops 移出 informational → 1 变红
+- 新增 `tests/test_boot_timeout_default.py`（16 用例）：实测上界 420s、25% 余量、
+  orchestrator 签名、`EmulateRequest`、OpenAPI 两端点、CLI `OptionInfo`、
+  前端常量与后端一致、请求 ceiling > 默认 + 180
+- 新增 `tests/test_failure_labels.py`（5 用例）：前后端标签集合双向相等 + 新 kind 必命名 + fallback 保留
+- 新增 `tests/test_image_build_script.py`（24 用例）：tarball 前置校验、trap、输出分离
+- 新增 `tests/test_log_to_file.py`（21 用例），含**真实子进程**把 stdlib 与 structlog 两行写进同一文件
+- 新增 `tests/test_arch_normalization_sites.py`（14 用例）：驱动 pipeline 到抽取步骤
+  （aarch64/arm64le 放行、sparc64 仍拒、拒绝文案报归一化后的名字），加源码守卫
+  （白名单查表前必须归一化）。变异验证：去掉归一化 → 4 变红
+- `tests/test_guest_addr_marker.py` 的 `test_only_a_measurement_is_recorded` 改写为
+  `test_only_a_forward_that_was_established_is_recorded`：原用例把「等于假设就不写标记」
+  钉成期望行为，而那个文件存在的全部意义就是不写假设。变异验证：还原旧门控 → 1 变红
+- 全量门禁：`1569 passed / 5 skipped`、ruff 全绿、`tsc` 零错误
+
+### 已知
+
+- 本批未在真实 Docker/QEMU 环境跑一次完整仿真（环境限制），前端渲染效果仍无法在浏览器验证
+- `make_image.sh` 改动需重建 baked 镜像才生效（`_baked_scripts_fingerprint` 会因脚本变更自动换 tag）
+
 ## [0.3.24] - 2026-10-05
 
 历史运行记录补上「状态」列：每条记录现在能回答它对应的实例**现在**是什么状态。

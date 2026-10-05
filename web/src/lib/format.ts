@@ -100,16 +100,48 @@ export function formatDuration(total: number): string {
   return `${hours}h ${minutes % 60}m`
 }
 
-/** A `FailureKind` value as the words the taxonomy gives it. */
+/** A `FailureKind` value as the words the taxonomy gives it.
+ *
+ *  One entry per `iris.failures.FailureKind`, which is the authority: the mapping
+ *  used to list eight kinds, four of which the server no longer emits at all, and
+ *  miss the other twenty-two -- so most rows in the root-cause view rendered a raw
+ *  machine slug while the few that were mapped read as Chinese prose.
+ *  tests/test_failure_labels.py asserts the two sets are equal, so adding a kind
+ *  on the server fails here until it is named.
+ *
+ *  `failureLabel` still falls back to the raw slug, because the server can also
+ *  return a kind from a record written before the taxonomy existed. */
 const FAILURE_LABELS: Record<string, string> = {
-  'link-no-arp': '二层：ARP 无应答',
-  'link-no-route': '二层：无路由',
-  'link-no-icmp': '三层：ICMP 不通',
-  'no-http-service': '四层：HTTP 未起',
+  'no-rootfs': '镜像内未找到 rootfs',
+  'encrypted-fit': 'FIT 已加密，缺厂商密钥',
+  'fit-unsupported': 'FIT 容器未实现解包',
+  'tendaw-nojffs2': 'TendaW 容器内无 JFFS2 分区',
+  'ubi-no-squashfs': 'UBI 容器内无 squashfs 卷',
+  'unsupported-arch': '该架构无 QEMU 配置',
+  'arch-mismatch': 'rootfs 架构与请求不一致',
+  'arch-undetermined': '无法判定 rootfs 架构',
+  'tarball-failed': 'rootfs 打包失败',
+  'container-create-failed': '容器创建失败',
+  'container-start-failed': '容器创建成功但启动失败',
+  'copy-tarball-failed': 'tarball 未送达容器',
+  'image-build-failed': '镜像构建失败',
+  'qemu-start-failed': 'QEMU 启动失败',
+  'reboot-loop': 'guest 反复重启',
+  'boot-hooks-missing': '启动钩子未注入',
+  'serial-log-unavailable': '容器已消失，串口日志丢失',
+  'guest-kernel-panic': 'guest 内核 panic 后停止',
+  'guest-kernel-oops': 'guest 内核 Oops（未致命）',
+  'nvram-unreadable': 'nvram/flash 不可读',
   'no-guest-ip': 'guest 未获得地址',
-  'boot-timeout': '启动超时',
-  'qemu-exit': 'QEMU 退出',
-  'web-slow': 'Web 过慢',
+  'no-network-driver': 'guest 内无网卡驱动',
+  'link-no-route': '二层：无路由',
+  'link-no-arp': '二层：ARP 无应答',
+  'link-no-icmp': '三层：ICMP 不通',
+  'link-no-service': '四层：web 服务未起',
+  'web-not-started': 'web 服务进程从未出现',
+  'web-wrong-port': 'web 服务未监听 80 端口',
+  'web-unreachable': 'web 端口全程未应答',
+  'network-fallback-ok': '网络兜底已生效',
 }
 
 export function failureLabel(kind: string): string {

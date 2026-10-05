@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from iris.arch import census_to_runnable, is_little_endian, normalize_arch
+from iris.config import DEFAULT_BOOT_TIMEOUT_SEC
 from iris.emulate.auto import pick_serial_port
 from iris.emulate.linkprobe import LinkProfile, probe_link, render_table
 from iris.emulate.qemu_config import get_config, supported_archs
@@ -112,6 +113,126 @@ _HAS_NON_LO_IP = re.compile(
 )
 
 
+#: The port the socat forward targets, and therefore the only port a guest web
+#: server can be reachable on.
+_FORWARDED_PORT = "80"
+
+#: Listen sockets IRIS reads out of a serial log, in the three shapes seen in the
+#: wild. FirmAE rewrites the kernel's ``inet_bind`` printk and inserts the calling
+#: process; busybox kernels print their own net stack's words and carry no process
+#: name at all. Matching only the first shape made every other guest degrade to a
+#: bare "port unknown", and a finding that cannot name a port cannot honestly
+#: claim that port is the wrong one.
+_BIND_PATTERNS = (
+    re.compile(r"inet_bind\[PID: \d+ \(([^)]*)\)\]: proto:SOCK_STREAM, port:(\d+)"),
+    re.compile(r"net_bind: bind \d+\.\d+\.\d+\.\d+:(\d+)"),
+    re.compile(r"Listen on \d+\.\d+\.\d+\.\d+:(\d+)"),
+)
+
+
+def _forward_target(detected: str | None, forwarded_to: str | None) -> str | None:
+    """The guest address a forward should now point at, or None to leave it be.
+
+    Separate from the loop that acts on it so the one decision that decides whether
+    a run can reach its guest at all is stated once and testable on its own.
+
+    The trap this guards is the obvious-looking ``detected != guest_ip``. The
+    address the loop starts from is an assumption (192.168.1.1), not a
+    measurement, and the netfix fallback hands exactly that address to every guest
+    it rescues -- so "the address did not change" is true precisely for the guests
+    that most need the forward, and gating on it left them with no forward at all.
+    A guest that answered on the default address answered with HTTP 000 for the
+    entire timeout (iid 6715, 2026-10-03) and was then reported as having bound the
+    wrong port.
+    """
+    if not detected or detected.startswith("127."):
+        return None
+    return None if detected == forwarded_to else detected
+
+
+def _read_binds(serial_log: str) -> list[tuple[str, str]]:
+    """``(process, port)`` per listen socket the log names, in log order, deduped.
+
+    Log order rather than pattern order, so a guest whose dropbear bind precedes
+    its web bind reads as dropbear-then-web in the report the way it booted. The
+    process name is empty for the shapes that do not print one; callers render
+    that as ``?`` rather than inventing a name.
+    """
+    hits: list[tuple[int, str, str]] = []
+    for pattern in _BIND_PATTERNS:
+        for match in pattern.finditer(serial_log):
+            groups = match.groups()
+            hits.append((match.start(), groups[0] if len(groups) == 2 else "", groups[-1]))
+    hits.sort(key=lambda hit: hit[0])
+    return list(dict.fromkeys((proc, port) for _, proc, port in hits))
+
+
+#: Kernel stops that end the guest, keyed to the exact printk lines seen in real
+#: logs here. "not syncing" is what separates these from an Oops: the kernel is
+#: saying it cannot continue, so nothing in userspace was ever going to run.
+_KERNEL_PANIC = re.compile(
+    r"Kernel panic - not syncing"
+    r"|end Kernel panic"
+    r"|Unable to mount root fs"
+    r"|VFS: Cannot open root device"
+)
+
+#: An exception the kernel logged, dumped registers for and carried on from. Not
+#: fatal by itself: iid 6715 bound uhttpd to :80 on line 536 and took this Oops in
+#: netifd on line 678, and iid 5192 did the same. Reading it as a failure would
+#: report a guest that served its web plane as one that did not, which is the
+#: mirror image of the bug it was added for -- that one reported a guest whose
+#: kernel had crashed as clean "success: True" with the backtrace sitting in the
+#: serial log under the verdict.
+_KERNEL_OOPS = re.compile(r"Internal error: Oops")
+
+#: The kernel prefixes most of its printk lines with a bracketed timestamp, which
+#: is stripped before a line is quoted inside a sentence.
+_KERNEL_PREFIX = re.compile(r"^\s*\[[^\]]*\]\s*")
+
+
+def _kernel_crash_findings(serial_log: str) -> list[Failure]:
+    """What the guest kernel itself reported about stopping, in its own words.
+
+    The panic line is quoted rather than paraphrased because "the kernel stopped"
+    is not actionable on its own and the sentence after it usually is --
+    "No working init found", "Unable to mount root fs". Probed first of all
+    findings: a kernel that is down explains every link after it, and reporting
+    the links as if each had been broken separately sends the reader after a
+    network problem the guest never had.
+    """
+    findings: list[Failure] = []
+
+    panic = _KERNEL_PANIC.search(serial_log)
+    if panic:
+        line = next((raw.strip() for raw in serial_log.splitlines()
+                     if panic.group(0) in raw), panic.group(0))
+        findings.append(Failure(
+            FailureKind.GUEST_KERNEL_PANIC,
+            f"the guest kernel stopped and could not continue (log: {line!r}), so "
+            f"nothing in userspace was ever going to come up",
+            evidence={"log_line": line},
+        ))
+
+    oops = _KERNEL_OOPS.search(serial_log)
+    if oops:
+        line = next((raw.strip() for raw in serial_log.splitlines()
+                     if oops.group(0) in raw), oops.group(0))
+        process = next((raw for raw in serial_log.splitlines()
+                        if "Process " in raw and "pid:" in raw), "")
+        # The kernel's own "[  119.838438] " prefix is noise once the line is a
+        # sentence: the timestamp is already the run's own record.
+        process = _KERNEL_PREFIX.sub("", process).strip()
+        findings.append(Failure(
+            FailureKind.GUEST_KERNEL_OOPS,
+            f"the guest kernel took an exception and kept running (log: {line!r})"
+            + (f"; the process it killed was {process}" if process else ""),
+            evidence={"log_line": line, "process": process},
+        ))
+
+    return findings
+
+
 #: (log fragment, cause) for the reboot triggers seen in the wild. A guest that
 #: reboots in a loop is not broken in one way: the AC15 detects its own nvram
 #: partition as destroyed and reboots on purpose, while a different firmware
@@ -146,15 +267,24 @@ _NVRAM_TRIGGERS = frozenset({
 })
 
 
-def _boot_findings(serial_log: str, *, reboots: int) -> list[Failure]:
+def _boot_findings(serial_log: str, *, reboots: int,
+                    web_reachable: bool | None = None) -> list[Failure]:
     """One ``Failure`` per distinct way the guest failed, most specific first.
 
     Ordered most-specific first: the earliest link in the chain to break is the
     one worth reporting, because everything after it is downstream. Each probe
     states what was checked, so a wrong guess shows up as a missing probe rather
     than as a confident wrong answer.
+
+    ``web_reachable`` is what the caller measured with its own curl, which the log
+    cannot tell it. Left None the web probes still run -- a diagnosis built from a
+    log alone has no other evidence -- but a caller that already knows the answer
+    passes it, so a guest that answered is not told it never did. Without that the
+    probe had to claim ``web-unreachable`` for iid 6715, whose uhttpd was on :80 and
+    serving, purely because a boot log cannot see an HTTP response.
     """
     findings: list[Failure] = []
+    findings.extend(_kernel_crash_findings(serial_log))
 
     if reboots >= REBOOT_LOOP_THRESHOLD:
         cause = next((why for marker, why in _REBOOT_TRIGGERS if marker in serial_log), None)
@@ -211,27 +341,76 @@ def _boot_findings(serial_log: str, *, reboots: int) -> list[Failure]:
             "activity and no eth* interface): the rehost has no NIC to forward to",
         ))
 
+
+    if web_reachable is not True:
+        findings.extend(_web_findings(serial_log))
+
+    return findings
+
+
+def _web_findings(serial_log: str) -> list[Failure]:
+    """What the guest's web server did about the forwarded port, in its own words.
+
+    The one finding this used to produce unconditionally was ``web-wrong-port``,
+    with the prose "anything other than :80 is unreachable through the forward"
+    attached to whatever binds the log happened to contain. That sentence is a
+    claim about the binds, and on iid 6715 the binds it printed on the same line
+    were ``dropbear:22, uhttpd:80, uhttpd:443`` -- so the diagnosis named :80 as the
+    reason :80 could not be reached. It never compared the two numbers. They are
+    compared now, and each outcome says only what was actually seen.
+    """
+    findings: list[Failure] = []
+
     running = [s for s in _KNOWN_WEB_SERVERS if re.search(rf"\b{s}\b", serial_log)]
-    if running:
-        binds = re.findall(r"inet_bind\[PID: \d+ \(([^)]+)\)\]: proto:SOCK_STREAM, port:(\d+)", serial_log)
-        detail = ", ".join(f"{proc or '?'}:{port}" for proc, port in dict.fromkeys(binds)) or "port unknown"
-        findings.append(Failure(
-            FailureKind.WEB_WRONG_PORT,
-            f"a web server did start ({', '.join(running)}) but bound {detail} — "
-            f"anything other than :80 is unreachable through the forward",
-            evidence={"servers": running,
-                      "binds": [f"{proc}:{port}" for proc, port in dict.fromkeys(binds)]},
-        ))
-    else:
+    if not running:
         findings.append(Failure(
             FailureKind.WEB_NOT_STARTED,
             "no known web server process ever started in the guest",
+        ))
+        return findings
+
+    binds = _read_binds(serial_log)
+    ports = {port for _, port in binds}
+    detail = ", ".join(f"{proc or '?'}:{port}" for proc, port in binds)
+    evidence = {"servers": running,
+                "binds": [f"{proc or '?'}:{port}" for proc, port in binds]}
+
+    if _FORWARDED_PORT in ports:
+        # The case the old wording could not state at all. The port is not the
+        # reason, so do not report it as the reason: what is left is the path.
+        findings.append(Failure(
+            FailureKind.WEB_UNREACHABLE,
+            f"a web server did start ({', '.join(running)}) and bound {detail}, "
+            f"which includes the :{_FORWARDED_PORT} the forward targets, so the "
+            f"port is not why :{_FORWARDED_PORT} never answered: the path to the "
+            f"guest is what is missing",
+            evidence=evidence,
+        ))
+    elif binds:
+        findings.append(Failure(
+            FailureKind.WEB_WRONG_PORT,
+            f"a web server did start ({', '.join(running)}) but bound {detail}, "
+            f"none of which is :{_FORWARDED_PORT}, and the forward only reaches "
+            f":{_FORWARDED_PORT}",
+            evidence=evidence,
+        ))
+    else:
+        # Nothing in the log names a port, so nothing in the log can say the port
+        # is wrong. Saying so anyway is how this used to blame a port it had never
+        # been told.
+        findings.append(Failure(
+            FailureKind.WEB_UNREACHABLE,
+            f"a web server did start ({', '.join(running)}) but the log names no "
+            f"port for it, so the :{_FORWARDED_PORT} bind cannot be confirmed or "
+            f"ruled out",
+            evidence=evidence,
         ))
 
     return findings
 
 
-def diagnose_boot_failure(serial_log: str, *, reboots: int = 0) -> BootDiagnosis:
+def diagnose_boot_failure(serial_log: str, *, reboots: int = 0,
+                          web_reachable: bool | None = None) -> BootDiagnosis:
     """Name the most likely reason a guest never served :80, from its serial log.
 
     "HTTP 000" is a symptom; the operator is left to grep six thousand lines of
@@ -243,8 +422,11 @@ def diagnose_boot_failure(serial_log: str, *, reboots: int = 0) -> BootDiagnosis
     The return value is the same sentence callers have always received; the
     ``.findings`` behind it are the machine-readable half, produced by the same
     pass so the two cannot drift apart.
+
+    ``web_reachable`` carries what the caller already measured; see
+    ``_boot_findings`` for why a log-only call cannot guess it.
     """
-    findings = _boot_findings(serial_log, reboots=reboots)
+    findings = _boot_findings(serial_log, reboots=reboots, web_reachable=web_reachable)
     prose = "emulation failed: " + "; ".join(f.detail for f in findings) + "."
     return BootDiagnosis(prose, tuple(findings))
 
@@ -267,7 +449,8 @@ def _count_guest_reboots(container_name: str, iid: int) -> int:
         return 0
 
 
-def _failure_diagnosis(container_name: str, iid: int, *, reboots: int = 0) -> BootDiagnosis:
+def _failure_diagnosis(container_name: str, iid: int, *, reboots: int = 0,
+                         web_reachable: bool | None = None) -> BootDiagnosis:
     """Pull the guest serial log out of the container and diagnose from it."""
     res = subprocess.run(
         ["docker", "exec", container_name, "cat", f"/work/scratch/{iid}/qemu.serial.log"],
@@ -282,7 +465,8 @@ def _failure_diagnosis(container_name: str, iid: int, *, reboots: int = 0) -> Bo
                      f"guest serial log unavailable ({reason}); guest reboots: {reboots}",
                      evidence={"reboots": reboots, "stderr": reason}),),
         )
-    return diagnose_boot_failure(res.stdout, reboots=reboots)
+    return diagnose_boot_failure(res.stdout, reboots=reboots,
+                                   web_reachable=web_reachable)
 
 
 def preflight_arch(rootfs_dir: Path, arch: str) -> Failure | None:
@@ -571,6 +755,39 @@ def _drop_other_baked_tags(keep: str) -> None:
             _run(["docker", "rmi", "-f", name], timeout=120)
 
 
+def _build_failure_detail(make_result: subprocess.CompletedProcess) -> str:
+    """What make_image.sh said, from whichever stream it said it on.
+
+    Truncated from the *end* of each stream: the tools inside write progress first
+    and the reason last, and a prefix of a 500-character budget is what left the
+    original "Image build failed:" empty on iid 7672.
+    """
+    parts = [text.strip() for text in (make_result.stdout, make_result.stderr) if text.strip()]
+    return " | ".join(parts)[-800:] or f"exit {make_result.returncode} with no output"
+
+
+def _reject_empty_artifact(path: Path, *, what: str, stage: str) -> Path:
+    """Fail here if a produced artifact is missing or empty, or return it unchanged.
+
+    A ``docker cp`` that succeeds has only proved that a file was copied, and the
+    copy is of whatever the container had -- which is nothing when the container's
+    own step failed quietly. What that cost: a 1G ext4 image was built and mke2fs'd
+    from an empty tarball before ``tar: Cannot open`` said so, on iid 6000. The
+    honest place for that complaint is before the expensive step, not inside it.
+
+    ``stage`` names where the artifact should have come from, because "empty" and
+    "the producer never wrote it" are the same bytes and the report has to pick one
+    as the likely cause.
+    """
+    if safe_present(path) and safe_stat_size(path) > 0:
+        return path
+    raise RuntimeError(
+        f"{what} is missing or empty at {path} (found "
+        f"{safe_stat_size(path)} bytes after {stage}); the step that produces it did "
+        f"not leave a usable artifact"
+    )
+
+
 def _create_tarball(rootfs_dir: Path, tarball_path: Path) -> Path:
     tarball_path.parent.mkdir(parents=True, exist_ok=True)
     env = _env()
@@ -595,7 +812,8 @@ def _create_tarball(rootfs_dir: Path, tarball_path: Path) -> Path:
     subprocess.run(["docker", "rm", "-f", container_id], env=env, capture_output=True, check=False)
     if cp_result.returncode != 0:
         raise RuntimeError(f"docker cp failed: {cp_result.stderr}")
-    return tarball_path
+    return _reject_empty_artifact(tarball_path, what="rootfs tarball",
+                                  stage="tar czf inside the container")
 
 
 def _docker_produce(volumes: list[tuple[str, str]], image: str, script: str,
@@ -626,7 +844,8 @@ def _docker_produce(volumes: list[tuple[str, str]], image: str, script: str,
     subprocess.run(["docker", "rm", "-f", container_id], env=env, capture_output=True, check=False)
     if cp_result.returncode != 0:
         raise RuntimeError(f"docker cp failed: {cp_result.stderr}")
-    return host_out
+    return _reject_empty_artifact(host_out, what="artifact",
+                                  stage=f"the container script writing {container_out}")
 
 
 def _compose_rootfs_from_slices(
@@ -741,6 +960,12 @@ def _tarball_is_stale(rootfs_dir: Path, tarball_path: Path) -> bool:
     """
     if not safe_present(tarball_path) or not safe_present(rootfs_dir):
         return True
+    if safe_stat_size(tarball_path) == 0:
+        # Occupies its name and is newer than everything it was built from, so the
+        # mtime comparison below would happily reuse it. An empty pack is not a
+        # stale pack -- it is the debris of a producer that failed, and reusing it
+        # reproduces the original failure as a mysterious later one.
+        return True
     pack_mtime = _mtime_or_zero(tarball_path)
     if pack_mtime == 0.0:
         # Occupies its name but cannot be stat'ed: its age is unknowable, and a
@@ -755,7 +980,7 @@ def emulate_firmware(
     iid: int,
     scratch_dir: Path,
     host_port: int = 8080,
-    timeout_sec: int = 120,
+    timeout_sec: int = DEFAULT_BOOT_TIMEOUT_SEC,
     docker_image: str = "",
     parts_slices_dir: Path | None = None,
     partition_mounts: list[tuple[str, str]] | None = None,
@@ -800,7 +1025,7 @@ def _emulate_firmware(
     iid: int,
     scratch_dir: Path,
     host_port: int = 8080,
-    timeout_sec: int = 120,
+    timeout_sec: int = DEFAULT_BOOT_TIMEOUT_SEC,
     docker_image: str = "",
     parts_slices_dir: Path | None = None,
     partition_mounts: list[tuple[str, str]] | None = None,
@@ -898,13 +1123,22 @@ def _emulate_firmware(
         timeout=180,
     )
     if make_result.returncode != 0:
+        # Both streams, because the tools in make_image.sh write to either: tar and
+        # cp report on stdout, mkfs and e2fsck on stderr. Taking only the tail of
+        # one of them produced an error message with nothing in it whenever the
+        # other stream held the actual message.
+        detail = _build_failure_detail(make_result)
         result.fail(Failure(FailureKind.IMAGE_BUILD_FAILED,
-                            f"make_image.sh failed: {make_result.stderr[-500:]}"),
-                    f"Image build failed: {make_result.stderr[-500:]}")
+                            f"make_image.sh failed: {detail}"),
+                    f"Image build failed: {detail}")
         result.duration_sec = time.time() - start_time
         _run(["docker", "rm", "-f", container_name])
         return result
-    logger.debug(f"image build output: {make_result.stdout[-200:]}")
+    # make_image.sh writes its progress to stderr and exactly one line to stdout --
+    # where the image went -- so that line is the build's answer rather than the
+    # tail of a transcript. Logged at info because it is the one thing worth having
+    # in the run log when an image is rebuilt.
+    logger.info(f"image build: {make_result.stdout.strip() or 'no output'}")
 
     logger.info(f"Starting QEMU (port {host_port} -> guest:80, serial on :{serial_port})...")
     # IRIS_SERIAL_PORT goes in through the environment rather than a fourth
@@ -937,7 +1171,14 @@ def _emulate_firmware(
     # detected one is a measurement, and they disagree exactly when there is a
     # network bug to explain.
     result.guest_ip = guest_ip
-    socat_updated = False
+    # The guest address the socat forward is actually pointing at, or None while
+    # no forward exists. Tracking the target rather than a bare "have I updated
+    # it" flag is what lets the forward be built for a guest whose real address
+    # *equals* the default assumption: that guest is the common case (every
+    # firmware the netfix fallback hands 192.168.1.1), and under a
+    # "the address changed" gate it never got a forward at all, so every curl
+    # against the host port answered 000 until the timeout expired.
+    forwarded_to: str | None = None
     placed_subnets: set[str] = set()
     progress = StatusLine()
     while time.time() < boot_deadline:
@@ -950,12 +1191,13 @@ def _emulate_firmware(
             # not slow to boot, it is looping, and every further second of waiting
             # produces the same verdict with less information attached.
             progress.clear()
-            diagnosis = _failure_diagnosis(container_name, iid, reboots=reboots)
+            diagnosis = _failure_diagnosis(container_name, iid, reboots=reboots,
+                                            web_reachable=False)
             result.fail_from_diagnosis(diagnosis)
             logger.error(result.error)
             break
 
-        if not socat_updated:
+        if not forwarded_to:
             log_cmd = ["docker", "exec", container_name, "grep", "-a", "inet_insert_ifa",
                        f"/work/scratch/{iid}/qemu.serial.log"]
             log_res = subprocess.run(log_cmd, capture_output=True, text=True, env=_env(), timeout=10, check=False)
@@ -979,23 +1221,22 @@ def _emulate_firmware(
                 if target and not target.startswith("127.") and target not in placed_subnets:
                     _place_host_on_guest_subnet(container_name, iid, target)
                     placed_subnets.add(target)
-            if detected and detected != guest_ip and not detected.startswith("127."):
-                guest_ip = detected
-                result.guest_ip = detected
+            if (target := _forward_target(detected, forwarded_to)) is not None:
+                forwarded_to = target
                 progress.clear()
+                if target != guest_ip:
+                    # Only now does the default stop being an assumption.
+                    guest_ip = target
+                    result.guest_ip = target
+                    logger.info(f"Detected guest IP: {guest_ip}")
                 # Before the forward, not after: the forward is only useful once the
                 # guest will answer packets from this host, and a router whose LAN is
                 # not the assumed subnet will not.
-                logger.info(f"Detected guest IP: {guest_ip}, forwarding :{host_port}...")
-                # Recorded inside this branch on purpose. `guest_ip` starts out as the
-                # 192.168.1.1 assumption, so writing it unconditionally would pin the
-                # assumption as a measurement and leave a relaunch with exactly the
-                # address it already had by default.
-                _record_guest_ip(container_name, iid, guest_ip)
+                logger.info(f"Forwarding :{host_port} to guest {forwarded_to}:80...")
+                _record_guest_ip(container_name, iid, forwarded_to)
                 _run(["docker", "exec", container_name, "pkill", "-f", "socat.*TCP"], timeout=5)
                 _run(["docker", "exec", "-d", container_name, "socat",
-                      f"TCP-LISTEN:{host_port},reuseaddr,fork", f"TCP:{guest_ip}:80"], timeout=5)
-                socat_updated = True
+                      f"TCP-LISTEN:{host_port},reuseaddr,fork", f"TCP:{forwarded_to}:80"], timeout=5)
 
         check_result = subprocess.run(
             ["docker", "exec", container_name, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
@@ -1016,7 +1257,7 @@ def _emulate_firmware(
         progress.clear()
         logger.warning(f"guest web still unreachable on :{host_port} after {timeout_sec}s")
         if not result.error:
-            diagnosis = _failure_diagnosis(container_name, iid)
+            diagnosis = _failure_diagnosis(container_name, iid, web_reachable=False)
             # A log cannot say where a packet stopped. Before falling back to the
             # log-only verdict, ask the link: the layered table distinguishes a
             # guest that never came up from one that is up and dropping our
@@ -1041,11 +1282,36 @@ def _emulate_firmware(
     if log_result.returncode == 0:
         serial_path = work_dir / "qemu.serial.log"
         if serial_path.exists():
-            result.serial_log = serial_path.read_text(errors="replace")[-2000:]
+            serial_text = serial_path.read_text(errors="replace")
+            result.serial_log = serial_text[-2000:]
+            if result.success:
+                _record_surviving_signals(result, serial_text)
 
     result.duration_sec = time.time() - start_time
 
     return result
+
+
+def _record_surviving_signals(result: EmulationResult, serial_text: str) -> None:
+    """Note what the guest survived, on a run that succeeded.
+
+    A successful verdict means the web plane answered; it does not mean the guest
+    was healthy. iid 6715 served its page and had already taken an Oops in netifd,
+    and the record then said "success: True" with the backtrace sitting in the
+    serial log underneath it -- so anyone trusting the verdict had no way to know
+    the guest they were looking at had a dead network daemon in it.
+
+    Only signals that are *not* failures are recorded: on a run that answered,
+    every other finding would be a probe misreading a working guest, and promoting
+    those to the verdict would be the same mistake in the other direction.
+    """
+    signals = [f for f in diagnose_boot_failure(serial_text, web_reachable=True).findings
+               if not f.is_failure]
+    if not signals:
+        return
+    result.findings = tuple(signals)
+    for signal in signals:
+        logger.warning(f"guest survived: {signal.detail}")
 
 
 def _record_outcome(

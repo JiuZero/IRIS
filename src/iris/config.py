@@ -3,6 +3,23 @@ from pathlib import Path
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+#: How long a guest gets to answer on its web port before the run is called failed,
+#: in seconds. One number for the API, the CLI and the workbench, because three
+#: hand-kept literals had already drifted apart (120 in the API and the CLI, 200 in
+#: the workbench) and neither pair of users could tell the difference.
+#:
+#: The floor used to be 120, which is below what the slow firmwares actually take:
+#: measured successful boots on this corpus are 52s (DIR-868L, armel), 130s (RP3),
+#: 179s (G1) and 257s / 334s / 420s (TES7002, arm64). A default under the slowest
+#: observed success is not patience, it is a wrong answer delivered on a timer: the
+#: guest would have come up, and IRIS reported that it did not. 600 leaves roughly
+#: 43% over the slowest success measured here, so an ordinary slow boot no longer
+#: has to be re-run by hand with a bigger number.
+#:
+#: This is a *default*, not a ceiling: every entry point still accepts an explicit
+#: timeout, and the API keeps its own upper bound.
+DEFAULT_BOOT_TIMEOUT_SEC = 600
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="IRIS_", env_file=".env", extra="ignore")
@@ -31,6 +48,19 @@ class Settings(BaseSettings):
         return self
 
     log_level: str = "INFO"
+
+    #: Also write the log to ``<iris_home>/logs/iris.log``. Off by default: a
+    #: command that writes a file nobody asked for is a surprise that eventually
+    #: fills a disk, and the terminal is what someone launching a command expects.
+    #: ``iris web`` is the case that wants it -- a long-running service whose only
+    #: record was the terminal it was started in -- so it is a setting rather than a
+    #: special case, and it rotates so "leave it running" is survivable.
+    log_to_file: bool = False
+
+    @property
+    def log_file(self) -> Path:
+        """Where ``log_to_file`` writes. Derived, so it follows ``iris_home``."""
+        return self.iris_home / "logs" / "iris.log"
 
     download_mirror: str = "https://gh-proxy.com/"
 

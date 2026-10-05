@@ -35,6 +35,8 @@ import sys
 import traceback
 from collections.abc import Sequence
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import TextIO
 
 import structlog
@@ -149,11 +151,21 @@ class PlainRenderer:
     level tag appeared as ``[info     ]``. Exceptions are kept as a trailing
     traceback rather than being folded into the message, because a boot log is
     read by scrolling, not by parsing.
+
+    ``sink`` receives a second copy of every rendered line. structlog writes through
+    its own logger factory straight to stdout, bypassing the stdlib handlers a
+    ``FileHandler`` is attached to -- so without this a log file would hold uvicorn's
+    traffic and none of IRIS's own reasoning, which is the half worth keeping.
+    Writing the copy here rather than re-routing structlog through ``logging`` is
+    what keeps the output shape identical to the console's: re-routing would put
+    ``record.getMessage()`` in charge of the line and drop every extra field.
     """
 
-    def __init__(self, stream: TextIO | None = None, color: bool | None = None) -> None:
+    def __init__(self, stream: TextIO | None = None, color: bool | None = None,
+                 sink: TextIO | None = None) -> None:
         self._stream = stream
         self._color = color
+        self._sink = sink
 
     def __call__(self, _logger, _name, event_dict) -> str:
         color = use_color(self._stream or sys.stdout) if self._color is None else self._color
@@ -163,8 +175,18 @@ class PlainRenderer:
         # StackInfoRenderer() records a rendered traceback under this key; it is
         # already text, so it is appended rather than re-formatted.
         stack = event_dict.pop("stack_info", None)
-        line = format_line(tag, _join(event, event_dict), color)
+        message = _join(event, event_dict)
         traceback_text = stack or self._format_exc(exc_info)
+        if self._sink is not None:
+            # Rendered twice on purpose: the file copy has to be free of escape
+            # sequences whatever the console decides, and there is no way to strip
+            # them afterwards without also stripping the text a firmware happens
+            # to have printed in them.
+            filed = format_line(tag, message, False)
+            if traceback_text:
+                filed = f"{filed}\n{traceback_text.rstrip()}"
+            print(filed, file=self._sink, flush=True)
+        line = format_line(tag, message, color)
         if traceback_text:
             line = f"{line}\n{traceback_text.rstrip()}"
         return line
@@ -285,7 +307,60 @@ class StreamLogger:
         print(line, file=stream, flush=True)
 
 
-def setup_logging(level: str = "INFO") -> None:
+#: How much one log file may grow before it is rotated, and how many of the previous
+#: ones are kept. A web service left running for a week would otherwise fill the disk
+#: under ``iris_home``, and a tool that stops logging is worse than one that grows.
+_LOG_MAX_BYTES = 5 * 1024 * 1024
+_LOG_BACKUPS = 3
+
+
+def uvicorn_log_config() -> dict:
+    """A ``dictConfig`` that makes uvicorn log in IRIS's shape, not its own.
+
+    uvicorn ships ``INFO:     127.0.0.1:52344 - "GET / HTTP/1.1" 200 OK`` while
+    everything IRIS emits is ``2026-10-02T02:11:00 [info] message``, and its access
+    log arrives with no timestamp at all. For a service whose runs take two minutes
+    and whose whole value is being able to read afterwards which step came first,
+    that is a log that cannot answer the only question asked of it.
+
+    Passed as ``log_config`` so uvicorn does not overwrite the root handlers IRIS
+    installed. Its own ``LOGGING_CONFIG`` leaves ``disable_existing_loggers`` at
+    False and never mentions ``root``, which is what makes this safe: the dict here
+    is an addition, not a replacement.
+    """
+    return {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {"iris": {"()": PlainFormatter}},
+        "handlers": {
+            "console": {
+                "class": "logging.StreamHandler",
+                "formatter": "iris",
+                "stream": "ext://sys.stdout",
+            },
+        },
+        "loggers": {
+            "uvicorn": {"handlers": ["console"], "level": "INFO", "propagate": False},
+            "uvicorn.error": {"handlers": ["console"], "level": "INFO", "propagate": False},
+            "uvicorn.access": {"handlers": ["console"], "level": "INFO", "propagate": False},
+        },
+    }
+
+
+def setup_logging(level: str = "INFO", log_file: Path | None = None) -> None:
+    """Route every channel in the process through one shape, optionally to a file.
+
+    ``log_file`` is opt-in and defaults to nothing: the terminal is what a person
+    launching a command expects to see, and writing a file nobody asked for is the
+    kind of surprise that ends up filling a disk. What was missing before is not the
+    capability but the discoverability -- ``iris web`` was the one long-running
+    command whose output existed only in the terminal it was started from, and its
+    own access log is the record you want after a failed launch.
+
+    A file that cannot be opened does not stop the tool: a missing ``iris_home``
+    must not be the reason a firmware does not get emulated, so the failure is
+    reported on stderr and the console handler stays in place.
+    """
     # force=True because the CLI may be re-entered in one process (tests, the
     # debug entry point); basicConfig is a no-op the second time otherwise and
     # the level would silently stay at whatever the first run chose.
@@ -295,20 +370,55 @@ def setup_logging(level: str = "INFO") -> None:
         level=level,
         force=True,
     )
-    logging.getLogger().handlers[0].setFormatter(PlainFormatter(stream=sys.stdout))
+    root = logging.getLogger()
+    root.handlers[0].setFormatter(PlainFormatter(stream=sys.stdout))
 
+    handler = (_file_handler(Path(log_file), level=level)
+               if log_file is not None else None)
+    if handler is not None:
+        root.addHandler(handler)
+
+    # Two sinks, not one: the stdlib records go through the root handlers above,
+    # structlog's go through the renderer, and a file that only received half of
+    # the lines would be worse than none because it would look complete.
+    # cache_logger_on_first_use is off whenever a file is attached, because a cached
+    # logger keeps the renderer it was built with -- including the old file.
     structlog.configure(
-        processors=[
-            structlog.contextvars.merge_contextvars,
-            structlog.processors.add_log_level,
-            structlog.processors.StackInfoRenderer(),
-            PlainRenderer(stream=sys.stdout),
-        ],
+        processors=_structlog_processors(stream=sys.stdout,
+                                         sink=handler.stream if handler else None),
         wrapper_class=structlog.make_filtering_bound_logger(
             getattr(logging, level.upper(), logging.INFO)
         ),
-        cache_logger_on_first_use=True,
+        cache_logger_on_first_use=handler is None,
     )
+
+
+def _structlog_processors(stream: TextIO, sink: TextIO | None = None) -> list:
+    return [
+        structlog.contextvars.merge_contextvars,
+        structlog.processors.add_log_level,
+        structlog.processors.StackInfoRenderer(),
+        PlainRenderer(stream=stream, sink=sink),
+    ]
+
+
+def _file_handler(log_file: Path, *, level: str) -> logging.Handler | None:
+    """A rotating file handler, or None when the file cannot be opened.
+
+    Never color: a log file read with ``less -R`` or grepped for a marker has to be
+    free of escape sequences, and ``use_color`` would say yes for a plain file only
+    by accident.
+    """
+    try:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(log_file, maxBytes=_LOG_MAX_BYTES,
+                                      backupCount=_LOG_BACKUPS, encoding="utf-8")
+    except OSError as err:
+        print(f"cannot write the log file {log_file}: {err}", file=sys.stderr)
+        return None
+    handler.setFormatter(PlainFormatter(color=False))
+    handler.setLevel(getattr(logging, level.upper(), logging.INFO))
+    return handler
 
 
 def get_logger(name: str):

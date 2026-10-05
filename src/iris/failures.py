@@ -86,6 +86,21 @@ class FailureKind(StrEnum):
     BOOT_HOOKS_MISSING = "boot-hooks-missing"
     SERIAL_LOG_UNAVAILABLE = "serial-log-unavailable"
 
+    # -- kernel: the guest kernel itself stopped --------------------------------
+    #: A panic the kernel could not continue past, so nothing in the guest ever
+    #: came up. Kept apart from REBOOT_LOOP (a guest can panic and stop rather
+    #: than ask for a reboot) and from GUEST_KERNEL_OOPS (which the guest can
+    #: live through), because "no init" and "one process died" call for different
+    #: work and neither is a network problem.
+    GUEST_KERNEL_PANIC = "guest-kernel-panic"
+    #: The kernel took an exception, dumped registers and kept running. This is
+    #: not a failure and is never counted as one: a guest whose netifd died still
+    #: serves its web plane, and calling that a failed run would put a working
+    #: signal into the failure histogram. It is recorded because it is the reason
+    #: the web plane was flaky, and a verdict that says only "web reachable" hides
+    #: it from whoever has to trust that verdict.
+    GUEST_KERNEL_OOPS = "guest-kernel-oops"
+
     # -- nvram: the flash-backed config could not be read at all ----------------
     #: Deliberately separate from REBOOT_LOOP. "The guest rebooted 28 times" and
     #: "the guest rebooted because its nvram partition reads as destroyed" call
@@ -141,6 +156,8 @@ _KIND_STAGE: dict[FailureKind, Stage] = {
     FailureKind.REBOOT_LOOP: Stage.BOOT,
     FailureKind.BOOT_HOOKS_MISSING: Stage.BOOT,
     FailureKind.SERIAL_LOG_UNAVAILABLE: Stage.BOOT,
+    FailureKind.GUEST_KERNEL_PANIC: Stage.BOOT,
+    FailureKind.GUEST_KERNEL_OOPS: Stage.BOOT,
     FailureKind.NVRAM_UNREADABLE: Stage.NVRAM,
     FailureKind.NO_GUEST_IP: Stage.NETWORK,
     FailureKind.NO_NETWORK_DRIVER: Stage.NETWORK,
@@ -157,7 +174,10 @@ _KIND_STAGE: dict[FailureKind, Stage] = {
 #: Kinds that describe the guest working. Present in the diagnosis because the
 #: prose has always reported them -- "the fallback ran" is evidence that the boot
 #: hooks fired -- but excluded from every failure count.
-INFORMATIONAL_KINDS = frozenset({FailureKind.NETWORK_FALLBACK_OK})
+INFORMATIONAL_KINDS = frozenset({
+    FailureKind.NETWORK_FALLBACK_OK,
+    FailureKind.GUEST_KERNEL_OOPS,
+})
 
 _KIND_HINT: dict[FailureKind, str] = {
     FailureKind.NO_ROOTFS: "inspect the image header; no supported container was found",
@@ -177,6 +197,8 @@ _KIND_HINT: dict[FailureKind, str] = {
     FailureKind.REBOOT_LOOP: "the guest asks for a reboot before reaching userspace; see the serial log",
     FailureKind.BOOT_HOOKS_MISSING: "no inittab/rcS hook was found where the image build looked",
     FailureKind.SERIAL_LOG_UNAVAILABLE: "the container is gone, so the evidence is lost",
+    FailureKind.GUEST_KERNEL_PANIC: "the guest kernel stopped; the log's panic line names what it could not do",
+    FailureKind.GUEST_KERNEL_OOPS: "one guest process died inside the kernel; the web plane still answered, but the reason it was unreliable is here",
     FailureKind.NVRAM_UNREADABLE: "the guest could not read its flash-backed config; "
                                    "the nvram/flash device is not being emulated",
     FailureKind.NO_GUEST_IP: "nothing assigned an address in the guest; check the netfix injection",

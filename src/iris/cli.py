@@ -9,11 +9,17 @@ from pathlib import Path
 import typer
 
 from iris.arch import census_to_runnable, normalize_arch
-from iris.config import get_settings
+from iris.config import DEFAULT_BOOT_TIMEOUT_SEC, get_settings
 from iris.db.engine import get_engine, init_db, make_session
 from iris.failures import Failure, FailureKind
 from iris.fsutil import safe_is_file, safe_present, safe_stat_size
-from iris.log import LEVEL_COLORS, get_error_logger, get_stream_logger, setup_logging
+from iris.log import (
+    LEVEL_COLORS,
+    get_error_logger,
+    get_stream_logger,
+    setup_logging,
+    uvicorn_log_config,
+)
 
 app = typer.Typer(help="IRIS - IoT Rehosting & Interconnection Simulator", no_args_is_help=True)
 db_app = typer.Typer(help="metadata database operations")
@@ -598,7 +604,10 @@ def rules_apply(
 
 def main() -> None:
     settings = get_settings()
-    setup_logging(settings.log_level)
+    # Opt-in, because a command writing a file nobody asked for is its own kind of
+    # surprise; the path follows iris_home so a throwaway home is a throwaway log.
+    setup_logging(settings.log_level,
+                  settings.log_file if settings.log_to_file else None)
     app()
 
 
@@ -614,7 +623,7 @@ def emulate_run(
     ),
     iid: int = typer.Option(0, help="image ID for scratch directory naming"),
     port: int = typer.Option(8080, help="host port for web access (use 0 to pick a free one)"),
-    timeout: int = typer.Option(120, help="boot timeout in seconds"),
+    timeout: int = typer.Option(DEFAULT_BOOT_TIMEOUT_SEC, help="boot timeout in seconds"),
     force: bool = typer.Option(False, "--force", help="skip the rootfs ELF arch preflight"),
     apply_rules: bool = typer.Option(True, "--apply-rules/--no-apply-rules", help="apply L3 boot-fix rules during emulation build"),
     parts_dir: Path = typer.Option(
@@ -1069,7 +1078,11 @@ def serve_start(
     bind_note = " (token required)" if token else " (local mode: no token)"
     out.info(f"IRIS API server starting on {host}:{port}{bind_note}")
     out.info(f"docs: http://{host}:{port}/docs")
-    uvicorn.run("iris.api.server:app", host=host, port=port, reload=reload)
+    # log_config, not nothing: uvicorn's own access log carries no timestamp and
+    # does not match the shape of every other line in the process, so the record of
+    # a long-running service could not be read against the rest of what happened.
+    uvicorn.run("iris.api.server:app", host=host, port=port, reload=reload,
+                log_config=uvicorn_log_config())
 
 
 @app.command("web")
@@ -1139,11 +1152,13 @@ def web_workbench(
     if reload:
         # uvicorn refuses to reload an application object (it re-executes an import
         # string in a child process), so the reload path goes through the factory.
-        uvicorn.run(_WEB_APP_TARGET, host=host, port=port, reload=True)
+        uvicorn.run(_WEB_APP_TARGET, host=host, port=port, reload=True,
+                    log_config=uvicorn_log_config())
     else:
         # The object, not the import string: ``install`` has already mutated it, and
         # a string would hand uvicorn the un-installed app and a 404 for every page.
-        uvicorn.run(api_app, host=host, port=port)
+        uvicorn.run(api_app, host=host, port=port,
+                    log_config=uvicorn_log_config())
 
 
 #: Import-string target for ``iris web --reload``. Resolved by path, so it has to
