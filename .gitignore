@@ -17,9 +17,6 @@ web/.vite/
 # 异常退出会残留；文件名含时间戳，属于噪声，不入库）
 web/vite.config.ts.timestamp-*.mjs
 
-# 外部设计参考（Wails 应用，含 node_modules 与 dist，只读不入库）
-前端设计参考/
-
 # 仿真产物（体积大，禁止入库）
 images/
 scratch/
@@ -62,3 +59,4 @@ Thumbs.db
 # 智能体技能安装目录（由 `npx skills add ...` 写入，含第三方脚本，同 .codeartsdoer/ 理由不入库）
 .agents/
 .claude/
+.workbuddy/

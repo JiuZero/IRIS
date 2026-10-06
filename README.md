@@ -122,7 +122,7 @@ IRIS 不去承诺一个更高的成功率，它承诺**每一次失败都能被�
 
 > 其他机器可读的细节（如 `guest_has_ipv4()` 对 busybox ≥1.20 的 `inet` 输出误判、
 > `inspect` 与 `emulate` 的架构判定不一致）见
-> [`docs/08-与FirmAE对比.md`](docs/08-与FirmAE对比.md) §9「本轮新发现：**未修**的代码缺陷」——
+> [`docs/08-与FirmAE对比.md`](docs/08-与FirmAE对比.md)
 > 那些缺陷是**已知、已定位、如实记录**的，不做美化。
 
 ## 快速开始
@@ -441,9 +441,3 @@ IRIS/
 ## 里程碑（详见 docs/01-开发规划.md）
 
 M0 技术验证 → M1 MVP 主干 → M2 规模化 → M3 交互与分析 → M4 智能环境恢复 → M5 产品化
-
-## 协作规范（强制）
-
-1. **每个任务推进必须建立本地 Git commit 节点**，以便随时回滚；遵循 Conventional Commits（`feat:` / `fix:` / `docs:` / `chore:` / `refactor:` / `test:`）；
-2. 阶段性成果用 tag 标注里程碑（如 `m1-mvp`）；
-3. 大型改动拆分为多个可独立回滚的 commit，禁止一次性巨型提交。
