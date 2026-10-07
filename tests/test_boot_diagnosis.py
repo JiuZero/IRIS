@@ -334,6 +334,38 @@ class TestGuestKernelCrashIsNotAnInvisibleVerdict:
         kinds = {f.kind for f in diagnose_boot_failure(log).findings}
         assert FailureKind.GUEST_KERNEL_PANIC in kinds
 
+    def test_the_9591_panic_names_where_to_look(self):
+        """"No working init found" stops the guest exactly as dead as a hardware
+        panic, but the work it calls for is different: the rootfs mount and the
+        injected init, not a driver. The wording must say which."""
+        out = diagnose_boot_failure(_NO_INIT_PANIC)
+        assert "found no init to run" in out
+        assert "the rootfs mount, root= and the injected init are where to look" in out
+
+    def test_a_rootfs_volume_panic_points_at_the_block_device(self):
+        """The opposite work: the kernel never attached the volume, so the reader
+        goes after root='s block device and its driver, not after an init."""
+        line = '[    1.034926] Kernel panic - not syncing: VFS: Cannot open root device "hda"'
+        out = diagnose_boot_failure(line)
+        assert "never attaching the rootfs volume" in out
+        assert "the block device behind root= and its driver are where to look" in out
+
+    def test_an_unclassified_panic_invents_no_cause(self):
+        """A panic that matches none of the real lines keeps the generic wording:
+        inventing a cause is how a wrong hint gets recorded with the same
+        confidence as a measured one."""
+        finding = _kernel_crash_findings(
+            "[    1.0] Kernel panic - not syncing: Attempted to kill init!"
+        )[0]
+        assert "Attempted to kill init" in finding.message
+        assert "where to look" not in finding.message
+        assert finding.evidence["panic_class"] == "unclassified"
+
+    def test_the_panic_class_lands_in_the_evidence(self):
+        finding = _kernel_crash_findings(_NO_INIT_PANIC)[0]
+        assert finding.evidence["panic_class"] == "init-lookup"
+        assert finding.evidence["log_line"].startswith("[")
+
 
 class TestForwardTarget:
     """Whether a guest with no forward can ever answer, decided in one place.

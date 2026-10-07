@@ -154,3 +154,77 @@ def test_the_unsupported_branch_exists():
     pins the failure path that makes an unknown arch an error rather than a
     silently default device model."""
     assert '"Error: Unsupported architecture' in TEXT
+
+class TestKernelAssetsExistOnDisk:
+    """The table names kernel assets; the file has to be there too.
+
+    QEMU refuses a missing ``-kernel`` immediately, and ``QEMU_START_FAILED``'
+s
+    hint already points at the kernel asset -- so the runtime half of this is
+    loud. The gap this covers is the commit-time one: adding an architecture
+    means a table row, a ``case`` branch and a file under ``binaries/``, and the
+    file is the one of the three with no guard -- a row naming ``zImage.armel``
+    while the file was never added (or is spelled differently, or is a zero-byte
+    placeholder) boots nothing and only the in-container QEMU message would say
+    why.
+    """
+
+    BINARIES = Path(__file__).resolve().parents[1] / "binaries"
+
+    def test_the_binaries_directory_itself_is_present(self):
+        assert self.BINARIES.is_dir(), (
+            f"{self.BINARIES} is missing; every kernel asset lives under it and "
+            "the checks below are meaningless without it"
+        )
+
+    @pytest.mark.parametrize("arch", sorted(all_configs()))
+    def test_every_named_kernel_file_is_a_real_nonempty_file(self, arch):
+        cfg = all_configs()[arch]
+        kernel = self.BINARIES / cfg.kernel_file
+        assert kernel.is_file(), (
+            f"{arch}: qemu_config names kernel {cfg.kernel_file!r} but "
+            f"{self.BINARIES} has no such file; the guest for this arch boots nothing"
+        )
+        assert kernel.stat().st_size > 0, (
+            f"{arch}: {cfg.kernel_file} is a zero-byte placeholder; QEMU would "
+            "refuse it at boot with an error that does not name the table row"
+        )
+
+    @pytest.mark.parametrize("arch", sorted(all_configs()))
+    def test_every_named_initramfs_is_a_real_nonempty_file(self, arch):
+        cfg = all_configs()[arch]
+        if not cfg.initramfs:
+            pytest.skip(f"{arch} declares no initramfs")
+        initrd = self.BINARIES / cfg.initramfs
+        assert initrd.is_file() and initrd.stat().st_size > 0, (
+            f"{arch}: qemu_config names initramfs {cfg.initramfs!r} but it is "
+            "missing or empty under binaries/; the arm64 guest boots without the "
+            "tools its init expects"
+        )
+
+    def test_no_asset_name_drifts_between_the_table_and_the_directory(self):
+        """One side of this is the table, the other the directory; the diff names
+        exactly which file needs adding or which row needs renaming."""
+        table_names = {f"{cfg.kernel_file}" for cfg in all_configs().values()}
+        table_names |= {cfg.initramfs for cfg in all_configs().values() if cfg.initramfs}
+        on_disk = {p.name for p in self.BINARIES.iterdir() if p.is_file()}
+        missing = table_names - on_disk
+        assert not missing, (
+            f"named by qemu_config but absent from binaries/: {sorted(missing)}"
+        )
+
+def test_the_deploy_doc_lists_every_kernel_asset_the_table_names():
+    """The deploy doc's asset table is the fourth place an asset name lives
+    (table, script, directory, doc); a doc that misses one tells the reader a
+    kernel comes from nowhere, and a doc that lists one the table does not name
+    advertises an asset nothing consumes."""
+    doc = Path(__file__).resolve().parents[1] / "docs" / "04-快速部署.md"
+    text = doc.read_text(encoding="utf-8")
+    for cfg in all_configs().values():
+        assert cfg.kernel_file in text, (
+            f"{cfg.kernel_file} is named by qemu_config but absent from the deploy doc's asset table"
+        )
+        if cfg.initramfs:
+            assert cfg.initramfs in text, (
+                f"{cfg.initramfs} is named by qemu_config but absent from the deploy doc's asset table"
+            )

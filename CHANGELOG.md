@@ -4,6 +4,46 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.26] - 2026-10-07
+
+「内核实现优化」评估的可落地部分：落点核实推翻了「选型规则化进 YAML 规则引擎」的原预设（规则引擎是 guest 侧自愈语义，启动配置选型塞进去属语义错位，且 QemuConfig 表已是单一权威来源），实际落地为**内核资产完整性守卫 + panic 归因细化 + 变更纪律文档化**。改内核代码（B 路线）、厂商内核补丁（C）、QEMU fork（D）按评估结论不做。
+
+### 新增
+
+- **内核资产存在性守卫**（`tests/test_qemu_config_matches_script.py` 新增 `TestKernelAssetsExistOnDisk`，7 用例 + 3 skip）。
+  新增架构 = 表行 + `case` 分支 + `binaries/` 内核文件三件套，此前文件是三者中唯一无守卫的：
+  表里写了 `zImage.armel` 而文件没放（或写错名、或零字节占位）时，只有容器内 QEMU 的报错能说明原因。
+  守卫断言每个 `QemuConfig.kernel_file`/`initramfs` 在磁盘上真实存在且非零字节。
+  变异验证：表里把 `vmlinux.mipsel.4` 改成不存在的 `.5` → 3 处变红
+- **panic 归因细化**（`src/iris/emulate/orchestrator.py` 新增 `_PANIC_CLUES`/`_panic_clue`）。
+  `No working init found`（iid 9591 实测）与 `Unable to mount root fs`/`VFS: Cannot open root device`
+  都把 guest 停死，但调用的工作相反——前者是内核起来了找不到 init（查 rootfs 挂载与注入的 init），
+  后者是 rootfs 卷从未挂上（查 root= 背后的块设备与驱动）。finding 的 message 按panic 行文本
+  追加对应方向，evidence 新增 `panic_class`；两类真实标记之外保持泛化措辞，不虚构原因
+- **部署文档补「内核与资产变更纪律」**（`docs/04-快速部署.md` 3.1 节）。四条：新增架构三件套
+  （漏件守卫变红）、替换资产须刷新 sha256/重建 initramfs/重建 baked 镜像、交付前全语料回归
+  （单轮 150–420s 量级，默认 600s 已留余量）、不为单台固件改内核
+- **部署文档资产表与配置表的清单一致守卫**（`tests/test_qemu_config_matches_script.py`）：
+  文档 3.1 表漏列或误列任何 `qemu_config` 引用的内核资产即变红——资产名现在有四方镜像
+  （表、脚本、目录、文档），每两方之间都有对照
+
+### 修复
+
+- **`test_fresh_pack_is_reused` 声明了「no Docker required」却真需要 Docker**（`tests/test_tarball_cache.py`）。
+  该用例「Nothing downstream is mocked on purpose」走到 `docker build`，Docker daemon 未运行时
+  全量门禁红（本次实测暴露）。修法是把 bail 点放在 `_build_baked_image`（复用判定此时已做出），
+  并新增「unchanged tree 保持原 pack」断言；文件头「no Docker required」声明回归为真
+
+### 测试
+
+- 全量门禁：`1581 passed / 8 skipped`（较 0.3.25 净增 12 用例）、ruff 全绿、`tsc` 零错误
+- panic 细化与资产守卫均做变异验证（panic 分类禁用 → 3 变红；资产名漂移 → 3 变红），恢复全绿
+
+### 已知
+
+- 未在真实 Docker/QEMU 环境复跑仿真（daemon 未运行）；「为 mipseb/mipsel 补 modern 内核」
+  需下载/编译资产，本机网络不可达，未实施
+
 ## [未发布] - 2026-10-06（参赛交付轮）
 
 本轮不涉及功能代码，全部是参赛交付包所需的素材、品牌与文档改动。

@@ -153,6 +153,16 @@ class TestEmulateRebuildsStalePack:
             raise AssertionError("repacked an unchanged tree")
 
         monkeypatch.setattr(orchestrator, "_create_tarball", explode)
-        # Nothing downstream is mocked on purpose: repacking would raise here.
-        result = orchestrator.emulate_firmware(rootfs, "mipsel", 1, scratch, record=False)
-        assert "repacked an unchanged tree" not in (result.error or "")
+
+        def bail_at_image(_project_root=None):
+            raise RuntimeError("SENTINEL: reached the baked-image step")
+
+        monkeypatch.setattr(orchestrator, "_build_baked_image", bail_at_image)
+        # The reuse verdict has been made by the time the baked-image tag is
+        # computed, so bailing there keeps this file's "no Docker required"
+        # promise while still driving the real cache decision.
+        with pytest.raises(RuntimeError, match="SENTINEL: reached the baked-image step"):
+            orchestrator.emulate_firmware(rootfs, "mipsel", 1, scratch, record=False)
+        assert pack.read_bytes() == b"not really gzip", (
+            "an unchanged tree must keep serving its existing pack"
+        )

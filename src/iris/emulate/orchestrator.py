@@ -190,6 +190,34 @@ _KERNEL_OOPS = re.compile(r"Internal error: Oops")
 #: is stripped before a line is quoted inside a sentence.
 _KERNEL_PREFIX = re.compile(r"^\s*\[[^\]]*\]\s*")
 
+#: What to look at after a panic, keyed to the panic line's own text. "No working
+#: init found" (iid 9591, real log) and "Unable to mount root fs" both stop the
+#: guest dead but call for opposite work -- the first means the kernel booted and
+#: found no init (the rootfs mount and the injected init are where to look), the
+#: second means the rootfs volume was never attached (the block device behind
+#: root= is). A panic with neither marker keeps the generic wording: inventing a
+#: cause for an unknown panic is how a wrong hint gets recorded with the same
+#: confidence as a measured one.
+_PANIC_CLUES: tuple[tuple[str, str, str], ...] = (
+    ("No working init found", "init-lookup",
+     ("which reads as the kernel booted but found no init to run: the rootfs "
+      "mount, root= and the injected init are where to look")),
+    ("Unable to mount root fs", "rootfs-device",
+     ("which reads as the kernel never attaching the rootfs volume: the block "
+      "device behind root= and its driver are where to look")),
+    ("VFS: Cannot open root device", "rootfs-device",
+     ("which reads as the kernel never attaching the rootfs volume: the block "
+      "device behind root= and its driver are where to look")),
+)
+
+
+def _panic_clue(line: str) -> tuple[str, str] | None:
+    """The (class, what-to-look-at) for a panic line, or None when unclassified."""
+    for marker, panic_class, hint in _PANIC_CLUES:
+        if marker in line:
+            return panic_class, hint
+    return None
+
 
 def _kernel_crash_findings(serial_log: str) -> list[Failure]:
     """What the guest kernel itself reported about stopping, in its own words.
@@ -207,11 +235,16 @@ def _kernel_crash_findings(serial_log: str) -> list[Failure]:
     if panic:
         line = next((raw.strip() for raw in serial_log.splitlines()
                      if panic.group(0) in raw), panic.group(0))
+        clue = _panic_clue(line)
+        message = ("the guest kernel stopped and could not continue "
+                   f"(log: {line!r}), so nothing in userspace was ever going to come up")
+        if clue:
+            message += f"; this is {clue[1]}"
         findings.append(Failure(
             FailureKind.GUEST_KERNEL_PANIC,
-            f"the guest kernel stopped and could not continue (log: {line!r}), so "
-            f"nothing in userspace was ever going to come up",
-            evidence={"log_line": line},
+            message,
+            evidence={"log_line": line,
+                      "panic_class": clue[0] if clue else "unclassified"},
         ))
 
     oops = _KERNEL_OOPS.search(serial_log)
