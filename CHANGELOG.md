@@ -4,6 +4,52 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.27] - 2026-10-08
+
+真实运行验证发现的回归修补：0.3.25 声称的「web 服务日志落盘」在 `iris serve` / `iris web` 上**从未生效**，本轮用真实进程复现、修掉，并补上能抓住它的守卫。共三处独立成因，最深的一处会让服务启动后所有结构化日志直接抛异常。
+
+### 修复
+
+- **uvicorn 的 access log 从不落盘**（`src/iris/log.py` `uvicorn_log_config()`）。
+  三个 uvicorn logger 各自只挂 `handlers: ["console"]` 且 `propagate: False`，因此启动与
+  access 记录永远到不了 root 的 `RotatingFileHandler`。而 `serve` 期间 CLI 启动提示走
+  `StreamLogger`（设计如此，直写 stdout）、成功请求只产生 uvicorn access log，
+  `iris.log` 在典型场景下恒为 0 字节。改为这三个 logger 不带自己的 handler、
+  `propagate: True`，由 root 统一落地：一次处理一份记录，将来往 root 加第二个目的地
+  无需改这个 dict，且不必为同一文件再开第二个句柄
+- **`dictConfig` 关掉 root 的 file handler 后，structlog 全线抛异常**（`src/iris/log.py`
+  新增 `_HandlerStream`）。uvicorn 的 `Config.configure_logging` 会执行 `dictConfig`，
+  非增量路径调用 `logging.shutdown` 关闭全部已注册 handler；sink 若持有 stream 对象，
+  server 启动后第一条 IRIS 日志就是
+  `ValueError: I/O operation on closed file`，日志文件「启动前可用、启动后正好丢掉最该留的记录」。
+  实测确认：`dictConfig` 之后 root handler 仍在列表里但流已关闭。改为每次写时经 handler
+  取流（handler 自己会重开，与 `logging` 的 emit 行为一致）；丢一行日志比整个调用链抛异常好
+- **`use_colors` 让 uvicorn 在 dictConfig 内 `KeyError`**（`log.py`）。
+  `Config.configure_logging` 在 `use_colors` 为 bool 时写
+  `formatters["default"]["use_colors"]` 与 `["access"]`，当前 config 缺这两个键 →
+  在绑定端口之前就崩。config 补两个 `PlainFormatter` 别名；`PlainFormatter.__init__`
+  接受 `use_colors`（`dictConfig` 会把它当构造参数转发），IRIS 自己的 `color` 优先
+
+### 测试
+
+- `tests/test_log_to_file.py` 21 → 25：`test_a_real_iris_serve_lands_its_access_log_in_the_file`
+  起**真实 `iris serve` 子进程**、发真实请求、读回 `iris.log`（原 21 例只覆盖 structlog 与
+  stdlib 两条路径，uvicorn 的 dictConfig 路径从未被触达）；另加
+  `test_a_uvicorn_record_reaches_a_file_written_by_setup_logging`、
+  `test_structlog_still_writes_after_dictconfig_closed_the_handler`、
+  `test_uvicorn_can_write_use_colors_into_this_config`
+- 变异验证（各自指名会红的变异，恢复后全绿）：
+  `propagate` 改回 `False` + 自带 console handler → 4 处变红（真实 serve 子进程读到的
+  `iris.log` 是 0 字节）；sink 改回裸 `handler.stream` → 1 处变红（`ValueError` 复现）
+- 全量门禁：`1585 passed / 8 skipped`（较 0.3.26 净增 4 用例）、ruff 全绿
+- 真实运行复核：`iris serve` 与 `iris web` 各起独立隔离 home，`iris.log` 分别 692 / 513
+  字节，含带时间戳的 `GET /api/v1/health` 200 行，无 ANSI 序列
+
+### 已知
+
+- 本轮 Docker daemon 未运行（`npipe:////./pipe/dockerDesktopLinuxEngine` 不存在），
+  真实 QEMU 仿真复跑与前端浏览器渲染未验证；本轮全部改动限于日志通道，与二者无关
+
 ## [0.3.26] - 2026-10-07
 
 「内核实现优化」评估的可落地部分：落点核实推翻了「选型规则化进 YAML 规则引擎」的原预设（规则引擎是 guest 侧自愈语义，启动配置选型塞进去属语义错位，且 QemuConfig 表已是单一权威来源），实际落地为**内核资产完整性守卫 + panic 归因细化 + 变更纪律文档化**。改内核代码（B 路线）、厂商内核补丁（C）、QEMU fork（D）按评估结论不做。

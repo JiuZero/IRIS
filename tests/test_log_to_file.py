@@ -15,6 +15,7 @@ the file back.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -150,9 +151,11 @@ class TestThePathFollowsIrisHome:
 
 class TestUvicornLogsInTheSameShape:
     def test_every_uvicorn_logger_uses_the_iris_formatter(self):
+        """No handler of their own, and none disabled: the root does the writing."""
         config = uvicorn_log_config()
         for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
-            assert config["loggers"][name]["handlers"] == ["console"]
+            assert config["loggers"][name]["handlers"] == []
+            assert config["loggers"][name]["propagate"] is True
         assert config["handlers"]["console"]["formatter"] == "iris"
         assert config["formatters"]["iris"]["()"] is not None
 
@@ -177,7 +180,18 @@ class TestUvicornLogsInTheSameShape:
         assert before, "IRIS installs a console handler; there is nothing to protect"
         logging.config.dictConfig(uvicorn_log_config())
         assert list(root.handlers) == before, "uvicorn's config replaced IRIS's own"
-        assert logging.getLogger("uvicorn.access").handlers
+        assert logging.getLogger("uvicorn.access").propagate is True
+
+    def test_a_uvicorn_record_reaches_a_file_written_by_setup_logging(self, tmp_path):
+        """The regression: its own handler plus ``propagate: False`` left the file empty."""
+        import logging.config
+        log_file = tmp_path / "iris.log"
+        setup_logging("INFO", log_file)
+        logging.config.dictConfig(uvicorn_log_config())
+        logging.getLogger("uvicorn.access").info('127.0.0.1:52344 - "GET /api/v1/health 200')
+        text = log_file.read_text(encoding="utf-8")
+        assert "GET /api/v1/health" in text, "uvicorn's access log never reached the file"
+        assert re.search(r"^\S+ \[info\] 127\.0\.0\.1:52344", text, re.MULTILINE), text
 
     def test_all_three_uvicorn_run_calls_pass_it(self):
         """Otherwise the config exists and nothing uses it."""
@@ -186,6 +200,36 @@ class TestUvicornLogsInTheSameShape:
         assert len(runs) == 3, runs
         for call in runs:
             assert "log_config=uvicorn_log_config()" in call, call
+
+    def test_uvicorn_can_write_use_colors_into_this_config(self):
+        """``configure_logging`` indexes ``formatters['default']`` and ``['access']``
+        whenever use_colors is a bool; a dict missing them dies inside uvicorn
+        before the server binds."""
+        import uvicorn
+
+        config = uvicorn_log_config()
+        uvicorn.Config("iris.api.server:app", log_config=config, use_colors=True)
+        uvicorn.Config("iris.api.server:app", log_config=uvicorn_log_config(),
+                       use_colors=False)
+
+    def test_structlog_still_writes_after_dictconfig_closed_the_handler(self, tmp_path):
+        """dictConfig calls logging.shutdown, which closes the file handler.
+
+        A sink holding the stream object raises ``ValueError: I/O operation on
+        closed file`` on the first record after the server starts -- the file would
+        work until launch and then lose exactly the records worth keeping.
+        """
+        import logging.config
+
+        from structlog import get_logger
+
+        log_file = tmp_path / "iris.log"
+        setup_logging("INFO", log_file)
+        logging.config.dictConfig(uvicorn_log_config())
+        get_logger("iris.test").info("after dictconfig", iid=1)
+        text = log_file.read_text(encoding="utf-8")
+        assert "after dictconfig" in text
+        assert "iid=1" in text, "the sink lost the extras along with the stream"
 
 
 class TestTheServiceReallyWritesBoth:
@@ -206,3 +250,60 @@ class TestTheServiceReallyWritesBoth:
         text = log_file.read_text(encoding="utf-8")
         assert "stdlib reached disk" in text
         assert "structlog reached disk" in text
+
+    def test_a_real_iris_serve_lands_its_access_log_in_the_file(self, tmp_path):
+        """The 0.3.25 claim, checked the only way that counts: run the command.
+
+        A uvicorn ``dictConfig`` that gives its own loggers a console handler and
+        ``propagate: False`` leaves a real ``iris serve`` writing a 0-byte log --
+        the test above passes anyway, because it never goes through that path.
+        """
+        import json
+        import socket
+        import time
+        import urllib.error
+        import urllib.request
+
+        home = tmp_path / "home"
+        log_file = home / "logs" / "iris.log"
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+
+        env = {
+            **os.environ,
+            "PYTHONPATH": str(ROOT / "src"),
+            "IRIS_IRIS_HOME": str(home),
+            "IRIS_LOG_TO_FILE": "true",
+            "NO_COLOR": "1",
+        }
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "iris.cli", "serve", "start", "--port", str(port)],
+            cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace",
+        )
+        try:
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                if proc.poll() is not None:
+                    pytest.fail(f"iris serve exited early:\n{proc.stdout.read()}")
+                try:
+                    with urllib.request.urlopen(
+                            f"http://127.0.0.1:{port}/api/v1/health", timeout=2) as resp:
+                        assert json.loads(resp.read())["status"] == "ok"
+                    break
+                except (urllib.error.URLError, OSError):
+                    time.sleep(0.3)
+            else:
+                pytest.fail("iris serve never answered /api/v1/health")
+        finally:
+            proc.terminate()
+            proc.wait(timeout=30)
+
+        text = log_file.read_text(encoding="utf-8")
+        assert "GET /api/v1/health" in text, (
+            "the access log stayed out of the log file, so the file records nothing "
+            f"of the service's own traffic:\n{text}"
+        )
+        assert re.search(r"^\S+ \[info\] .*GET /api/v1/health", text, re.MULTILINE), text
+        assert not ANSI.search(text), "the file has to stay greppable"

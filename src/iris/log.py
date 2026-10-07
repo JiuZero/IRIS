@@ -134,14 +134,52 @@ def format_line(tag: str, message: str, color: bool) -> str:
 class PlainFormatter(logging.Formatter):
     """Format stdlib records the same way structlog ones are rendered."""
 
-    def __init__(self, stream: TextIO | None = None, color: bool | None = None) -> None:
+    def __init__(self, stream: TextIO | None = None, color: bool | None = None,
+                 use_colors: bool | None = None) -> None:
         super().__init__()
         self._stream = stream
-        self._color = color
+        # ``use_colors`` is uvicorn's spelling of the same switch: it writes it into
+        # every formatter in a ``log_config`` dict, and ``dictConfig`` forwards it as
+        # a constructor argument, so refusing it would raise from inside uvicorn
+        # before the server binds. IRIS's own ``color`` wins when both are given.
+        self._color = color if color is not None else use_colors
 
     def format(self, record: logging.LogRecord) -> str:
         color = use_color(self._stream or sys.stdout) if self._color is None else self._color
         return format_line(level_tag(record.levelname), record.getMessage(), color)
+
+
+class _HandlerStream:
+    """A writable stand-in that resolves the handler's stream on every write.
+
+    ``dictConfig`` -- which uvicorn runs on our ``log_config`` -- calls
+    ``logging.shutdown``, closing every registered handler and with it the file
+    behind it. A sink holding the stream object therefore points at a closed file
+    for the rest of the process, and the next structlog record raises
+    ``ValueError: I/O operation on closed file``: the log file would work until the
+    server started, then lose exactly the records that matter.
+
+    Resolving through the handler instead means a closed handler reopens itself,
+    which is what ``logging`` itself does on the next emit. A dropped write would be
+    the better failure; raising takes down whatever was trying to log.
+    """
+
+    def __init__(self, handler: logging.Handler) -> None:
+        self._handler = handler
+
+    @property
+    def stream(self) -> TextIO:
+        stream = getattr(self._handler, "stream", None)
+        if stream is None or stream.closed:
+            stream = self._handler._open()
+            self._handler.stream = stream
+        return stream
+
+    def write(self, text: str) -> None:
+        self.stream.write(text)
+
+    def flush(self) -> None:
+        self.stream.flush()
 
 
 class PlainRenderer:
@@ -327,11 +365,28 @@ def uvicorn_log_config() -> dict:
     installed. Its own ``LOGGING_CONFIG`` leaves ``disable_existing_loggers`` at
     False and never mentions ``root``, which is what makes this safe: the dict here
     is an addition, not a replacement.
+
+    Each uvicorn logger is given no handlers of its own and left propagating, so
+    its records reach the root handlers :func:`setup_logging` installed. That is
+    what puts the access log in ``iris.log``: giving these loggers their own
+    console handler instead -- the obvious thing to write -- leaves ``propagate``
+    False and the file empty, which is the exact failure this config is here to
+    avoid. One handler per record also means a second destination added later is
+    picked up without touching this dict, and the file cannot be double-opened.
+
+    ``default`` and ``access`` are aliases rather than separate formatter configs:
+    uvicorn's ``Config.configure_logging`` writes ``use_colors`` straight into
+    those two keys whenever ``use_colors`` is a bool, and a dict that does not have
+    them raises ``KeyError`` from inside uvicorn before a single request is served.
     """
     return {
         "version": 1,
         "disable_existing_loggers": False,
-        "formatters": {"iris": {"()": PlainFormatter}},
+        "formatters": {
+            "iris": {"()": PlainFormatter},
+            "default": {"()": PlainFormatter},
+            "access": {"()": PlainFormatter},
+        },
         "handlers": {
             "console": {
                 "class": "logging.StreamHandler",
@@ -340,9 +395,8 @@ def uvicorn_log_config() -> dict:
             },
         },
         "loggers": {
-            "uvicorn": {"handlers": ["console"], "level": "INFO", "propagate": False},
-            "uvicorn.error": {"handlers": ["console"], "level": "INFO", "propagate": False},
-            "uvicorn.access": {"handlers": ["console"], "level": "INFO", "propagate": False},
+            name: {"handlers": [], "level": "INFO", "propagate": True}
+            for name in ("uvicorn", "uvicorn.error", "uvicorn.access")
         },
     }
 
@@ -385,7 +439,7 @@ def setup_logging(level: str = "INFO", log_file: Path | None = None) -> None:
     # logger keeps the renderer it was built with -- including the old file.
     structlog.configure(
         processors=_structlog_processors(stream=sys.stdout,
-                                         sink=handler.stream if handler else None),
+                                         sink=_HandlerStream(handler) if handler else None),
         wrapper_class=structlog.make_filtering_bound_logger(
             getattr(logging, level.upper(), logging.INFO)
         ),
@@ -394,6 +448,8 @@ def setup_logging(level: str = "INFO", log_file: Path | None = None) -> None:
 
 
 def _structlog_processors(stream: TextIO, sink: TextIO | None = None) -> list:
+    """``sink`` is anything with ``write`` and ``flush``, not necessarily a real file:
+    :class:`_HandlerStream` forwards to the handler, which survives a ``dictConfig``."""
     return [
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,
