@@ -21,11 +21,14 @@ import type {
   ActiveEmulation,
   Capabilities,
   ConsoleLog,
+  CorpusView,
   EffectiveConfig,
   EmulateResponse,
   EvalSet,
+  FailureMatrix,
   FirmwareInfo,
   InstanceStats,
+  LatencyView,
   PluginInstalled,
   RootCauseCard,
   RuleLibrary,
@@ -149,6 +152,17 @@ export const api = {
   system: () => request<SystemReading>('/api/v1/system'),
 
   evalSet: () => request<EvalSet>('/api/v1/stats/eval-set'),
+
+  /** One row per firmware. `totals` is counted by the same function the stat cards
+   *  read, so the two cannot disagree about the same runs. */
+  corpus: () => request<CorpusView>('/api/v1/stats/corpus'),
+
+  /** How long a run took, per architecture, over the runs that actually got there. */
+  latency: () => request<LatencyView>('/api/v1/stats/latency'),
+
+  /** Failures crossed with architecture, counted exactly as the dashboard counts
+   *  them -- same stage resolution, same informational exclusion. */
+  failureMatrix: () => request<FailureMatrix>('/api/v1/stats/failure-matrix'),
 
   rootCauses: (recent = 10) =>
     request<{ cards: RootCauseCard[] }>(withQuery('/api/v1/knowledge/root-cause', { recent })),

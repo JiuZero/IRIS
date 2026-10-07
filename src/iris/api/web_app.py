@@ -137,6 +137,118 @@ class InstanceStatsResponse(BaseModel):
     console_available: bool
 
 
+class FirmwareRow(BaseModel):
+    """One firmware's recorded runs, aggregated.
+
+    ``extra="forbid"`` for the reason ``HealthResponse`` gives: a typo in a field
+    name would otherwise return a response that quietly omits it, and the panel
+    would render a blank cell instead of failing.
+
+    ``arch`` is a closed vocabulary with two non-architecture values in it: ``mixed``
+    for a firmware whose runs were measured as more than one architecture, and ``?``
+    for one whose runs recorded none. Reporting a single architecture for either
+    would invent an agreement the data does not contain.
+
+    ``run_ids`` are the newest runs, truncated; ``run_ids_total`` is the real count,
+    so a client can say "showing 50 of 812" instead of implying those were all of
+    them.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    image_id: int | None
+    label: str
+    arch: Literal["armel", "arm64", "mipseb", "mipsel", "mixed", "?"]
+    target_type: str
+    runs: int
+    web_ok: int
+    last_result_kind: str
+    run_ids: list[int]
+    run_ids_total: int
+    run_ids_truncated: bool
+
+
+class CorpusTotals(BaseModel):
+    """The same numbers the stat cards read, so this panel cannot become a rival.
+
+    Counted by ``run_stats`` rather than by summing the rows above: a total derived
+    from the rows would agree with them by construction and therefore prove nothing
+    when the two disagreed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    firmwares: int
+    runs: int
+    web_ok: int
+    web_reach_rate: float
+
+
+class CorpusViewResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    firmwares: list[FirmwareRow]
+    #: The runs no registered firmware owns, as one row. Not mixed into
+    #: ``firmwares``: a wrong attribution corrupts every per-firmware number, and a
+    #: missing one is visible.
+    unattributed: FirmwareRow | None
+    totals: CorpusTotals
+    note: str
+
+
+class ArchLatencyRow(BaseModel):
+    """Latency for one architecture. Nullable figures mean "no sample", not zero."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    arch: str
+    samples: int
+    min_sec: int | None
+    median_sec: int | None
+    p90_sec: int | None
+    max_sec: int | None
+    values: list[int]
+    truncated: bool
+
+
+class LatencyViewResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    by_arch: list[ArchLatencyRow]
+    #: Recorded runs that never reached a working web plane, and so have no duration
+    #: at all. Counted because an absent bar would otherwise read as "no slow runs".
+    unmeasured: int
+    note: str
+
+
+class FailureCell(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: str
+    count: int
+    per_arch: dict[str, int]
+
+
+class FailureStageRow(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    stage: str
+    total: int
+    cells: list[FailureCell]
+
+
+class FailureMatrixResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    stages: list[FailureStageRow]
+    archs: list[str]
+    kind_totals: dict[str, int]
+    #: Failing signals whose stage resolves to nothing. Reported rather than dropped:
+    #: a total that does not add up looks like a complete picture.
+    unclassified: int
+    note: str
+
+
 def install(app: FastAPI) -> FastAPI:
     """Attach the dashboard to ``app``. Safe to call more than once."""
     if getattr(app.state, _INSTALLED, False):
@@ -214,6 +326,21 @@ def _add_api_routes(app: FastAPI) -> None:
     @app.get("/api/v1/stats/eval-set")
     async def read_eval_set(_caller: Caller) -> dict:
         return web_data.eval_set()
+
+    @app.get("/api/v1/stats/corpus", response_model=CorpusViewResponse)
+    async def read_corpus(_caller: Caller) -> CorpusViewResponse:
+        """One row per firmware, so the corpus is readable at a glance."""
+        return CorpusViewResponse(**web_data.corpus_view())
+
+    @app.get("/api/v1/stats/latency", response_model=LatencyViewResponse)
+    async def read_latency(_caller: Caller) -> LatencyViewResponse:
+        """How long the runs that worked took. What it does not cover is in ``note``."""
+        return LatencyViewResponse(**web_data.latency_view())
+
+    @app.get("/api/v1/stats/failure-matrix", response_model=FailureMatrixResponse)
+    async def read_failure_matrix(_caller: Caller) -> FailureMatrixResponse:
+        """Failures as stage x architecture, on the dashboard's own counting rules."""
+        return FailureMatrixResponse(**web_data.failure_matrix_view())
 
     @app.get("/api/v1/runs")
     async def read_runs(

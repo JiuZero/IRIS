@@ -356,3 +356,91 @@ export type ClientFrame =
 export const CLOSE_NOT_FOUND = 4404
 export const CLOSE_NO_CONSOLE = 4403
 export const CLOSE_UNAVAILABLE = 1011
+/* ---------------------------------------------------------------- corpus views */
+
+/**
+ * The three views the dashboard could not answer from the stat cards: *which
+ * firmware*, *how long*, and *where the failures are by architecture*.
+ *
+ * Every field below is the server's own, and `tests/test_web_corpus_views.py`
+ * compares these declarations with the pydantic models key by key. There is no
+ * generator behind this file, so a field renamed on one side only would arrive as
+ * 200 with a blank cell and nothing else would notice.
+ */
+
+export interface FirmwareRow {
+  image_id: number | null
+  label: string
+  /** Closed on the server, with two non-architecture values in it: `mixed` when the
+   *  runs of one firmware were measured as more than one architecture, `?` when they
+   *  recorded none. A single architecture for either would invent agreement. */
+  arch: 'armel' | 'arm64' | 'mipseb' | 'mipsel' | 'mixed' | '?'
+  target_type: string
+  runs: number
+  web_ok: number
+  last_result_kind: string
+  /** The newest runs, truncated. */
+  run_ids: number[]
+  run_ids_total: number
+  run_ids_truncated: boolean
+}
+
+export interface CorpusTotals {
+  firmwares: number
+  runs: number
+  web_ok: number
+  web_reach_rate: number
+}
+
+export interface CorpusView {
+  firmwares: FirmwareRow[]
+  /** The runs no registered firmware owns, as one row of its own rather than folded
+   *  into the rows above: `attribute_to_image` stores a NULL instead of the nearest
+   *  candidate precisely because a wrong attribution corrupts every per-firmware
+   *  number and a missing one is visible. */
+  unattributed: FirmwareRow | null
+  totals: CorpusTotals
+  note: string
+}
+
+export interface ArchLatencyRow {
+  arch: string
+  samples: number
+  /** Nullable means "no sample at all" for this architecture, never zero. */
+  min_sec: number | null
+  median_sec: number | null
+  p90_sec: number | null
+  max_sec: number | null
+  values: number[]
+  truncated: boolean
+}
+
+export interface LatencyView {
+  by_arch: ArchLatencyRow[]
+  /** Runs that never reached a working web plane, so they have no duration to
+   *  report. An absent bar would otherwise read as "no slow runs". */
+  unmeasured: number
+  note: string
+}
+
+export interface FailureCell {
+  kind: string
+  count: number
+  per_arch: Record<string, number>
+}
+
+export interface FailureStageRow {
+  stage: string
+  total: number
+  cells: FailureCell[]
+}
+
+export interface FailureMatrix {
+  stages: FailureStageRow[]
+  archs: string[]
+  kind_totals: Record<string, number>
+  /** Failing signals whose stage resolved to nothing. Reported rather than dropped,
+   *  because a total that does not add up looks like a complete picture. */
+  unclassified: number
+  note: string
+}

@@ -30,9 +30,13 @@ from iris.db.active import list_owned
 from iris.db.knowledge import promote_candidates, root_cause_cards
 from iris.db.models import ActiveEmulation, EmulationRun, FailureProfile, RepairAction
 from iris.db.runs import (
+    FirmwareRuns,
     clear_runs,
+    corpus_profile,
     delete_run,
+    failure_cross,
     failure_histogram,
+    latency_profile,
     run_stats,
     web_reach_rate,
 )
@@ -380,6 +384,143 @@ def eval_set() -> dict[str, Any]:
             f"明细{'仅列出最近' if len(page['items']) < page['total'] else '列出全部'}"
             f" {len(page['items'])} 条，分母与分子不受此截断影响"
         ),
+    }
+
+
+def corpus_view() -> dict[str, Any]:
+    """One row per firmware: how often it ran and whether its web plane ever answered.
+
+    Grouped by the firmware the run was attributed to, not by the run: a corpus
+    question ("which firmware does this host handle, and which ones come up") is
+    about firmware, and 200 rows of runs cannot answer it. ``attributed`` carries the
+    totals so the panel can check itself against the dashboard cards instead of
+    being a second opinion about the same library.
+
+    ``unattributed`` is separated rather than folded in for the reason
+    ``attribute_to_image`` stores a NULL in the first place: attaching those runs to
+    the nearest candidate would corrupt every per-firmware number in the table, and
+    hiding them would make the table look complete.
+    """
+    with _session() as session:
+        aggregate = run_stats(session)
+        rows = corpus_profile(session)
+
+    attributed = [row for row in rows if row.image_id is not None]
+    loose = [row for row in rows if row.image_id is None]
+    return {
+        "firmwares": [_firmware_view(row) for row in attributed],
+        "unattributed": _firmware_view(loose[0]) if loose else None,
+        "totals": {
+            # From run_stats, not from the rows above: the same source the stat
+            # cards read, so a disagreement here is impossible to render.
+            "firmwares": len(attributed),
+            "runs": aggregate.total,
+            "web_ok": aggregate.web_ok,
+            "web_reach_rate": aggregate.web_rate,
+        },
+        "note": (
+            "按固件聚合已记录的仿真运行；分子为 web 面有响应的运行，分母与主页统计卡同源"
+            "（iris.db.runs.run_stats），两处数字必然一致；"
+            "架构取该固件各次运行实测到的值，运行间不一致标 mixed、缺失标 ?；"
+            "未归属运行的 image_id 为空，单独成组，不摊到任何固件上；"
+            "run_ids 只列最近若干条，run_ids_total 仍是真实次数"
+        ),
+    }
+
+
+def latency_view() -> dict[str, Any]:
+    """How long a successful run took, per architecture.
+
+    This is the whole simulation's wall clock -- container start, image build, QEMU
+    boot and guest boot included -- not the moment the web probe answered, and it
+    covers only the runs that did get there: ``record_run`` writes the duration when,
+    and only when, the web plane responded, so a failed run contributes no sample
+    rather than a slow one. Both facts travel with the numbers in ``note`` because a
+    reader shown "median 47s" would otherwise conclude the boots that never finished
+    were just slower.
+
+    ``unmeasured`` counts the runs behind that gap rather than leaving it implied by
+    an absent bar.
+    """
+    with _session() as session:
+        rows = latency_profile(session)
+        aggregate = run_stats(session)
+        measured = sum(row.samples for row in rows)
+
+    return {
+        "by_arch": [
+            {
+                "arch": row.arch,
+                "samples": row.samples,
+                "min_sec": row.min_sec,
+                "median_sec": row.median_sec,
+                "p90_sec": row.p90_sec,
+                "max_sec": row.max_sec,
+                "values": row.values,
+                "truncated": row.truncated,
+            }
+            for row in rows
+        ],
+        "unmeasured": aggregate.total - measured,
+        "note": (
+            "time_web 是整轮仿真的墙钟耗时（容器启动、镜像构建、QEMU 与 guest 启动均计入），"
+            "不是 web 探针应答时刻；且只在 web 面有响应时才写入，"
+            "因此未跑通的运行不贡献样本，unmeasured 即这部分运行数；"
+            "中位数与 p90 取最近秩（始终是真实观测到的某一次耗时），不做插值；"
+            "values 上限 200 条，samples 始终是真实样本数"
+        ),
+    }
+
+
+def failure_matrix_view() -> dict[str, Any]:
+    """Failures as stage x architecture, counted exactly as the dashboard counts them.
+
+    The stage is the one ``run_stats`` resolved, and informational kinds are
+    excluded, so this table and the dashboard's histogram cannot disagree about the
+    same library. ``unclassified`` is what is left over when a failing signal maps to
+    no stage at all; reporting it keeps the row totals auditable instead of leaving
+    a total that does not add up looking complete.
+    """
+    with _session() as session:
+        cross = failure_cross(session)
+
+    return {
+        "stages": [
+            {
+                "stage": row.stage,
+                "total": row.total,
+                "cells": [
+                    {"kind": cell.kind, "count": cell.count, "per_arch": cell.per_arch}
+                    for cell in row.cells
+                ],
+            }
+            for row in cross.stages
+        ],
+        "archs": cross.archs,
+        "kind_totals": cross.kind_totals,
+        "unclassified": cross.unclassified,
+        "note": (
+            "stage 取 iris.db.runs.run_stats 已解析的归因，与主页失败直方图同源；"
+            "informational 类原因（网络兜底生效等）不计入失败；"
+            "架构来自运行记录，failure_profile 本身不存架构；"
+            "同一 kind 在多个 stage 出现时按实际落库的 stage 分列，"
+            f"unclassified 为无法解析 stage 的失败信号数（当前 {cross.unclassified} 条）"
+        ),
+    }
+
+
+def _firmware_view(row: FirmwareRuns) -> dict[str, Any]:
+    return {
+        "image_id": row.image_id,
+        "label": row.label,
+        "arch": row.arch,
+        "target_type": row.target_type or "",
+        "runs": row.runs,
+        "web_ok": row.web_ok,
+        "last_result_kind": row.last_result_kind,
+        "run_ids": row.run_ids,
+        "run_ids_total": row.run_ids_total,
+        "run_ids_truncated": row.run_ids_truncated,
     }
 
 

@@ -4,6 +4,67 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.28] - 2026-10-08
+
+可视化数据面补齐：主页此前能回答「跑得怎么样」，但答不出「哪些固件」「跑了多久」「失败落在哪个架构」。本轮补三个视图（语料矩阵 / Web 可达耗时分布 / 失败聚类矩阵），三个视图的每一个总数都复用 `run_stats` 或其已解析的 stage，与统计卡、失败直方图同源，避免两处对同一批运行给出两套数字。
+
+### 新增
+
+- **语料矩阵**（`GET /api/v1/stats/corpus`，`iris.db.runs.corpus_profile` + `web_data.corpus_view`）。
+  一行一个固件：架构、运行次数、Web 可达次数、最近一次的主因。`arch` 取该固件各次运行**实测到**的值，
+  运行间不一致标 `mixed`、缺失标 `?`，不取众数——`run_stats` 是按每次运行的架构计的，
+  面板若按另一个口径报架构，两张卡就会对同一批运行各说各话。
+  `image_id` 为空的运行（`attribute_to_image` 匹配不上时**故意**存 NULL）独立成组，
+  不摊到任何固件上：错归属会静默污染每一行，缺归属是看得见的
+- **Web 可达耗时分布**（`GET /api/v1/stats/latency`，`iris.db.runs.latency_profile` + `web_data.latency_view`）。
+  按架构给 min / 中位 / p90 / 最长。分位数取**最近秩**，不做插值与平均：
+  `[1, 2, 100]` 的中位是 2（真跑过 2s 那次），不是 34（没有任何一次跑过）。
+  `time_web` 的真实语义已核清：它是整轮仿真墙钟耗时（含容器启动、镜像构建、QEMU 与 guest 启动），
+  不是 web 探针应答时刻，且**仅在 web 面有响应时写入**，因此未跑通的运行不贡献样本；
+  这部分运行数由 `unmeasured` 显式报出，避免「没有慢的运行」这种误读
+- **失败聚类矩阵**（`GET /api/v1/stats/failure-matrix`，`iris.db.runs.failure_cross` + `web_data.failure_matrix_view`）。
+  stage × 架构交叉表。stage 直接取 `run_stats().failure_stages`（与失败直方图同一份解析），
+  informational 类原因（`network-fallback-ok` 等）排除——把「网络兜底生效」计成失败
+  是把一个能工作的语料涂成坏的。同一 kind 在多行出现时按 `run_stats` 解析出的那一个 stage 归类，
+  解析不出 stage 的失败信号数由 `unclassified` 显式报出，不静默丢弃
+- **前端三个面板**（`web/src/pages/Dashboard.tsx` 新增 `CorpusPanel` / `LatencyPanel` / `FailureMatrixPanel`）。
+  每个视图都把自己的口径 `note` 渲染到面板底部。耗时用页面 SVG 自绘 min→max 跨度并标出中位与 p90
+  （`ui.tsx` 新增 `SpanBar`，颜色走 `currentColor` + 文字工具类，不引图表库、不写死颜色）。
+  三个视图不轮询：样本只在一次运行结束时变化，那是导航而不是等待，统计卡本身已经在 3s 轮询
+- **`ArchBar` 从 `Dashboard.tsx` 提到 `ui.tsx`**：评测集与语料矩阵现在都是「一行一架构 + 同一条比例条」，
+  两份实现会漂移，漂移后同一屏上同一批运行会显示两个比例
+
+### 测试
+
+- `tests/test_web_corpus_views.py` 新增 **68 用例**：同源（`totals` 必须等于 `run_stats`）、
+  informational 排除、最近秩分位数（`[1,2,100]` → median 2）、未归属不摊派、
+  截断与真实计数分离、三端点 401 + 签名里必须写 `Caller`（`get_type_hints` 读的是 postponed
+  注解，直接比对注解对象会永远落空）、空库读作空且仍带口径说明、8 个响应模型 `extra="forbid"`、
+  **前端 `types.ts` 与服务端 pydantic 模型字段集合双向相等**（8 组参数化，该文件无生成器，
+  单边改名只会得到一个 200 和一个空白格）
+- 变异验证（各自指名会红的用例，恢复后全绿）：分位数改均值 →
+  `test_the_median_is_a_time_a_run_actually_took`；去掉 `_informational()` 排除 →
+  `test_the_worked_network_fallback_is_not_a_failure`；矩阵自行逐行解析 stage →
+  `test_two_rows_of_one_kind_do_not_split_into_two_stages`；`truncated` 写死 `False` →
+  `test_a_truncated_sample_says_so_and_keeps_the_real_count`；`totals` 改按固件行汇总 →
+  `test_the_run_total_is_the_one_run_stats_counts`
+  （后两项首次尝试的变异体与原实现等价、未变红，已改到能真正分歧的形态再验）
+- 全量门禁：`1653 passed / 8 skipped`（较 0.3.27 净增 68 用例）、ruff 全绿、`npx tsc --noEmit` 零错误
+- 真实运行复核：真起 `iris web --no-browser --port 9137 --api-token …`，三个端点**无 token 均 401、
+  带 token 均 200**，note 均非空。真实库上读到：语料 1 个已归属固件（`G1V31si.bin` / mipsel / router）
+  + 2 次未归属运行（其 `arch` 真实呈现为 `mixed`），耗时 arm64 98s / armel 50s、`unmeasured=1`，
+  失败矩阵 network 与 service 两个 stage 均落在 mipsel、`unclassified=0`
+
+### 已知
+
+- 本轮 Docker daemon 未运行（`npipe:////./pipe/dockerDesktopLinuxEngine` 不存在），真实 QEMU 仿真复跑未验证；
+  真实浏览器渲染亦未逐像素核对（内置浏览器只回报「已打开」，不返回渲染结果或截图），
+  但页面加载后服务端日志确认三个新端点被真实浏览器请求并返回 200
+- `emulation_run.time_ping` 在全仓无任何写路径（只有 `web_data.py` 读、`models.py` 声明），恒为 NULL；
+  本轮因此不依赖它，若将来接入分层链路探针需先补写路径
+- 三个端点只在 `iris web`（工作台装配）下可达，`iris serve start` 挂的是未装配的 API app，
+  对这三个路径返回 404 —— 这是两个命令的既有分工，不是本轮引入
+
 ## [0.3.27] - 2026-10-08
 
 真实运行验证发现的回归修补：0.3.25 声称的「web 服务日志落盘」在 `iris serve` / `iris web` 上**从未生效**，本轮用真实进程复现、修掉，并补上能抓住它的守卫。共三处独立成因，最深的一处会让服务启动后所有结构化日志直接抛异常。

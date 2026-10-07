@@ -49,6 +49,26 @@ export function useEvalSet() {
   return useQuery({ queryKey: ['eval-set'], queryFn: api.evalSet, staleTime: 15_000 })
 }
 
+/** One row per firmware. No poll: a firmware's row only changes when a run ends,
+ *  which is a navigation, not a wait -- and the stat cards above it already refetch
+ *  every 3s, so a second poller here would be a second opinion on the same library
+ *  arriving at a different moment. */
+export function useCorpus() {
+  return useQuery({ queryKey: ['corpus'], queryFn: api.corpus, staleTime: 15_000 })
+}
+
+/** Duration distribution per architecture. Same reasoning as `useCorpus`: the
+ *  samples only change when someone runs something. */
+export function useLatency() {
+  return useQuery({ queryKey: ['latency'], queryFn: api.latency, staleTime: 15_000 })
+}
+
+/** Failures by stage and architecture. Same reasoning: a failure is written when a
+ *  run ends, and the run table is the surface that already watches for that. */
+export function useFailureMatrix() {
+  return useQuery({ queryKey: ['failure-matrix'], queryFn: api.failureMatrix, staleTime: 15_000 })
+}
+
 export function useConfig() {
   return useQuery({ queryKey: ['config'], queryFn: api.config, staleTime: 60_000 })
 }

@@ -251,6 +251,80 @@ export function Meter({
   )
 }
 
+/* -------------------------------------------------------------- ratio bars */
+
+/**
+ * A reached-over-seen proportion, drawn as the gradient fill the workbench uses for
+ * every "how many of them worked" reading.
+ *
+ * Lives here rather than on the dashboard because there are now two callers: the
+ * evaluation set and the firmware corpus both show one row per architecture with
+ * the same shape, and two copies of this bar drift -- and a copy that drifted would
+ * put two different ratios for the same runs on one screen.
+ *
+ * Decorative: every caller prints the ratio as text next to it, so the bar is the
+ * quick read and the text is the fact.
+ */
+export function ArchBar({ seen, ok }: { seen: number; ok: number }) {
+  const ratio = seen > 0 ? ok / seen : 0
+  return (
+    <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface-hover" aria-hidden="true">
+      <span
+        className="block h-full rounded-full bg-gradient-to-r from-iris-600 to-iris-400"
+        style={{ width: `${Math.round(ratio * 100)}%` }}
+      />
+    </span>
+  )
+}
+
+/**
+ * A min-to-max span with the median and p90 marked on it, for a latency sample.
+ *
+ * Drawn as page SVG rather than through a charting library for the reason the rest
+ * of this workbench is drawn by hand: there is exactly one shape to draw, and a
+ * library would bring a second colour system to satisfy it. The colour comes from
+ * `currentColor`, so the whole figure is themed by the text utility on its wrapper
+ * and nothing here names a colour of its own.
+ *
+ * Positioned on a 0-100 viewBox with `preserveAspectRatio="none"`, so the geometry
+ * is proportional to the span rather than to the pixels. A sample with one value
+ * collapses to a single tick instead of dividing by a zero range.
+ */
+export function SpanBar({
+  min,
+  median,
+  p90,
+  max,
+}: {
+  min: number
+  median: number
+  p90: number
+  max: number
+}) {
+  const span = max - min
+  const at = (value: number) => (span > 0 ? ((value - min) / span) * 100 : 50)
+  return (
+    <svg
+      viewBox="0 0 100 8"
+      preserveAspectRatio="none"
+      className="h-2 w-full text-ink-700"
+      aria-hidden="true"
+    >
+      <line x1="0" y1="4" x2="100" y2="4" stroke="currentColor" strokeWidth="0.75" />
+      <line
+        x1={at(median)}
+        y1="1"
+        x2={at(median)}
+        y2="7"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        className="text-iris-400"
+      />
+      <circle cx={at(p90)} cy="4" r="1.75" className="fill-warning" />
+    </svg>
+  )
+}
+
 /* -------------------------------------------------------------- stat tiles */
 
 export function StatTile({

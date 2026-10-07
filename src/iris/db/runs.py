@@ -21,6 +21,7 @@ Two things made the gap structural rather than an oversight:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -35,11 +36,19 @@ from iris.log import get_logger
 logger = get_logger(__name__)
 
 __all__ = [
+    "ArchLatency",
+    "FailureCellCounts",
+    "FailureCross",
+    "FailureStageCounts",
+    "FirmwareRuns",
     "RunStats",
     "attribute_to_image",
     "clear_runs",
+    "corpus_profile",
     "delete_run",
+    "failure_cross",
     "failure_histogram",
+    "latency_profile",
     "record_run",
     "run_stats",
     "web_reach_rate",
@@ -246,6 +255,236 @@ def web_reach_rate(session: Session) -> float:
     which is exactly the population the metric exists to expose.
     """
     return run_stats(session).web_rate
+
+
+@dataclass
+class FirmwareRuns:
+    """Every recorded run of one corpus firmware, as a single row.
+
+    ``image_id`` is ``None`` for the runs that could not be attributed. Those form a
+    group of their own rather than disappearing: :func:`attribute_to_image` stores a
+    NULL instead of the closest candidate on purpose, because a wrong attribution
+    silently corrupts every per-firmware statistic while a missing one is visible.
+    """
+
+    image_id: int | None
+    label: str
+    arch: str
+    target_type: str | None
+    runs: int
+    web_ok: int
+    last_result_kind: str
+    run_ids: list[int]
+    run_ids_total: int
+    run_ids_truncated: bool
+
+
+@dataclass
+class ArchLatency:
+    """How long the successful runs of one architecture took, in seconds."""
+
+    arch: str
+    samples: int
+    min_sec: int | None
+    median_sec: int | None
+    p90_sec: int | None
+    max_sec: int | None
+    values: list[int]
+    truncated: bool
+
+
+@dataclass
+class FailureCellCounts:
+    kind: str
+    count: int
+    per_arch: dict[str, int]
+
+
+@dataclass
+class FailureStageCounts:
+    stage: str
+    total: int
+    cells: list[FailureCellCounts]
+
+
+@dataclass
+class FailureCross:
+    """Failures crossed with architecture, counted the way the dashboard counts them."""
+
+    stages: list[FailureStageCounts]
+    archs: list[str]
+    kind_totals: dict[str, int]
+    #: Failing signals whose stage could not be resolved at all. Reported rather
+    #: than dropped: a total that does not add up looks like a complete picture.
+    unclassified: int
+
+
+#: The label for the runs that no registered firmware owns. Not a firmware.
+_UNATTRIBUTED_LABEL = "未归属固件"
+
+#: Reported per-arch values are capped so a corpus re-run thousands of times cannot
+#: inflate the response without saying so; the counts beside them stay exact.
+_LATENCY_VALUE_LIMIT = 200
+
+#: Per-firmware run links are a convenience, not the table: only the newest are
+#: linked and the total is reported next to them.
+_RUN_ID_LIMIT = 50
+
+
+def corpus_profile(session: Session) -> list[FirmwareRuns]:
+    """Group every recorded run by the firmware it belongs to.
+
+    Two shapes of the same question get two answers on purpose. ``arch`` is the
+    architecture each *run* was measured as, collapsed to a single value when the
+    firmware's runs agree -- :func:`run_stats` counts by that same per-run value, and
+    a firmware reported under a different architecture than the stat card would make
+    the two views disagree about one run. Runs that were measured as more than one
+    architecture say ``mixed`` instead of picking the most common one, because
+    picking would invent an agreement the data does not contain.
+
+    Ordering is by run count descending, then by label, so the corpus's most
+    exercised firmware is the first row and the order never depends on row order.
+    """
+    runs = list(session.scalars(select(EmulationRun).order_by(EmulationRun.id)))
+    images = {image.id: image for image in session.scalars(select(Image))}
+
+    grouped: dict[int | None, list[EmulationRun]] = {}
+    for run in runs:
+        grouped.setdefault(run.image_id, []).append(run)
+
+    rows = [
+        _firmware_row(image_id, group, images.get(image_id), run_id_limit=_RUN_ID_LIMIT)
+        for image_id, group in grouped.items()
+    ]
+    rows.sort(key=lambda row: (-row.runs, row.label))
+    return rows
+
+
+def latency_profile(session: Session) -> list[ArchLatency]:
+    """Per architecture, how long a run took to reach a working web plane.
+
+    Only runs that got there are counted, and that is a property of the data rather
+    than a filter chosen here: ``record_run`` writes ``time_web`` as the whole
+    simulation's wall clock and only when the web plane answered, so a run that
+    never came up has no duration recorded at all. Reading the column as "how long
+    did the boot take" would be wrong twice over -- it includes container start,
+    image build and QEMU boot, and it says nothing about the runs that failed.
+
+    Percentiles are the *nearest rank* of the sorted sample, not an interpolated
+    value: a run that took 400s is 400s long, and a median that reports 200s
+    because it averaged it against a 1s run describes no run that happened.
+    """
+    by_arch: dict[str, list[int]] = {}
+    for run in session.scalars(select(EmulationRun)):
+        if run.time_web is None:
+            continue
+        by_arch.setdefault(run.arch or "?", []).append(run.time_web)
+
+    rows = []
+    for arch, values in by_arch.items():
+        ordered = sorted(values)
+        shown = ordered[:_LATENCY_VALUE_LIMIT]
+        rows.append(ArchLatency(
+            arch=arch,
+            samples=len(ordered),
+            min_sec=ordered[0],
+            median_sec=_nearest_rank(ordered, 0.5),
+            p90_sec=_nearest_rank(ordered, 0.9),
+            max_sec=ordered[-1],
+            values=shown,
+            truncated=len(shown) < len(ordered),
+        ))
+    rows.sort(key=lambda row: row.arch)
+    return rows
+
+
+def failure_cross(session: Session) -> FailureCross:
+    """Failures crossed with architecture, using the stages the dashboard resolved.
+
+    The stage comes from :func:`run_stats` for the same reason
+    :func:`failure_histogram` refuses to re-derive it: a second fallback would file
+    one failure under two different stages across two views of the same library, and
+    nobody would find out from the numbers. Informational kinds are excluded on the
+    same grounds -- ``network-fallback-ok`` counted as a failure would paint the
+    corpus as broken when it is the opposite.
+    """
+    stats = run_stats(session)
+    arch_of_run = {
+        run.id: (run.arch or "?")
+        for run in session.scalars(select(EmulationRun))
+    }
+
+    #: kind -> stage -> arch -> count
+    cells: dict[str, dict[str, dict[str, int]]] = {}
+    kind_totals: dict[str, int] = {}
+    unclassified = 0
+
+    for profile in session.scalars(select(FailureProfile)):
+        if not profile.signal or profile.signal in _informational():
+            continue
+        stage = stats.failure_stages.get(profile.signal, "")
+        if not stage:
+            unclassified += 1
+            continue
+        arch = arch_of_run.get(profile.run_id, "?")
+        per_arch = cells.setdefault(profile.signal, {}).setdefault(stage, {})
+        per_arch[arch] = per_arch.get(arch, 0) + 1
+        kind_totals[profile.signal] = kind_totals.get(profile.signal, 0) + 1
+
+    stage_rows: list[FailureStageCounts] = []
+    archs: set[str] = set()
+    for stage in sorted({s for by_stage in cells.values() for s in by_stage}):
+        stage_cells = []
+        stage_total = 0
+        # Most frequent first so the reason to act is the first thing read.
+        for kind, per_arch in sorted(
+                cells.items(), key=lambda kv: -sum(kv[1].get(stage, {}).values())):
+            arch_counts = per_arch.get(stage)
+            if not arch_counts:
+                continue
+            stage_total += sum(arch_counts.values())
+            archs.update(arch_counts)
+            stage_cells.append(FailureCellCounts(
+                kind=kind, count=sum(arch_counts.values()), per_arch=dict(sorted(arch_counts.items()))))
+        stage_rows.append(FailureStageCounts(stage=stage, total=stage_total, cells=stage_cells))
+
+    return FailureCross(
+        stages=stage_rows,
+        archs=sorted(archs),
+        kind_totals=dict(sorted(kind_totals.items(), key=lambda kv: (-kv[1], kv[0]))),
+        unclassified=unclassified,
+    )
+
+
+def _firmware_row(image_id: int | None, group: list[EmulationRun],
+                  image: Image | None, *, run_id_limit: int) -> FirmwareRuns:
+
+    archs = {run.arch for run in group if run.arch}
+    return FirmwareRuns(
+        image_id=image_id,
+        label=image.filename if image is not None else _UNATTRIBUTED_LABEL,
+        arch=next(iter(archs)) if len(archs) == 1 else ("mixed" if archs else "?"),
+        target_type=image.target_type if image is not None else None,
+        runs=len(group),
+        web_ok=sum(1 for run in group if run.web_reachable),
+        # The last row is the newest one: ordered by id, which only ever grows.
+        last_result_kind=group[-1].result_kind or "",
+        run_ids=[run.id for run in reversed(group)][:run_id_limit],
+        run_ids_total=len(group),
+        run_ids_truncated=len(group) > run_id_limit,
+    )
+
+
+def _nearest_rank(ordered: list[int], fraction: float) -> int:
+    """The smallest sample at or above *fraction* of the way through the sorted list.
+
+    Nearest rank, so the answer is always a value that was actually observed.
+    Interpolating would report a median that no run ever hit, which on a corpus
+    where a handful of runs take minutes and the rest take seconds is precisely
+    the number that misleads.
+    """
+    rank = math.ceil(fraction * len(ordered))
+    return ordered[min(max(rank, 1), len(ordered)) - 1]
 
 
 def _informational() -> frozenset[str]:

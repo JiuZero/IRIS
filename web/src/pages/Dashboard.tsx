@@ -1,9 +1,27 @@
 import { Link } from 'react-router-dom'
 import { ArrowRight, Boxes, Gauge, Layers, ListChecks, Terminal, TrendingUp, Wrench } from 'lucide-react'
 
-import { Badge, Button, EmptyState, ErrorState, Panel, Skeleton, StatTile, StatusDot } from '../components/ui'
-import { DASH, failureLabel, percent } from '../lib/format'
-import { useEvalSet, useRootCauses, useStats } from '../hooks/queries'
+import {
+  ArchBar,
+  Badge,
+  Button,
+  EmptyState,
+  ErrorState,
+  Panel,
+  Skeleton,
+  SpanBar,
+  StatTile,
+  StatusDot,
+} from '../components/ui'
+import { DASH, failureLabel, percent, seconds } from '../lib/format'
+import {
+  useCorpus,
+  useEvalSet,
+  useFailureMatrix,
+  useLatency,
+  useRootCauses,
+  useStats,
+} from '../hooks/queries'
 import { useUiStore } from '../store/ui'
 
 
@@ -27,6 +45,9 @@ export function Dashboard() {
   const stats = useStats()
   const evalSet = useEvalSet()
   const causes = useRootCauses(6)
+  const corpus = useCorpus()
+  const latency = useLatency()
+  const matrix = useFailureMatrix()
   const openLaunch = useUiStore((state) => state.openLaunch)
   const openSettings = useUiStore((state) => state.openSettings)
 
@@ -124,6 +145,13 @@ export function Dashboard() {
         <FailurePanel causes={causes} />
         <QuickStart onLaunch={openLaunch} />
       </div>
+
+      <CorpusPanel query={corpus} />
+
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+        <LatencyPanel query={latency} />
+        <FailureMatrixPanel query={matrix} />
+      </div>
     </div>
   )
 }
@@ -168,17 +196,6 @@ function EvalSetPanel({ query }: { query: ReturnType<typeof useEvalSet> }) {
   )
 }
 
-function ArchBar({ seen, ok }: { seen: number; ok: number }) {
-  const ratio = seen > 0 ? ok / seen : 0
-  return (
-    <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface-hover" aria-hidden="true">
-      <span
-        className="block h-full rounded-full bg-gradient-to-r from-iris-600 to-iris-400"
-        style={{ width: `${Math.round(ratio * 100)}%` }}
-      />
-    </span>
-  )
-}
 
 function ArchPanel({ stats }: { stats: ReturnType<typeof useStats>['data'] }) {
   const byArch = stats?.by_arch ?? {}
@@ -336,6 +353,262 @@ function QuickStart({ onLaunch }: { onLaunch: () => void }) {
           快捷键：Ctrl/Cmd+K 命令面板 · Ctrl/Cmd+` 终端 · Ctrl/Cmd+B 侧栏 · Ctrl/Cmd+J 失败抽屉
         </Button>
       </div>
+    </Panel>
+  )
+}
+/**
+ * One row per firmware: how often it ran, whether its web plane ever answered, and
+ * what the most recent run's primary cause was.
+ *
+ * The other two panels on this page answer *how well* and *why*; this one answers
+ * *which firmware*, which is the question a corpus actually starts from. The
+ * `totals` beside it is counted by the server from the same function the stat cards
+ * read, so the row column and the badge above it cannot end up describing two
+ * different libraries.
+ *
+ * Full width on purpose: the label is a file name, and a truncated firmware name is
+ * worse than no table -- it is the column a reader would most want to trust.
+ */
+function CorpusPanel({ query }: { query: ReturnType<typeof useCorpus> }) {
+  const data = query.data
+  const totals = data?.totals
+  return (
+    <Panel
+      title="固件语料"
+      subtitle="按固件聚合的已记录运行：跑过多少次、Web 面上过几次、最近一次的主因"
+      actions={
+        <Badge tone="iris" title="Web 可达 / 全部运行">
+          {totals ? `${totals.web_ok}/${totals.runs}` : DASH}
+        </Badge>
+      }
+    >
+      {query.isLoading && <Skeleton className="h-32 w-full" />}
+      {data && data.firmwares.length === 0 && (
+        <EmptyState
+          title="暂无可归集的固件行"
+          detail="运行记录要先能落到一个已登记的固件上；未归属的运行单独列在表尾，不会摊到任何固件"
+        />
+      )}
+      {data && data.firmwares.length > 0 && (
+        <div className="flex flex-col gap-3">
+          <div className="max-h-80 overflow-y-auto">
+            <table className="w-full text-left text-xs">
+              <thead>
+                <tr className="border-b border-surface-border text-2xs text-ink-500">
+                  <th className="py-1 font-medium">固件</th>
+                  <th className="py-1 font-medium">架构</th>
+                  <th className="py-1 text-right font-medium">运行</th>
+                  <th className="py-1 pl-4 font-medium">Web 可达</th>
+                  <th className="py-1 pl-4 text-right font-medium">最近主因</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.firmwares.map((row) => (
+                  <tr
+                    key={row.image_id ?? 'loose'}
+                    className="border-b border-surface-border/60 last:border-0"
+                  >
+                    <td className="max-w-72 truncate py-1.5 text-ink-100" title={row.label}>
+                      {row.label}
+                      {row.target_type && (
+                        <span className="ml-1.5 text-[10px] text-ink-700">{row.target_type}</span>
+                      )}
+                    </td>
+                    <td className="py-1.5 font-mono text-2xs text-ink-300">{row.arch}</td>
+                    <td className="tnum py-1.5 text-right text-ink-300">{row.runs}</td>
+                    <td className="py-1.5 pl-4">
+                      <span className="flex items-center gap-2">
+                        <ArchBar seen={row.runs} ok={row.web_ok} />
+                        <span className="tnum shrink-0 text-2xs text-ink-500">
+                          {row.web_ok}/{row.runs}
+                        </span>
+                      </span>
+                    </td>
+                    <td className="py-1.5 pl-4 text-right text-2xs text-ink-500">
+                      {row.last_result_kind ? failureLabel(row.last_result_kind) : DASH}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {data.unattributed && (
+            <div className="flex items-center gap-2 rounded-card border border-surface-border px-3 py-2">
+              <Badge tone="warning">未归属</Badge>
+              <span className="min-w-0 flex-1 truncate text-2xs text-ink-300">
+                {data.unattributed.runs} 次运行没有落到任何已登记固件上，单独计
+              </span>
+              <span className="tnum shrink-0 text-2xs text-ink-500">
+                Web 可达 {data.unattributed.web_ok}/{data.unattributed.runs}
+              </span>
+            </div>
+          )}
+          <p className="border-t border-surface-border pt-2 text-[10px] leading-relaxed text-ink-700">
+            {data.note}
+          </p>
+        </div>
+      )}
+    </Panel>
+  )
+}
+
+/**
+ * How long a run took, per architecture, drawn as a min-to-max span with the median
+ * and p90 marked on it.
+ *
+ * The unmeasured count sits in the header badge rather than in a footnote: the
+ * whole reason this panel exists is the difference between "slow" and "never got
+ * there", and a reader who only sees the bars cannot tell which library the bars
+ * describe. Every figure in it is a time some run actually took -- the server takes
+ * nearest-rank percentiles, so no number here is an average of two runs that never
+ * happened together.
+ */
+function LatencyPanel({ query }: { query: ReturnType<typeof useLatency> }) {
+  const data = query.data
+  return (
+    <Panel
+      title="Web 可达耗时分布"
+      subtitle="跑到 web 面有响应的那些运行，按架构"
+      actions={
+        <Badge tone={data && data.unmeasured > 0 ? 'warning' : 'neutral'} title="没有耗时记录的运行数">
+          未计入 {data ? data.unmeasured : DASH}
+        </Badge>
+      }
+    >
+      {query.isLoading && <Skeleton className="h-24 w-full" />}
+      {data && data.by_arch.length === 0 && (
+        <EmptyState
+          title="暂无耗时样本"
+          detail="耗时只在 web 面有响应时写入，先跑通一次仿真才会出现在这里"
+        />
+      )}
+      {data && data.by_arch.length > 0 && (
+        <div className="flex flex-col gap-3">
+          <ul className="flex flex-col gap-3">
+            {data.by_arch.map((row) => (
+              <li key={row.arch} className="flex flex-col gap-1">
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="font-mono text-xs text-ink-100">{row.arch}</span>
+                  <span className="tnum shrink-0 text-2xs text-ink-500">{row.samples} 次</span>
+                </div>
+                <SpanBar
+                  min={row.min_sec ?? 0}
+                  median={row.median_sec ?? 0}
+                  p90={row.p90_sec ?? 0}
+                  max={row.max_sec ?? 0}
+                />
+                <div className="flex items-baseline justify-between gap-2 text-[10px] text-ink-700">
+                  <span className="tnum">最快 {seconds(row.min_sec, 0)}</span>
+                  <span className="tnum text-ink-500">中位 {seconds(row.median_sec, 0)}</span>
+                  <span className="tnum">p90 {seconds(row.p90_sec, 0)}</span>
+                  <span className="tnum">最长 {seconds(row.max_sec, 0)}</span>
+                </div>
+                {row.truncated && (
+                  <p className="text-[10px] text-ink-700">
+                    样本过多，明细只列最近 {row.values.length} 条，次数与极值仍是全量
+                  </p>
+                )}
+              </li>
+            ))}
+          </ul>
+          <p className="border-t border-surface-border pt-2 text-[10px] leading-relaxed text-ink-700">
+            {data.note}
+          </p>
+        </div>
+      )}
+    </Panel>
+  )
+}
+
+/**
+ * Failures as stage x architecture.
+ *
+ * Rows are the resolved stage and the signal under it; columns are the
+ * architectures, which is the question this table exists to answer -- "is it this
+ * firmware, or is it this architecture". Counts come from the same server-side
+ * resolution the failure histogram uses and informational kinds are already
+ * excluded, so a kind cannot be listed on this board and absent from the one above.
+ *
+ * A cell with no count shows a dot rather than a zero: the difference between "this
+ * combination never happened" and "this combination happened and was fine" is not
+ * something a grid should blur.
+ */
+function FailureMatrixPanel({ query }: { query: ReturnType<typeof useFailureMatrix> }) {
+  const data = query.data
+  return (
+    <Panel
+      title="失败矩阵"
+      subtitle="归因 × 架构；网络兜底生效等 informational 原因不计为失败"
+      actions={
+        <Badge
+          tone={data && data.unclassified > 0 ? 'warning' : 'neutral'}
+          title="无法解析归因阶段的失败信号数"
+        >
+          未归因 {data ? data.unclassified : DASH}
+        </Badge>
+      }
+    >
+      {query.isLoading && <Skeleton className="h-24 w-full" />}
+      {data && data.stages.length === 0 && (
+        <EmptyState title="暂无失败矩阵" detail="所有已记录的仿真都没有留下失败信号" />
+      )}
+      {data && data.stages.length > 0 && (
+        <div className="flex flex-col gap-3">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead>
+                <tr className="border-b border-surface-border text-2xs text-ink-500">
+                  <th className="py-1 font-medium">归因</th>
+                  {data.archs.map((arch) => (
+                    <th key={arch} className="py-1 text-right font-mono font-medium">
+                      {arch}
+                    </th>
+                  ))}
+                  <th className="py-1 pl-4 text-right font-medium">合计</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.stages.flatMap((stageRow) =>
+                  stageRow.cells.map((cell) => (
+                    <tr
+                      key={`${stageRow.stage}-${cell.kind}`}
+                      className="border-b border-surface-border/60 last:border-0"
+                    >
+                      <td className="max-w-48 truncate py-1.5" title={cell.kind}>
+                        <span className="block truncate text-ink-100">
+                          {failureLabel(cell.kind)}
+                        </span>
+                        <span className="block font-mono text-[10px] text-ink-700">
+                          {stageRow.stage || DASH}
+                        </span>
+                      </td>
+                      {data.archs.map((arch) => {
+                        const count = cell.per_arch[arch]
+                        return (
+                          <td
+                            key={arch}
+                            className="tnum py-1.5 text-right text-ink-300"
+                          >
+                            {count === undefined ? (
+                              <span className="text-ink-700">·</span>
+                            ) : (
+                              count
+                            )}
+                          </td>
+                        )
+                      })}
+                      <td className="tnum py-1.5 pl-4 text-right text-iris-400">{cell.count}</td>
+                    </tr>
+                  )),
+                )}
+              </tbody>
+            </table>
+          </div>
+          <p className="border-t border-surface-border pt-2 text-[10px] leading-relaxed text-ink-700">
+            {data.note}
+          </p>
+        </div>
+      )}
     </Panel>
   )
 }
