@@ -364,13 +364,21 @@ class TestDashboardRoutes:
         monkeypatch.setattr(web_app, "get_settings", lambda: settings)
         body = client.get("/api/v1/config").json()
         assert body["api_token_configured"] is True
-        assert body["read_only"] is True
         assert TOKEN not in resp_text(client)
         assert "hunter2" not in resp_text(client)
         assert "***" in body["database_url"]
 
     def test_config_says_not_configured_when_there_is_no_token(self, client, db) -> None:
         assert client.get("/api/v1/config").json()["api_token_configured"] in {True, False}
+
+    def test_config_offers_the_llm_settings_the_panel_can_now_write(self, client, db) -> None:
+        """The gap this route existed to close: six settings that existed on
+        ``Settings`` with no way to reach them from the browser."""
+
+        rows = {row["key"]: row for row in client.get("/api/v1/config").json()["rows"]}
+        assert {"llm_base_url", "llm_api_key", "llm_model", "llm_timeout_sec",
+                "llm_max_retries", "llm_max_context_chars"} <= set(rows)
+        assert all(row["kind"] != "" for row in rows.values())
 
     def test_instance_stats_of_an_instance_you_do_not_own_is_a_404(self, client, db) -> None:
         """Load-bearing now that a stopped instance answers 200 with ``state="gone"``:

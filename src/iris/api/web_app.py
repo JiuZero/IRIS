@@ -22,8 +22,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
@@ -39,7 +40,17 @@ from iris.api.plugins import (
 )
 from iris.api.server import Caller, _read_upload
 from iris.api.web_terminal import close_all_bridges, notify_shutdown, terminal_endpoint
-from iris.config import get_settings
+from iris.config import Settings, get_settings
+from iris.config_store import (
+    EDITABLE_KEYS,
+    EDITABLE_SETTINGS,
+    SECRET_KEYS,
+    SETTING_FILENAME,
+    clear_settings_file,
+    read_settings_file,
+    write_settings_file,
+)
+from iris.config_store import SettingRejected as ConfigRejected
 from iris.db.active import get_live, release
 from iris.db.models import ActiveEmulation
 from iris.emulate.orchestrator import stop_emulation
@@ -372,6 +383,79 @@ class DraftRemovalResponse(BaseModel):
     removed: str
 
 
+class SettingRow(BaseModel):
+    """One editable setting, as the form needs it.
+
+    ``value`` is the live one -- what this process is actually using -- and
+    ``stored`` is what the panel has written, reported separately because the
+    two differ until a restart and a panel that showed only one of them would
+    have to choose between lying about now and hiding what is pending.
+
+    ``value`` is ``None`` for a secret. ``secret_configured`` carries the fact
+    instead, the same bargain ``api_token`` keeps.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    label: str
+    #: ``text`` / ``number`` / ``switch`` / ``secret`` -- a closed vocabulary
+    #: because the widget and the JSON type both hang off it.
+    kind: Literal["text", "number", "switch", "secret"]
+    help: str
+    value: str | int | float | bool | None
+    stored: str | int | float | bool | None
+    #: True when the live value differs from what was saved: saved, awaiting a
+    #: restart. False is not the same as unchanged -- it also covers "saved and
+    #: already in effect", which is why the panel words it as pending rather than
+    #: as a dirty flag.
+    pending_restart: bool
+    secret_configured: bool
+    minimum: float | None
+    maximum: float | None
+    placeholder: str
+
+
+class ConfigResponse(BaseModel):
+    """The effective settings, the editable ones, and where the file lives."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    database_url: str
+    scratch_dir: str
+    api_token_configured: bool
+    rows: list[SettingRow]
+    #: False when the store could not be read or written. The form stays visible
+    #: and says why rather than silently offering fields that would not stick.
+    writable: bool
+    detail: str
+    note: str
+
+
+class ConfigUpdateRequest(BaseModel):
+    """A partial save. Absent keys are left as they are.
+
+    Partial because the panel holds one row per setting and the person editing
+    the LLM endpoint has no reason to restate the upload limit; whole-file
+    would mean a save in one section silently reverting another.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    values: dict[str, Any]
+
+
+class ConfigUpdateResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    saved: list[str]
+    #: Keys whose dropped override the request named, so "reset" and "save" have
+    #: different answers to give.
+    cleared: list[str]
+    restart_required: bool
+    note: str
+
+
 def install(app: FastAPI) -> FastAPI:
     """Attach the dashboard to ``app``. Safe to call more than once."""
     if getattr(app.state, _INSTALLED, False):
@@ -580,23 +664,82 @@ def _add_api_routes(app: FastAPI) -> None:
     async def read_root_causes(_caller: Caller, recent: int = Query(10, ge=1, le=100)) -> dict:
         return web_data.root_causes(recent=recent)
 
-    @app.get("/api/v1/config")
-    async def read_config(_caller: Caller) -> dict:
-        """Effective settings, read-only, with the token reported as present or not.
+    @app.get("/api/v1/config", response_model=ConfigResponse)
+    async def read_config(_caller: Caller) -> ConfigResponse:
+        """Effective settings plus the editable ones, one row per field.
 
-        Never the token itself: this endpoint feeds a page, and a page is the least
-        controlled place a credential can end up. The dashboard points at ``.env``,
-        which is where this project already reads configuration from.
+        Never a credential's value: the API token and the model key are reported
+        as configured or not. This endpoint feeds a page, and a page is the least
+        controlled place a credential can end up.
         """
         settings = get_settings()
-        return {
-            "database_url": redact_database_url(settings.database_url),
-            "scratch_dir": str(settings.scratch_dir),
-            "api_max_upload_mb": settings.api_max_upload_mb,
-            "api_token_configured": bool(settings.api_token.strip()),
-            "read_only": True,
-            "note": "配置来自 .env 与 IRIS_* 环境变量，修改后需重启 iris web",
-        }
+        home = settings.iris_home
+        try:
+            stored = read_settings_file(home)
+            problem = ""
+        except ConfigRejected as exc:
+            stored, problem = {}, exc.detail
+        rows = [_setting_row(item.key, settings, stored) for item in EDITABLE_SETTINGS]
+        return ConfigResponse(
+            database_url=redact_database_url(settings.database_url),
+            scratch_dir=str(settings.scratch_dir),
+            api_token_configured=bool(settings.api_token.strip()),
+            rows=rows,
+            writable=not problem,
+            detail=problem,
+            note=(
+                f"来自 iris-home/{SETTING_FILENAME}、IRIS_* 环境变量与默认值，"
+                "优先级依次降低；带「待重启」的行在下次启动 iris web 后生效"
+            ),
+        )
+
+    @app.put("/api/v1/config", response_model=ConfigUpdateResponse)
+    async def update_config(_caller: Caller, req: ConfigUpdateRequest) -> ConfigUpdateResponse:
+        """Save some settings, or drop some back to what the environment says.
+
+        422 rather than 400: the body was well-formed JSON and named fields this
+        service knows, and what was wrong with it was a value -- which is what
+        422 is for.
+        """
+        settings = get_settings()
+        unknown = sorted(set(req.values) - EDITABLE_KEYS)
+        if unknown:
+            raise HTTPException(status_code=422, detail="不可配置：" + "、".join(unknown))
+        try:
+            stored = write_settings_file(settings.iris_home, req.values)
+        except ConfigRejected as exc:
+            raise HTTPException(status_code=422, detail=exc.detail) from exc
+        touched = sorted(req.values)
+        return ConfigUpdateResponse(
+            saved=touched,
+            cleared=[],
+            restart_required=_needs_restart(touched, settings, stored),
+            note="已写入 iris-home/" + SETTING_FILENAME + "，重启 iris web 后完全生效",
+        )
+
+    @app.delete("/api/v1/config", response_model=ConfigUpdateResponse)
+    async def reset_config(
+        _caller: Caller, keys: list[str] = Query(default_factory=list)
+    ) -> ConfigUpdateResponse:
+        """Drop the named overrides so those fields follow the environment again.
+
+        A delete rather than a second write endpoint: "stop overriding this" is a
+        different statement from "set it to something", and folding it into the
+        save endpoint would need a sentinel value meaning "unset" -- a string
+        field cannot hold one.
+        """
+        settings = get_settings()
+        try:
+            stored = clear_settings_file(settings.iris_home, list(keys))
+        except ConfigRejected as exc:
+            status = 422 if exc.detail.startswith("不可配置") else 500
+            raise HTTPException(status_code=status, detail=exc.detail) from exc
+        return ConfigUpdateResponse(
+            saved=[],
+            cleared=sorted(keys),
+            restart_required=_needs_restart(keys, settings, stored),
+            note="已取消这些覆盖，下次启动时按 IRIS_* 环境变量与默认值解析",
+        )
 
     # ------------------------------------------------------------------ ai layer
     #
@@ -727,6 +870,91 @@ def require_owned(caller: str, iid: int) -> None:
     """
     if live_state(caller, iid) != "owned":
         raise HTTPException(status_code=404, detail=f"emulation {iid} not found")
+
+
+def _setting_row(key: str, settings: Settings, stored: dict[str, Any]) -> SettingRow:
+    """One editable row, live value beside saved value.
+
+    ``pending_restart`` compares the number this process resolved against the one
+    on file, and compares text the same way -- a saved ``60.0`` against a live
+    ``60`` would otherwise read as pending forever on a setting that is in
+    effect. When the file could not be read there is nothing to compare against,
+    so nothing is pending: claiming otherwise would report a pending restart on
+    every row for a problem that is not one.
+    """
+    item = next(entry for entry in EDITABLE_SETTINGS if entry.key == key)
+    live = getattr(settings, key)
+    saved = stored.get(key)
+    is_secret = key in SECRET_KEYS
+    if is_secret:
+        reported_live: Any = None
+        # ``True``/``None`` rather than ``True``/``False``: ``stored`` means "what
+        # is on file", and a secret nobody saved has nothing on file -- reporting
+        # ``False`` there would claim the file says "no key" when it says nothing.
+        reported_saved = True if saved else None
+        # A secret is never shown, so there is no live value to compare against
+        # the saved one -- the row reports "configured", not "in effect". Saying
+        # otherwise would mean echoing the key to decide the answer.
+        pending_restart = False
+    else:
+        reported_live = live
+        reported_saved = saved
+        # Nothing saved, nothing pending; saved and equal, nothing pending;
+        # saved and different, the restart this actually needs.
+        pending_restart = saved is not None and not _same_value(live, saved)
+    return SettingRow(
+        key=key,
+        label=item.label,
+        kind=item.kind,
+        help=item.help,
+        value=reported_live,
+        stored=reported_saved,
+        pending_restart=pending_restart,
+        secret_configured=is_secret and bool(saved),
+        minimum=item.minimum,
+        maximum=item.maximum,
+        placeholder=item.placeholder,
+    )
+
+
+def _needs_restart(keys: Iterable[str], settings: Settings, stored: dict[str, Any]) -> bool:
+    """Whether any of these keys would change what the *running* process does.
+
+    ``get_settings()`` is a singleton with no reload, so a saved value is a request
+    for the next start. The useful question is not "are these fields of a kind that
+    needs a restart" but "would the next start resolve something different from what
+    this process is running" -- otherwise the badge is on every save and a person
+    learns to stop reading it.
+
+    Only one case can be answered without guessing: a key the file now names with
+    exactly the value this process is already using. Everything else says restart,
+    including a key whose override was just dropped -- the next start falls back to
+    ``IRIS_*`` or the default, and neither is knowable from the settings object
+    already in hand, which was itself resolved *through* the overlay being removed.
+
+    A saved key goes through the same comparison, and that is deliberate: the two
+    values are compared here and only the answer leaves, so reading a credential to
+    decide a badge does not put it in a response. Treating secrets as always-dirty
+    instead would have been a guess dressed as a rule, and this one is checkable.
+    """
+    for key in keys:
+        if key not in stored or not _same_value(getattr(settings, key), stored[key]):
+            return True
+    return False
+
+
+def _same_value(live: Any, saved: Any) -> bool:
+    """Whether the running value already equals what was saved.
+
+    Numbers compare numerically and text compares after stripping, because a
+    file round-trip through JSON turns ``60.0`` into ``60`` and a person who
+    saved a value that is already in effect should not be told to restart.
+    """
+    if isinstance(live, bool) or isinstance(saved, bool):
+        return live == saved
+    if isinstance(live, int | float) and isinstance(saved, int | float):
+        return float(live) == float(saved)
+    return str(live).strip() == str(saved).strip()
 
 
 def _draft_view(record: DraftRecord) -> dict:

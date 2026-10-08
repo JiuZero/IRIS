@@ -1,7 +1,17 @@
 from pathlib import Path
+from typing import Any
 
 from pydantic import model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
+
+from iris.config_store import SettingRejected, read_settings_file, settings_path
+from iris.log import get_logger
+
+logger = get_logger(__name__)
 
 #: How long a guest gets to answer on its web port before the run is called failed,
 #: in seconds. One number for the API, the CLI and the workbench, because three
@@ -20,11 +30,36 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 #: timeout, and the API keeps its own upper bound.
 DEFAULT_BOOT_TIMEOUT_SEC = 600
 
+#: Where the data root sits when nothing says otherwise. Named so that the
+#: overlay loader below can ask the *same* question as ``Settings`` instead of
+#: hardcoding ``iris-home`` a second time.
+DEFAULT_IRIS_HOME = Path("iris-home")
+
+#: One config dict, shared by the real settings class and the probe below. Two
+#: literals would drift: the probe has to read ``IRIS_IRIS_HOME`` and ``.env``
+#: exactly the way ``Settings`` does, or the overlay would be looked for in a
+#: different data root than the one everything else uses.
+_SETTINGS_CONFIG = SettingsConfigDict(env_prefix="IRIS_", env_file=".env", extra="ignore")
+
+
+class _HomeProbe(BaseSettings):
+    """Just enough settings to locate the overlay file.
+
+    Not a nested ``Settings(skip_overlay=True)``: that would re-enter
+    ``settings_customise_sources`` and look for the very file whose location it
+    is trying to discover. A separate class reads the same environment with the
+    same rules and cannot recurse, because it has no overlay source.
+    """
+
+    model_config = _SETTINGS_CONFIG
+
+    iris_home: Path = DEFAULT_IRIS_HOME
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="IRIS_", env_file=".env", extra="ignore")
+    model_config = _SETTINGS_CONFIG
 
-    iris_home: Path = Path("iris-home")
+    iris_home: Path = DEFAULT_IRIS_HOME
     #: Empty rather than a literal path, because the default is *derived* from
     #: ``iris_home`` below. Hardcoding ``sqlite:///iris-home/iris.db`` here is what
     #: made ``IRIS_HOME=<temp>`` half-isolate: the corpus and the scratch area moved,
@@ -96,6 +131,7 @@ class Settings(BaseSettings):
     #: the signal -- the first 90% of a boot log is the same every run.
     llm_max_context_chars: int = 12000
 
+
     @property
     def llm_enabled(self) -> bool:
         """Both an endpoint and a model name are needed; one without the other
@@ -144,6 +180,36 @@ class Settings(BaseSettings):
         """
         return [self.rules_dir, self.plugin_dir]
 
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Put the workbench's own store ahead of the environment.
+
+        Order is init > **settings.json** > ``IRIS_*`` > ``.env`` > default.
+        The panel goes above the environment and below explicit arguments
+        because the two are different kinds of statement: ``IRIS_*`` in a launch
+        script says what *this deployment* is, while a value saved in the panel
+        is what *this person* chose, and the second is the more recent one. It
+        stays below ``init_settings`` so a caller that passes
+        ``Settings(llm_model=...)`` in a test still means it.
+
+        ``iris_home`` is resolved by :class:`_HomeProbe`, because the overlay
+        file's location depends on it and reading the file needs an answer first.
+        """
+        return (
+            init_settings,
+            _OverlaySource(),
+            env_settings,
+            dotenv_settings,
+            file_secret_settings,
+        )
+
     @property
     def corpus_dir(self) -> Path:
         return self.iris_home / "corpus"
@@ -151,6 +217,41 @@ class Settings(BaseSettings):
     @property
     def scratch_dir(self) -> Path:
         return self.iris_home / "scratch"
+
+
+class _OverlaySource(PydanticBaseSettingsSource):
+    """Reads ``<iris_home>/settings.json`` into the settings build.
+
+    A pydantic source rather than a post-construction ``model_validator``, so
+    the overlay participates in the ordinary precedence instead of stamping
+    itself on top afterwards -- the difference between "this field came from
+    here" and "this field is whatever the overlay says, regardless".
+
+    It reports what it loaded so the panel can say which fields came from the
+    store rather than from the environment.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(Settings)
+        self.loaded: dict[str, Any] = {}
+
+    def get_field_value(self, field: Any, field_name: str) -> tuple[Any, str, bool]:
+        return self.loaded.get(field_name), field_name, False
+
+    def __call__(self) -> dict[str, Any]:
+        home = _HomeProbe().iris_home
+        try:
+            stored = read_settings_file(home)
+        except SettingRejected:
+            # A settings file IRIS cannot read must not stop the process from
+            # starting: the emulation itself does not depend on any of these
+            # fields, and refusing to boot over a corrupt preferences file would
+            # turn a panel mistake into an outage. The API reports the failure
+            # where it is visible; here it falls back to the environment.
+            logger.warning(f"{settings_path(home)} 无法读取，本次按环境变量与默认值启动")
+            return {}
+        self.loaded = stored
+        return dict(stored)
 
 
 _settings: Settings | None = None

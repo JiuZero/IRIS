@@ -4,6 +4,71 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.30] - 2026-10-08
+
+把「只能手改 `.env`」变成面板可写。0.3.29 的 LLM 层留了个具体的窟窿：六个 LLM 字段
+（外加四个运行时字段）只能靠重启、编辑 `.env`、重启来改，而仓库里**根本不存在任何配置写入路径**——
+`GET /api/v1/config` 的 `read_only: True` 是硬编码常量，设置面板的注释写着「能改运行中服务环境的
+设置面板是没法测试的面板」。那句话在只有 `.env` 的年代是对的。本轮配置项直接加进现有抽屉，
+写进 IRIS 自己的 `iris-home/settings.json`。详见 `docs/14-Web设置能力.md`。
+
+### 新增
+
+- **`src/iris/config_store.py`**：`iris-home/settings.json` 的读写层。十项可写字段集中在
+  `EDITABLE_SETTINGS` 一张表里（key/label/kind/help/min/max/placeholder），
+  **「面板能改什么」全仓库只有这一个定义**——API 从它渲染表单并拒绝表外键，
+  前端 `types.ts` 不复制这份名单。写盘走同目录 `.tmp` + `os.replace`，
+  半个文件不会留在原地等下一次启动去读
+- **`PUT /api/v1/config`**（部分保存）与 **`DELETE /api/v1/config?keys=a&keys=b`**（取消覆盖）。
+  两者分开的理由是「不再覆盖这个」和「设成某个值」是两句不同的话，折叠在一起需要一个
+  表示 unset 的哨兵值，而文本字段装不下它（`""` 在端点字段上意为「整个 LLM 层停用」）。
+  `keys` 是重复查询参数不是逗号拼接，逗号拼过去的 `"a,b"` 会被当成一个未知键
+- **`Settings.settings_customise_sources`**：优先级变为
+  **init > settings.json > `IRIS_*` > `.env` > 默认值**。面板压过环境变量，因为启动脚本里的
+  `IRIS_*` 说的是「这个部署是什么」，面板里存的说的是「这个人刚选了什么」，后者更新。
+  落点是 pydantic source 而非构造后的 validator
+- **覆盖层文件损坏不拦启动**：降级为 warning 并按环境变量启动。仿真不依赖这些字段，
+  为坏掉的偏好文件拒绝开机等于把面板的一次误操作变成故障
+- **`tests/test_web_settings.py`**（101 例），多数钉在拒绝上：表外键 422（含危险三项）、
+  越界数值、文本型数字、字符串型开关、枚举外的日志级别、一次被拒的表单不留下九个已写入的字段、
+  损坏文件响亮报错、密钥不回流、原子写不留 `.tmp`、`types.ts` ↔ Pydantic 双向字段相等
+
+### 变更
+
+- **`GET /api/v1/config`** 由 `read_only: bool` 常量改为 `ConfigResponse`：逐行返回
+  `value`（运行值）/ `stored`（文件值）/ `pending_restart`，密钥只报是否已配置。
+  删掉了 `tests/test_web_app.py` 里的 `assert body["read_only"] is True`——它把一个
+  硬编码的假声明当成了期望行为
+- **`SettingsSheet.tsx`** 的配置组由只读改为可编辑（按 `kind` 选控件、脏项计数、
+  保存/放弃、每行「取消覆盖」与「待重启」徽章）
+- **`RESTART_KEYS` 名单删除**：初版把四个字段列为「需重启」、声称 LLM 字段下次诊断即生效，
+  理由是 LLM client 每次现造。**这个理由是错的**——`get_settings()` 是无 reload 的单例，
+  client 确实是每次现造，它造自的那份 settings 不是每次重读的。现改为十项全都要重启，
+  并用 `_needs_restart()` 回答更有用的问题：「下次启动解析出来的东西是否与这个进程正在用的不同」。
+  保存与环境变量相同的值不再标「待重启」，否则这个徽章会被训练成噪音
+- **`api_token` / `iris_home` / `database_url` 明确不可写**：改令牌的那个请求本身要过鉴权，
+  能改它就能把自己锁在门外（含用来改回去的端点）；后两个指向已装数据的库，
+  面板换掉它们是在承诺一次没有任何代码执行的迁移
+- **`.gitignore`** 增加 `iris-home/settings.json`、`.tmp` 与 `iris-home/ai-drafts/`
+- **`Inspector.tsx` 的「上传上限」**改为从 `rows` 里按 key 取，避免每多一个可写字段
+  就再长一个专用字段
+
+### 验证
+
+- 真服务 round trip（`IRIS_IRIS_HOME` 临时目录，端口 8742–8744）：GET 十行 /
+  PUT 写盘无 `.tmp` 残留 / **重启后十项全部生效且 `pending` 全为 `False`** /
+  `ai-guardian` 从 `planned` 变 `available` / 覆盖层压过 `IRIS_LLM_TIMEOUT_SEC=90` /
+  危险三项 PUT+DELETE 均 422 / 无令牌 401 / 被拒的写入不改动文件 /
+  逗号拼接的 keys 被当作一个未知键拒绝。复核后删除临时 home（内含明文密钥）
+- 门禁：`ruff` 全绿；`1881 passed, 8 skipped`；`npx tsc --noEmit` 与 `npm run build:pkg` 全绿
+
+### 已知边界
+
+- 十项全都要重启，没有热重载（`get_settings()` 单例的直接后果）
+- 取消覆盖一律报「要重启」，即使回落值恰好等于运行值——那个判断需要知道 fallback，
+  而手里的 settings 对象是通过**正在被删掉的**覆盖层解析出来的
+- 保存的密钥无法从面板读回，因此也无法从浏览器侧判断新旧是否相同；比较在服务端完成、只回传布尔
+
 ## [0.3.29] - 2026-10-08
 
 给规则层的「我不知道」一个出口。IRIS 的插件按型号特化（六个内置插件里四个绑定了具体厂商的

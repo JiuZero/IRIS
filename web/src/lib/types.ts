@@ -179,12 +179,52 @@ export interface InstanceStats {
   console_available: boolean
 }
 
+/** One editable setting row, as `GET /api/v1/config` reports it.
+ *
+ * `value` is what this process is actually using and `stored` is what the panel
+ * has written. They differ until a restart, which is why both are here rather
+ * than one of them: a panel showing only the stored value would claim a setting
+ * is in effect when it is not, and one showing only the live value would hide
+ * what a restart is about to change.
+ *
+ * `kind` is a closed set because both the widget and the JSON type hang off it.
+ * `value` is `null` on a `secret` row -- `secret_configured` is the fact instead,
+ * the same way `api_token_configured` works.
+ */
+export type SettingKind = 'text' | 'number' | 'switch' | 'secret'
+
+export interface SettingRow {
+  key: string
+  label: string
+  kind: SettingKind
+  help: string
+  value: string | number | boolean | null
+  stored: string | number | boolean | null
+  pending_restart: boolean
+  secret_configured: boolean
+  minimum: number | null
+  maximum: number | null
+  placeholder: string
+}
+
 export interface EffectiveConfig {
   database_url: string
   scratch_dir: string
-  api_max_upload_mb: number
   api_token_configured: boolean
-  read_only: boolean
+  rows: SettingRow[]
+  /** False when the store could not be read. The form stays visible and says why
+   *  rather than offering fields that would not stick. */
+  writable: boolean
+  detail: string
+  note: string
+}
+
+/** The answer to a save or a reset. `restart_required` is its own field rather than
+ *  something to read out of the note, because the panel puts a badge on it. */
+export interface ConfigUpdateResult {
+  saved: string[]
+  cleared: string[]
+  restart_required: boolean
   note: string
 }
 

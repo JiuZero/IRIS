@@ -276,6 +276,13 @@ function ConsolePanel({
 
 function CorpusPanel() {
   const config = useConfig()
+  /* The upload ceiling is one editable row among ten, so it arrives inside `rows`
+   * rather than as its own top-level field. Reading it back out by key keeps this
+   * panel from re-growing a bespoke field for every value Settings can write. */
+  const uploadLimit = useMemo(() => {
+    const row = config.data?.rows.find((r) => r.key === 'api_max_upload_mb')
+    return row?.value == null ? undefined : `${row.value} MB`
+  }, [config.data])
   return (
     <Section icon={<FolderTree className="h-3.5 w-3.5" aria-hidden="true" />} title="语料与配置">
       {config.isLoading ? (
@@ -289,12 +296,12 @@ function CorpusPanel() {
             {config.data?.scratch_dir ?? DASH}
           </DataRow>
           <DataRow label="上传上限" mono>
-            {config.data ? `${config.data.api_max_upload_mb} MB` : DASH}
+            {uploadLimit ?? DASH}
           </DataRow>
         </>
       )}
       <p className="text-[10px] leading-relaxed text-ink-700">
-        配置只读，来自 .env 与 IRIS_* 环境变量，修改后需重启 iris web
+        来自 .env、IRIS_* 环境变量与 iris-home/settings.json，可在设置面板中改写
       </p>
     </Section>
   )

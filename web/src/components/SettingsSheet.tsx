@@ -4,7 +4,8 @@ import { Check, CircleHelp, KeyRound, Moon, Palette, RefreshCw, Sun, X } from 'l
 import { Badge, Button, DataRow, ErrorState, Skeleton, TextInput } from './ui'
 import { ApiError, api, readToken, writeToken } from '../lib/api'
 import { classNames, DASH } from '../lib/format'
-import { useConfig } from '../hooks/queries'
+import { useConfig, useResetConfig, useSaveConfig } from '../hooks/queries'
+import type { SettingRow } from '../lib/types'
 import {
   DENSITIES,
   DENSITY_LABELS,
@@ -238,49 +239,250 @@ function AppearanceGroup() {
 
 /* ---------------------------------------------------------------------- config */
 
-/** What the server resolved, read-only. `read_only` is a fact about the service, so
- *  it is shown as a row rather than implied by the absence of edit controls. */
+/** The settings the server will write, one row per field.
+ *
+ *  The panel used to render the effective configuration as read-only on the grounds
+ *  that "a settings panel that could edit a running server's environment is a panel
+ *  with no tests". That was true while the only configuration was `.env` -- an
+ *  operator's file, shared with the CLI, where a stray write breaks an image name.
+ *  It stopped being true once the fields being written were IRIS's own
+ *  `iris-home/settings.json`: a file the service reads as one lower-priority
+ *  source, refuses any key outside a fixed table, and never has to echo a
+ *  credential back.
+ *
+ *  So each row carries three things the older read-only group could not: the live
+ *  value, the value on file, and whether they differ. A saved setting takes effect
+ *  on the next start -- `get_settings()` is a singleton with no reload -- so "saved"
+ *  and "in effect" are separate facts, and the row says which one it is.
+ */
 function ConfigGroup() {
   const config = useConfig()
+  const save = useSaveConfig()
+  const reset = useResetConfig()
+  const [draft, setDraft] = useState<Record<string, string | number | boolean>>({})
+  const [problem, setProblem] = useState<string | null>(null)
+
+  const rows = config.data?.rows ?? []
+  const dirty = Object.keys(draft)
+
+  const edit = (key: string, value: string | number | boolean) => {
+    setProblem(null)
+    setDraft((previous) => ({ ...previous, [key]: value }))
+  }
+
+  const submit = () => {
+    if (dirty.length === 0) return
+    save.mutate(draft, {
+      onSuccess: (result) => {
+        setDraft({})
+        setProblem(result.restart_required ? '已保存，但需重启 iris web 后生效' : null)
+      },
+      onError: (error: Error) => setProblem(error.message),
+    })
+  }
+
+  const unstore = (keys: string[]) => {
+    reset.mutate(keys, {
+      onSuccess: () => {
+        setDraft({})
+        setProblem(null)
+      },
+      onError: (error: Error) => setProblem(error.message),
+    })
+  }
 
   return (
     <section className="settings-group">
       <div className="flex items-center justify-between gap-2">
-        <h3 className="settings-group-title">有效配置（只读）</h3>
+        <h3 className="settings-group-title">服务配置</h3>
         <Button size="sm" variant="ghost" onClick={() => void config.refetch()} title="重新读取">
           <RefreshCw className="h-3 w-3" aria-hidden="true" />
           重读
         </Button>
       </div>
-      <p className="settings-group-hint">来自 .env 与 IRIS_* 环境变量，修改后需重启 iris web</p>
+      <p className="settings-group-hint">
+        写入 iris-home/settings.json，其优先级高于 .env 与 IRIS_* 环境变量；改动需重启 iris web 生效
+      </p>
 
       {config.isLoading && <Skeleton className="mt-2 h-16 w-full" />}
       {config.isError && <ErrorState title="无法读取配置" detail={(config.error as Error).message} />}
-      {config.data && (
-        <div className="mt-1.5 flex flex-col">
-          <DataRow label="数据库" mono>
-            {config.data.database_url}
-          </DataRow>
-          <DataRow label="暂存目录" mono>
-            {config.data.scratch_dir}
-          </DataRow>
-          <DataRow label="上传上限" mono>
-            {config.data.api_max_upload_mb} MB
-          </DataRow>
-          <DataRow label="令牌">
-            <Badge tone={config.data.api_token_configured ? 'violet' : 'neutral'}>
-              {config.data.api_token_configured ? '已配置' : '未配置（本地模式）'}
-            </Badge>
-          </DataRow>
-          <DataRow label="写权限">
-            <Badge tone={config.data.read_only ? 'neutral' : 'success'}>
-              {config.data.read_only ? '只读' : '可写'}
-            </Badge>
-          </DataRow>
-          <p className="mt-1 text-[10px] leading-relaxed text-ink-700">{config.data.note}</p>
+      {config.data && !config.data.writable && (
+        <ErrorState title="配置不可读写" detail={config.data.detail} />
+      )}
+
+      {rows.map((row) => (
+        <SettingField
+          key={row.key}
+          row={row}
+          draft={draft[row.key]}
+          onEdit={(value) => edit(row.key, value)}
+          onReset={() => unstore([row.key])}
+          busy={save.isPending || reset.isPending}
+        />
+      ))}
+
+      {dirty.length > 0 && (
+        <div className="mt-2 flex items-center gap-1.5">
+          <Button variant="primary" onClick={submit} disabled={save.isPending}>
+            <Check className="h-3.5 w-3.5" aria-hidden="true" />
+            保存 {dirty.length} 项
+          </Button>
+          <Button variant="ghost" onClick={() => setDraft({})} disabled={save.isPending}>
+            <X className="h-3.5 w-3.5" aria-hidden="true" />
+            放弃修改
+          </Button>
         </div>
       )}
+
+      {problem && (
+        <p className="mt-1.5 flex items-start gap-1 text-2xs text-warning" role="status">
+          <CircleHelp className="mt-px h-3 w-3 shrink-0" aria-hidden="true" />
+          <span>{problem}</span>
+        </p>
+      )}
+
+      <div className="mt-2 flex flex-col border-t border-surface-border pt-2">
+        <DataRow label="数据库" mono>
+          {config.data?.database_url ?? DASH}
+        </DataRow>
+        <DataRow label="暂存目录" mono>
+          {config.data?.scratch_dir ?? DASH}
+        </DataRow>
+        <DataRow label="令牌">
+          <Badge tone={config.data?.api_token_configured ? 'violet' : 'neutral'}>
+            {config.data?.api_token_configured ? '已配置' : '未配置（本地模式）'}
+          </Badge>
+        </DataRow>
+        <p className="mt-1 text-[10px] leading-relaxed text-ink-700">{config.data?.note}</p>
+      </div>
     </section>
+  )
+}
+
+/** One row: the widget its `kind` calls for, plus what the server knows about it.
+ *
+ *  The secret row is the reason `value` is nullable on the wire. It cannot be
+ *  prefilled -- there is nothing to prefill it with, because the API never returns
+ *  the value -- so it starts empty with 「已配置」 beside it, and an empty submit
+ *  is not sent at all. Only typing something changes it, and only the reset button
+ *  clears it. A form that sent the empty string would silently delete a working key
+ *  every time somebody opened the panel and pressed save.
+ */
+function SettingField({
+  row,
+  draft,
+  onEdit,
+  onReset,
+  busy,
+}: {
+  row: SettingRow
+  draft?: string | number | boolean
+  onEdit: (value: string | number | boolean) => void
+  onReset: () => void
+  busy: boolean
+}) {
+  const edited = draft !== undefined
+  const shown = edited ? draft : row.kind === 'secret' ? '' : (row.value ?? '')
+  /* A secret's "override" is `secret_configured`, not `stored`: its stored value is
+   * a presence flag and its live value is always blank, so comparing the two would
+   * report no override on a row that has one -- and with no button, a key could be
+   * set from the panel but never cleared from it. */
+  const overriding =
+    row.kind === 'secret' ? row.secret_configured : row.stored !== null && row.stored !== undefined
+
+  return (
+    <div className="mt-2 border-t border-surface-border pt-2 first:border-t-0 first:pt-0">
+      <div className="flex items-start justify-between gap-2">
+        <span className="text-2xs font-medium text-ink-300">{row.label}</span>
+        <div className="flex shrink-0 items-center gap-1">
+          {row.pending_restart && (
+            <Badge tone="warning" title="已保存，重启 iris web 后生效">
+              待重启
+            </Badge>
+          )}
+          {overriding && (
+            <button
+              type="button"
+              onClick={onReset}
+              disabled={busy}
+              title="取消此覆盖，回到环境变量与默认值"
+              className="rounded px-1 text-[10px] text-ink-500 transition-colors hover:text-ink-300 disabled:opacity-50"
+            >
+              取消覆盖
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-1">
+        {row.kind === 'switch' ? (
+          <Switch checked={Boolean(shown)} onChange={onEdit} label={row.label} />
+        ) : (
+          <TextInput
+            label={undefined}
+            type={row.kind === 'secret' ? 'password' : row.kind === 'number' ? 'number' : 'text'}
+            inputMode={row.kind === 'number' ? 'decimal' : undefined}
+            autoComplete="off"
+            placeholder={
+              row.kind === 'secret' && row.secret_configured ? row.placeholder || '已配置，留空不修改' : row.placeholder
+            }
+            value={String(shown)}
+            onChange={(event) => {
+              const raw = event.target.value
+              if (row.kind === 'number') {
+                if (raw === '') return onEdit(row.minimum ?? 0)
+                return onEdit(Number(raw))
+              }
+              onEdit(raw)
+            }}
+          />
+        )}
+      </div>
+
+      <p className="mt-0.5 text-[10px] leading-relaxed text-ink-700">{row.help}</p>
+      {row.kind === 'secret' && row.secret_configured && (
+        <p className="mt-0.5 text-[10px] text-success">已保存 · 面板不回显其值，留空则保持不变</p>
+      )}
+      {overriding && row.pending_restart && (
+        <p className="mt-0.5 text-[10px] text-warning">
+          已保存 {String(row.stored)}，当前仍是 {String(row.value)}
+        </p>
+      )}
+    </div>
+  )
+}
+
+/** The switch, spelled the same way as the appearance one so the panel has one
+ *  grammar for "this is on" rather than two. */
+function Switch({
+  checked,
+  onChange,
+  label,
+}: {
+  checked: boolean
+  onChange: (value: boolean) => void
+  label: string
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={() => onChange(!checked)}
+      className={classNames(
+        'relative h-5 w-9 shrink-0 rounded-full transition-colors',
+        checked ? 'bg-iris-500' : 'bg-surface-hover',
+      )}
+    >
+      <span
+        className={classNames(
+          'absolute left-0.5 top-0.5 size-4 rounded-full bg-ink-100 transition-transform duration-150',
+          checked && 'translate-x-4',
+        )}
+        aria-hidden="true"
+      />
+    </button>
   )
 }
 

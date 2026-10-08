@@ -21,6 +21,7 @@ import type {
   ActiveEmulation,
   AiStatus,
   Capabilities,
+  ConfigUpdateResult,
   ConsoleLog,
   CorpusView,
   DiagnosisResponse,
@@ -174,7 +175,31 @@ export const api = {
   rootCauses: (recent = 10) =>
     request<{ cards: RootCauseCard[] }>(withQuery('/api/v1/knowledge/root-cause', { recent })),
 
+  /** Effective settings, one row per editable field, with a secret's presence
+   *  rather than its value. */
   config: () => request<EffectiveConfig>('/api/v1/config'),
+
+  /** Save some settings. Only the keys present are written: a partial save, so
+   *  editing the LLM endpoint does not restate the upload limit. A 422 carries a
+   *  reason written for the field that was refused, which is why the panel shows
+   *  `detail` instead of a generic failure. */
+  saveConfig: (values: Record<string, string | number | boolean>) =>
+    request<ConfigUpdateResult>('/api/v1/config', {
+      method: 'PUT',
+      body: JSON.stringify({ values }),
+    }),
+
+  /** Drop the named overrides so those fields follow `IRIS_*` and the defaults
+   *  again. A separate verb rather than a sentinel value in `saveConfig`: a text
+   *  field cannot hold a value that means "unset".
+   *
+   *  Repeated `keys=` rather than one comma-joined value, because the server reads
+   *  it as a list -- joining them here would make "a,b" a single unknown key. */
+  resetConfig: (keys: string[]) =>
+    request<ConfigUpdateResult>(
+      `/api/v1/config?${keys.map((key) => `keys=${encodeURIComponent(key)}`).join('&')}`,
+      { method: 'DELETE' },
+    ),
 
   runs: (params: { limit?: number; offset?: number; arch?: string; result_kind?: string; query?: string } = {}) =>
     request<RunsPage>(withQuery('/api/v1/runs', params)),

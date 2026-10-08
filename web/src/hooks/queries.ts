@@ -73,6 +73,42 @@ export function useConfig() {
   return useQuery({ queryKey: ['config'], queryFn: api.config, staleTime: 60_000 })
 }
 
+/** Save or reset, then refetch the rows.
+ *
+ *  The refetch is the point: a saved value takes effect on the next start, so the
+ *  row the person is looking at has to come back with the server's own account of
+ *  what is live and what is pending -- not with the value they just typed, which
+ *  would make the panel agree with them about a setting this process has not
+ *  changed yet.
+ *
+ *  `ai-status` and `capabilities` are invalidated because both answer off the
+ *  settings the panel just wrote: the LLM layer's state and the `ai-guardian`
+ *  capability row are both derived from it. `system` only after a restart-bound
+ *  field changed, since that is the one that will move a number on the next read.
+ */
+export function useSaveConfig() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (values: Record<string, string | number | boolean>) => api.saveConfig(values),
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({ queryKey: ['config'] })
+      void queryClient.invalidateQueries({ queryKey: ['ai-status'] })
+      void queryClient.invalidateQueries({ queryKey: ['capabilities'] })
+      if (result.restart_required) void queryClient.invalidateQueries({ queryKey: ['system'] })
+    },
+  })
+}
+
+export function useResetConfig() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (keys: string[]) => api.resetConfig(keys),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['config'] })
+    },
+  })
+}
+
 export function useRootCauses(recent = 10) {
   return useQuery({ queryKey: ['root-causes', recent], queryFn: () => api.rootCauses(recent), staleTime: 15_000 })
 }

@@ -39,6 +39,9 @@ iris-home/corpus/*
 # 运行时数据
 # LLM 生成的规则草案目录（人工确认安装后才落到 plugins/，草稿本身是本机产物）
 iris-home/ai-drafts/
+# 工作台设置页写入的配置覆盖层，内含 llm_api_key 明文，与 .env 同属不可入库的凭据
+iris-home/settings.json
+iris-home/settings.json.tmp
 *.db
 *.sqlite3
 logs/
