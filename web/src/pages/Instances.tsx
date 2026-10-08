@@ -1,7 +1,18 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query'
-import { AlertTriangle, Eraser, FileDown, Plus, RefreshCw, Square, Terminal as TerminalIcon, Trash2 } from 'lucide-react'
+import {
+  AlertTriangle,
+  ArrowRight,
+  BrainCircuit,
+  Eraser,
+  FileDown,
+  Plus,
+  RefreshCw,
+  Square,
+  Terminal as TerminalIcon,
+  Trash2,
+} from 'lucide-react'
 
 import { Modal } from '../components/Modal'
 import { RunRecord } from '../components/RunRecord'
@@ -16,11 +27,12 @@ import {
   StatusDot,
   TextInput,
 } from '../components/ui'
-import { api } from '../lib/api'
+import type { Tone } from '../components/ui'
+import { ApiError, api } from '../lib/api'
 import { classNames, DASH, failureLabel, runStateLabel, runStateTone, seconds, shortDateTime } from '../lib/format'
-import { useEmulations } from '../hooks/queries'
+import { useDiagnose, useEmulations, useSaveDraft } from '../hooks/queries'
 import { useUiStore } from '../store/ui'
-import type { RunsPage, RunItem } from '../lib/types'
+import type { LlmAction, PluginDraft, RunsPage, RunItem } from '../lib/types'
 
 const PAGE_SIZE = 20
 
@@ -92,6 +104,7 @@ function ActiveTable({
   const client = useQueryClient()
   const pinned = useUiStore((state) => state.pinnedInstance)
   const setPinned = useUiStore((state) => state.setPinnedInstance)
+  const [diagnosing, setDiagnosing] = useState<number | null>(null)
   const stop = useMutation({
     mutationFn: (iid: number) => api.stopEmulation(iid),
     onSuccess: (_result, iid) => {
@@ -192,6 +205,15 @@ function ActiveTable({
                     </Link>
                     <Button
                       size="sm"
+                      variant="outline"
+                      onClick={() => setDiagnosing(item.iid)}
+                      title="AI 诊断：先读串口日志模式计数，未命中才问模型"
+                    >
+                      <BrainCircuit className="h-3.5 w-3.5" aria-hidden="true" />
+                      AI 诊断
+                    </Button>
+                    <Button
+                      size="sm"
                       variant="danger"
                       disabled={stop.isPending}
                       onClick={() => stop.mutate(item.iid)}
@@ -212,7 +234,237 @@ function ActiveTable({
           停止失败：{(stop.error as Error).message}
         </p>
       )}
+      <DiagnosisModal iid={diagnosing} onClose={() => setDiagnosing(null)} />
     </Panel>
+  )
+}
+
+/** The diagnosis window: what one instance's failure looks like, and who said so.
+ *
+ *  The three outcomes are rendered differently, because they are three different
+ *  facts and flattening them would make the rules engine's free answer look like a
+ *  failure: a `rule_recommendation` means the deterministic layer already diagnosed
+ *  it and no token was spent; `disabled_reason` means nothing ran because no endpoint
+ *  is configured; `error` means a call was attempted and lost. `llm_used` alone
+ *  cannot carry that distinction, so the panel keys off the fields that do.
+ *
+ *  Nothing here executes. A restart is a suggestion with a button that does not
+ *  exist yet on purpose -- the one repair that reaches a running guest is a container
+ *  restart, and it is the operator's call. A draft is saved by a button and reviewed
+ *  on the plugin page, which is the whole safety story: the model proposes, a person
+ *  disposes. */
+function DiagnosisModal({ iid, onClose }: { iid: number | null; onClose: () => void }) {
+  const diagnose = useDiagnose()
+  const save = useSaveDraft()
+  const failed = diagnose.error as ApiError | null
+  const result = diagnose.data
+
+  return (
+    <Modal
+      open={iid !== null}
+      title={iid !== null ? `实例 ${iid} 的 AI 诊断` : ''}
+      subtitle="先由规则层读串口日志模式计数；只有它给不出建议时才会调用模型，模型仅作归因与建议"
+      width="max-w-2xl"
+      onClose={() => {
+        diagnose.reset()
+        save.reset()
+        onClose()
+      }}
+      footer={
+        <div className="ml-auto flex items-center gap-2">
+          <Button
+            variant="ghost"
+            onClick={() => {
+              diagnose.reset()
+              save.reset()
+              onClose()
+            }}
+          >
+            关闭
+          </Button>
+          {iid !== null && (
+            <Button
+              variant="primary"
+              disabled={diagnose.isPending}
+              icon={<BrainCircuit className="h-3 w-3" aria-hidden="true" />}
+              onClick={() => diagnose.mutate(iid)}
+            >
+              {diagnose.isPending ? '诊断中' : diagnose.data ? '重新诊断' : '开始诊断'}
+            </Button>
+          )}
+        </div>
+      }
+    >
+      <div className="flex flex-col gap-3 text-2xs">
+        {failed && (
+          <div className="flex flex-col gap-1.5 rounded-card border border-danger/35 bg-danger/8 p-2.5">
+            <p className="font-medium text-danger">诊断请求失败（HTTP {failed.status}）</p>
+            <p className="leading-relaxed text-ink-300">{failed.detail}</p>
+          </div>
+        )}
+
+        {!result && !failed && (
+          <p className="leading-relaxed text-ink-700">
+            诊断不会改变实例状态：它只读串口日志、最近几次运行与 rootfs 结构，产出一份归因与建议。
+            模型不可用时诊断仍会返回，只是止于规则层的判断
+          </p>
+        )}
+
+        {result && (
+          <>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {result.rule_recommendation !== null ? (
+                <Badge tone="success">规则层已给出建议</Badge>
+              ) : result.llm_used ? (
+                <Badge tone="iris">模型已介入</Badge>
+              ) : result.error !== null ? (
+                <Badge tone="danger">模型调用失败</Badge>
+              ) : (
+                <Badge tone="neutral">未产生诊断</Badge>
+              )}
+              {result.decision && (
+                <Badge tone="violet">置信度 {result.decision.confidence.toFixed(2)}</Badge>
+              )}
+            </div>
+
+            {result.rule_recommendation !== null && (
+              <div className="rounded-card border border-success/30 bg-success/8 p-2.5">
+                <p className="font-medium text-success">确定性规则已处理，未调用模型</p>
+                <p className="mt-1 font-mono leading-relaxed text-ink-200">
+                  {result.rule_recommendation}
+                </p>
+              </div>
+            )}
+
+            {(result.disabled_reason !== null || result.error !== null) && (
+              <div className="rounded-card border border-warning/30 bg-warning/8 p-2.5">
+                <p className="font-medium text-warning">
+                  {result.error !== null ? '模型调用失败，已降级为仅采集' : 'LLM 层未启用'}
+                </p>
+                <p className="mt-1 leading-relaxed text-ink-300">
+                  {result.error ?? result.disabled_reason}
+                </p>
+              </div>
+            )}
+
+            {result.decision && (
+              <>
+                <div>
+                  <p className="font-medium text-ink-300">模型归因</p>
+                  <p className="mt-1 leading-relaxed text-ink-500">{result.decision.diagnosis}</p>
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-ink-700">建议动作</span>
+                  <Badge tone={ACTION_TONE[result.decision.action]}>{ACTION_LABEL[result.decision.action]}</Badge>
+                </div>
+                {result.decision.verify_plan.length > 0 && (
+                  <div>
+                    <p className="font-medium text-ink-300">建议随后核查</p>
+                    <ul className="mt-1 flex flex-col gap-1">
+                      {result.decision.verify_plan.map((step) => (
+                        <li key={step} className="flex items-start gap-1.5 leading-relaxed text-ink-500">
+                          <ArrowRight className="mt-px h-3 w-3 shrink-0 text-ink-700" aria-hidden="true" />
+                          {step}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {result.decision.plugin_draft !== null && (
+                  <DraftProposal
+                    iid={iid as number}
+                    draft={result.decision.plugin_draft}
+                    diagnosis={result.decision.diagnosis}
+                    confidence={result.decision.confidence}
+                    onSaved={onClose}
+                  />
+                )}
+              </>
+            )}
+
+            <p className="border-t border-surface-border pt-2 leading-relaxed text-ink-700">
+              {result.note}
+            </p>
+          </>
+        )}
+
+        {save.isError && (
+          <p className="leading-relaxed text-danger">
+            保存草案失败：{((save.error as ApiError).detail ?? (save.error as Error).message)}
+          </p>
+        )}
+      </div>
+    </Modal>
+  )
+}
+
+const ACTION_LABEL: Record<LlmAction, string> = {
+  NONE: '无需动作',
+  WEB_SERVER_RESTART: '重启容器（可触达运行中 guest 的唯一修复）',
+  DRAFT_PLUGIN: '编写规则插件（下次运行生效）',
+}
+
+const ACTION_TONE: Record<LlmAction, Tone> = {
+  NONE: 'neutral',
+  WEB_SERVER_RESTART: 'warning',
+  DRAFT_PLUGIN: 'iris',
+}
+
+/** The draft a model proposed, shown before anything is written.
+ *
+ *  Saving is the only action here, and it writes to the draft directory -- which the
+ *  engine does not load from. That is why this is a button rather than an automatic
+ *  consequence of the diagnosis: nothing the model proposed can reach the next run
+ *  until it is read on the plugin page and accepted there. */
+function DraftProposal({
+  iid,
+  draft,
+  diagnosis,
+  confidence,
+  onSaved,
+}: {
+  iid: number
+  draft: PluginDraft
+  diagnosis: string
+  confidence: number
+  onSaved: () => void
+}) {
+  const save = useSaveDraft()
+
+  return (
+    <div className="flex flex-col gap-2 rounded-card border border-iris-400/30 bg-iris-500/8 p-2.5">
+      <p className="font-medium text-iris-400">模型建议的规则文档</p>
+      <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded-card border border-surface-border bg-surface-code p-2 font-mono text-[11px] leading-relaxed text-ink-200">
+        {draft.yaml}
+      </pre>
+      <div className="flex items-center gap-2">
+        <p className="mr-auto leading-relaxed text-ink-700">
+          保存到 ai-drafts 目录，不进引擎加载路径；需到插件页「AI 规则草案」审核后才会生效
+        </p>
+        <Button
+          size="sm"
+          disabled={save.isPending}
+          icon={<FileDown className="h-3 w-3" aria-hidden="true" />}
+          onClick={() =>
+            save.mutate(
+              {
+                rule_id: draft.rule_id,
+                stage: draft.stage,
+                description: draft.description,
+                yaml: draft.yaml,
+                iid,
+                confidence,
+                diagnosis,
+              },
+              { onSuccess: onSaved },
+            )
+          }
+        >
+          {save.isPending ? '保存中' : '保存为草案'}
+        </Button>
+      </div>
+      {save.isSuccess && <p className="leading-relaxed text-success">已保存为草案 {save.data.saved}</p>}
+    </div>
   )
 }
 

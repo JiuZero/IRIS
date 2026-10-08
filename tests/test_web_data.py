@@ -78,15 +78,22 @@ class TestCapabilities:
             assert item["detail"], item
             assert item["evidence"], item
 
-    def test_ai_guardian_is_declared_unavailable_and_says_why(self, db) -> None:
-        """It is a deterministic self-healer, not a model call -- the row must say so.
+    def test_ai_guardian_follows_the_endpoint_rather_than_a_constant(self, db) -> None:
+        """The row follows the configuration, and the wording says which half works.
 
-        A contest demo that claims "AI" without a model in the process is the one
-        claim a judge can check by reading two files, so the wording is pinned.
+        The previous wording ("unavailable", 不含任何模型调用) was honest while the
+        layer had no model in it at all, and would have become a false claim the day an
+        endpoint was configured: a demo that says "AI" and never calls a model is the
+        one claim a judge can check by reading two files. So the row splits instead --
+        ``planned`` with the deterministic self-healer named as working plus the two
+        settings that would enable the rest, and ``available`` only when both are set
+        (see ``tests/test_llm_api.py`` for the configured side).
         """
         row = next(i for i in web_data.capabilities()["items"] if i["id"] == "ai-guardian")
-        assert row["state"] == "unavailable"
-        assert "不含任何模型调用" in row["detail"]
+        assert row["state"] == "planned"
+        assert "确定性自愈可用" in row["detail"]
+        assert "IRIS_LLM_BASE_URL" in row["detail"] and "IRIS_LLM_MODEL" in row["detail"]
+        assert row["evidence"] == "iris.monitor.ai_guardian + iris.llm"
 
     def test_console_row_follows_the_script_rather_than_a_constant(self, db, tmp_path, monkeypatch) -> None:
         """L4 reads the build, so a stale baked image cannot claim a live console."""

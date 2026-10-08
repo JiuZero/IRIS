@@ -73,6 +73,46 @@ class Settings(BaseSettings):
     #: the host.
     api_max_upload_mb: int = 64
 
+    #: OpenAI-compatible LLM endpoint for the guardian's long-tail attribution.
+    #: Empty means the whole LLM layer is disabled: the deterministic rule engine
+    #: keeps working unchanged, and nothing ever waits on a model that is not
+    #: configured. Accepts a local endpoint (ollama, vLLM) as readily as a hosted
+    #: one -- a judge running offline must be able to point this at localhost.
+    llm_base_url: str = ""
+    #: Never logged, never echoed back by any endpoint -- the same bargain
+    #: ``api_token`` keeps ("configured or not", never the value).
+    llm_api_key: str = ""
+    llm_model: str = ""
+    #: One diagnosis is one round trip with a bounded serial-log tail in the
+    #: prompt. A timeout above this would leave a web request hanging on a model
+    #: that is not going to answer; retries stay at 1 because a diagnosis is
+    #: re-triggerable by hand and a slow endpoint should be visible, not retried
+    #: into invisibility.
+    llm_timeout_sec: float = 60.0
+    llm_max_retries: int = 1
+    #: Ceiling on the serial-log tail fed into one prompt. Real logs run to
+    #: 1.35 MB here; sending one whole would make a single diagnosis cost more
+    #: than the run it diagnoses. The tail plus the crash context is what carries
+    #: the signal -- the first 90% of a boot log is the same every run.
+    llm_max_context_chars: int = 12000
+
+    @property
+    def llm_enabled(self) -> bool:
+        """Both an endpoint and a model name are needed; one without the other
+        is a half-configuration that would fail on every request."""
+        return bool(self.llm_base_url.strip()) and bool(self.llm_model.strip())
+
+    @property
+    def llm_draft_dir(self) -> Path:
+        """Where LLM-authored rule drafts wait for a human decision.
+
+        Kept apart from ``plugin_dir`` for the same reason ``plugin_dir`` is kept
+        out of ``rules_dir``: the engine loads everything in the plugin directory
+        on the next run, and a hallucinated document must never get that far
+        without a person accepting it first.
+        """
+        return self.iris_home / "ai-drafts"
+
     @property
     def rules_dir(self) -> Path:
         for base in [Path.cwd().resolve(), *Path.cwd().resolve().parents]:

@@ -124,8 +124,15 @@ def capabilities() -> dict[str, Any]:
     Every row carries the evidence it was derived from. A capability badge is a
     promise about the build; without the evidence next to it, the only way to tell a
     true one from a stale one is to go read the source.
+
+    The AI row is a live read of the settings rather than a fixed answer: an
+    unconfigured LLM is "planned" (the deterministic self-healing still works), and
+    claiming "unavailable" for something a single environment variable enables
+    would understate the build -- the same way claiming it available without a
+    model name would overstate it.
     """
     console = serial_console_available()
+    llm_ready = get_settings().llm_enabled
     return {
         "version": __version__,
         "items": [
@@ -146,9 +153,13 @@ def capabilities() -> dict[str, Any]:
                         if console else
                         "run_qemu.sh 仍是单向 file: 落盘，交互需先应用串口改造"),
              "evidence": "scripts/emulate/run_qemu.sh"},
-            {"id": "ai-guardian", "name": "AI 值守", "state": "unavailable",
-             "detail": "规则 + 状态机的确定性自愈器，不含任何模型调用",
-             "evidence": "iris.monitor.ai_guardian"},
+            {"id": "ai-guardian", "name": "AI 值守",
+             "state": "available" if llm_ready else "planned",
+             "detail": ("规则自愈 + LLM 长尾归因（单轮结构化，草案人工确认安装）"
+                        if llm_ready else
+                        "确定性自愈可用；LLM 归因未接入，配置 "
+                        "IRIS_LLM_BASE_URL 与 IRIS_LLM_MODEL 后启用"),
+             "evidence": "iris.monitor.ai_guardian + iris.llm"},
         ],
     }
 

@@ -1,13 +1,42 @@
 import { useState } from 'react'
 import type { ReactNode } from 'react'
-import { AlertTriangle, ArrowRight, Boxes, FileWarning, PackageMinus, ShieldCheck, Upload } from 'lucide-react'
+import {
+  AlertTriangle,
+  ArrowRight,
+  Boxes,
+  Check,
+  Clock,
+  FileWarning,
+  PackageMinus,
+  ShieldCheck,
+  Upload,
+  X,
+} from 'lucide-react'
 
 import { ApiError } from '../lib/api'
-import { Badge, Button, EmptyState, ErrorState, FileInput, Panel, Skeleton, StatusDot } from '../components/ui'
+import {
+  Badge,
+  Button,
+  EmptyState,
+  ErrorState,
+  FileInput,
+  Panel,
+  Skeleton,
+  StatusDot,
+} from '../components/ui'
+import type { Tone } from '../components/ui'
 import { Modal } from '../components/Modal'
 import { DASH } from '../lib/format'
-import { useInstallPlugin, useRemovePlugin, useRules } from '../hooks/queries'
-import type { RulePlugin } from '../lib/types'
+import {
+  useAiDrafts,
+  useAiStatus,
+  useInstallDraft,
+  useInstallPlugin,
+  useRejectDraft,
+  useRemovePlugin,
+  useRules,
+} from '../hooks/queries'
+import type { AiStatus, PluginDraftView, RulePlugin } from '../lib/types'
 
 /**
  * The rule plugin library: what is actually in the box, and what can be added to it.
@@ -110,6 +139,8 @@ export function Plugins() {
         )}
       </Panel>
 
+      <AiDraftPanel />
+
       {items.length > 0 && (
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
           {items.map((item) => (
@@ -138,6 +169,7 @@ export function Plugins() {
       </Modal>
 
       <UploadPluginModal open={uploading} onClose={() => setUploading(false)} />
+
     </div>
   )
 }
@@ -400,5 +432,222 @@ function DetailRow({ title, children }: { title: string; children: ReactNode }) 
       <p className="font-medium text-ink-300">{title}</p>
       <div className="mt-1 flex flex-wrap gap-1">{children}</div>
     </div>
+  )
+}
+/** The rule drafts a model has proposed, waiting for a person to accept or refuse.
+ *
+ *  **This panel is the review, and the review is the safety property.** A draft lives
+ *  in `iris_home/ai-drafts`, which the engine never loads from: nothing here reaches
+ *  the next run until someone presses 接受, and that press goes through the same
+ *  validation chain as the upload above. So the panel's job is not to be reassuring
+ *  about the model's output -- it is to show enough of it that a person can refuse it.
+ *  Hence the full YAML text, the originating instance, and the model's confidence
+ *  shown as the model's own claim rather than as a score to gate on.
+ *
+ *  A rejected draft stays listed as `rejected` rather than disappearing. "There is
+ *  nothing here" and "someone looked at this and said no" are different facts about
+ *  the same run, and the second one is what makes the loop auditable. */
+function AiDraftPanel() {
+  const status = useAiStatus()
+  const drafts = useAiDrafts()
+  const [detail, setDetail] = useState<PluginDraftView | null>(null)
+  const pending = (drafts.data?.drafts ?? []).filter((draft) => draft.status === 'pending')
+
+  return (
+    <Panel
+      title="AI 规则草案"
+      subtitle="模型给出的规则文档，存放在 ai-drafts 目录，不在引擎加载路径上；接受时走与上传完全相同的校验链"
+      actions={
+        <span className="flex items-center gap-2">
+          <Badge tone={status.data?.state === 'ready' ? 'iris' : 'neutral'}>
+            {status.data ? AI_STATE_LABEL[status.data.state] : DASH}
+          </Badge>
+          <Badge tone={pending.length > 0 ? 'warning' : 'neutral'}>待审 {pending.length}</Badge>
+        </span>
+      }
+    >
+      {drafts.isLoading && <Skeleton className="h-16 w-full" />}
+      {drafts.isError && (
+        <ErrorState
+          title="无法读取草案"
+          detail={(drafts.error as Error).message}
+          onRetry={() => void drafts.refetch()}
+        />
+      )}
+      {status.data && <p className="text-2xs leading-relaxed text-ink-500">{status.data.note}</p>}
+      {drafts.data && drafts.data.drafts.length === 0 && (
+        <EmptyState
+          title="暂无草案"
+          detail="在实例页对某次运行做「AI 诊断」，模型建议写插件时再保存到这里；没有草案时引擎行为完全不变"
+        />
+      )}
+      {drafts.data && drafts.data.drafts.length > 0 && (
+        <div className="mt-3 flex flex-col gap-2">
+          {drafts.data.drafts.map((draft) => (
+            <DraftRow key={draft.rule_id} draft={draft} onOpen={() => setDetail(draft)} />
+          ))}
+        </div>
+      )}
+      <DraftDetailModal draft={detail} onClose={() => setDetail(null)} />
+    </Panel>
+  )
+}
+
+const AI_STATE_LABEL: Record<AiStatus['state'], string> = {
+  ready: 'LLM 层就绪',
+  disabled: 'LLM 层未配置',
+  unreachable: 'LLM 层配置不完整',
+}
+
+function DraftRow({ draft, onOpen }: { draft: PluginDraftView; onOpen: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      aria-label={`查看草案 ${draft.rule_id} 的完整文档`}
+      className="glass lift block rounded-card p-0 text-left transition-colors hover:border-iris-400/50"
+    >
+      <div className="flex flex-col gap-2 p-3">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <p className="truncate font-mono text-xs font-medium text-ink-100">{draft.rule_id}</p>
+            <p className="mt-0.5 text-[10px] text-ink-500">
+              目标阶段：{draft.stage}
+              <span className="text-ink-700">
+                {' · '}
+                {draft.source_iid !== null ? `来自实例 ${draft.source_iid}` : '手工保存，无运行来源'}
+              </span>
+            </p>
+          </div>
+          <span className="flex shrink-0 items-center gap-1.5">
+            <Badge tone={DRAFT_TONE[draft.status]}>{DRAFT_LABEL[draft.status]}</Badge>
+            <Badge tone="iris">置信度 {draft.confidence.toFixed(2)}</Badge>
+          </span>
+        </div>
+        <p className="line-clamp-2 text-2xs leading-relaxed text-ink-300" title={draft.diagnosis}>
+          {draft.diagnosis || draft.description}
+        </p>
+        <div className="flex items-center gap-1 border-t border-surface-border pt-2 text-[10px] text-ink-700">
+          <Clock className="h-3 w-3 shrink-0" aria-hidden="true" />
+          {draft.created_at}
+          <ArrowRight className="ml-auto h-3 w-3 shrink-0" aria-hidden="true" />
+        </div>
+      </div>
+    </button>
+  )
+}
+
+const DRAFT_TONE: Record<PluginDraftView['status'], Tone> = {
+  pending: 'warning',
+  accepted: 'success',
+  rejected: 'neutral',
+}
+
+const DRAFT_LABEL: Record<PluginDraftView['status'], string> = {
+  pending: '待审',
+  accepted: '已接受',
+  rejected: '已拒绝',
+}
+
+/** The review window: the whole document, its provenance, and the two buttons.
+ *
+ *  The YAML is shown in full and unedited because this is the text that will be
+ *  handed to the engine, and a review that reads a summary of it is a rubber stamp.
+ *  The install path refuses anything the engine would refuse from a person, and says
+ *  why in the loader's own words -- so a 422 here is information, not a failed action. */
+function DraftDetailModal({
+  draft,
+  onClose,
+}: {
+  draft: PluginDraftView | null
+  onClose: () => void
+}) {
+  const install = useInstallDraft()
+  const reject = useRejectDraft()
+  const failed = (install.error ?? reject.error) as ApiError | null
+
+  return (
+    <Modal
+      open={draft !== null}
+      title={draft?.rule_id ?? ''}
+      subtitle={
+        draft
+          ? `目标阶段：${draft.stage} · ${DRAFT_LABEL[draft.status]} · 模型置信度 ${draft.confidence.toFixed(2)}`
+          : ''
+      }
+      width="max-w-3xl"
+      onClose={() => {
+        install.reset()
+        reject.reset()
+        onClose()
+      }}
+      footer={
+        <div className="ml-auto flex items-center gap-2">
+          {failed && (
+            <p className="mr-auto max-w-sm text-2xs leading-relaxed text-danger">{failed.detail}</p>
+          )}
+          <Button
+            variant="ghost"
+            onClick={() => {
+              install.reset()
+              reject.reset()
+              onClose()
+            }}
+          >
+            关闭
+          </Button>
+          {draft?.status === 'pending' && (
+            <>
+              <Button
+                variant="danger"
+                disabled={reject.isPending}
+                icon={<X className="h-3 w-3" aria-hidden="true" />}
+                onClick={() => reject.mutate(draft.rule_id, { onSuccess: onClose })}
+              >
+                {reject.isPending ? '拒绝中' : '拒绝'}
+              </Button>
+              <Button
+                variant="primary"
+                disabled={install.isPending}
+                icon={<Check className="h-3 w-3" aria-hidden="true" />}
+                onClick={() => install.mutate(draft.rule_id, { onSuccess: onClose })}
+              >
+                {install.isPending ? '校验并安装中' : '接受并安装'}
+              </Button>
+            </>
+          )}
+        </div>
+      }
+    >
+      {draft && (
+        <div className="flex flex-col gap-3 text-2xs">
+          <DetailRow title="来源">
+            <Badge tone="iris">
+              {draft.source_iid !== null ? `实例 ${draft.source_iid} 的诊断` : '手工保存'}
+            </Badge>
+            <span className="text-ink-700">{draft.created_at}</span>
+          </DetailRow>
+          <div>
+            <p className="font-medium text-ink-300">模型给出的归因</p>
+            <p className="mt-1 leading-relaxed text-ink-500">{draft.diagnosis || '（该草案未附归因说明）'}</p>
+          </div>
+          <div>
+            <p className="font-medium text-ink-300">规则文档原文</p>
+            <pre className="mt-1 max-h-80 overflow-auto whitespace-pre-wrap rounded-card border border-surface-border bg-surface-code p-2.5 font-mono text-[11px] leading-relaxed text-ink-200">
+              {draft.yaml}
+            </pre>
+          </div>
+          <p className="leading-relaxed text-ink-700">
+            接受后文档存为
+            <code className="mx-1 rounded bg-surface-code px-1 font-mono text-[10px]">
+              {draft.rule_id}.yaml
+            </code>
+            进入插件目录，下次运行生效；同时在 repair_action 记一条
+            <code className="mx-1 rounded bg-surface-code px-1 font-mono text-[10px]">source=llm</code>
+            且 promoted 的条目，因此同类故障下次由规则层零成本处理
+          </p>
+        </div>
+      )}
+    </Modal>
   )
 }

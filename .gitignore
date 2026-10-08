@@ -37,6 +37,8 @@ iris-home/corpus/*
 !iris-home/corpus/*.toml
 
 # 运行时数据
+# LLM 生成的规则草案目录（人工确认安装后才落到 plugins/，草稿本身是本机产物）
+iris-home/ai-drafts/
 *.db
 *.sqlite3
 logs/

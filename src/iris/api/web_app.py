@@ -27,7 +27,7 @@ from typing import Literal
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from iris.api import host_metrics, web_data
@@ -43,6 +43,9 @@ from iris.config import get_settings
 from iris.db.active import get_live, release
 from iris.db.models import ActiveEmulation
 from iris.emulate.orchestrator import stop_emulation
+from iris.llm.diagnose import diagnose_instance
+from iris.llm.drafts import DraftRecord, install_draft, list_drafts, reject_draft, save_draft
+from iris.llm.schema import LLMDecision, PluginDraft
 from iris.log import get_logger
 
 logger = get_logger(__name__)
@@ -247,6 +250,126 @@ class FailureMatrixResponse(BaseModel):
     #: a total that does not add up looks like a complete picture.
     unclassified: int
     note: str
+
+
+class DiagnoseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    iid: int
+
+
+class DiagnosisResponse(BaseModel):
+    """What one diagnosis produced, plus every fact about how it ran.
+
+    ``llm_used`` false with a ``rule_recommendation`` is the rules engine having
+    handled it for free; false with ``disabled_reason`` or ``error`` is nothing
+    having run. The page shows all three differently, because a diagnosis panel
+    that cannot tell them apart would report "no diagnosis" for a run the rules
+    engine already diagnosed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    iid: int
+    llm_used: bool
+    decision: LLMDecision | None
+    rule_recommendation: str | None
+    disabled_reason: str | None
+    error: str | None
+    note: str
+
+
+class AiStatusResponse(BaseModel):
+    """Whether the LLM layer would run, with the key reported as configured or not.
+
+    Never the key itself -- the same bargain ``/api/v1/config`` keeps: this feeds a
+    page, and a page is the least controlled place a credential can end up.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: ``disabled`` (nothing configured), ``ready`` (endpoint and model present) or
+    #: ``unreachable`` (configured, but the settings' own sanity check failed).
+    state: Literal["disabled", "ready", "unreachable"]
+    base_url_configured: bool
+    model: str
+    note: str
+
+
+class PluginDraftView(BaseModel):
+    """One model-authored draft, with the provenance a review needs.
+
+    ``yaml`` is the full document text: drafts are few, and a review that cannot
+    read the document it is confirming is a rubber stamp.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    rule_id: str
+    stage: str
+    description: str
+    #: ``pending`` / ``accepted`` / ``rejected`` -- a closed vocabulary because the
+    #: page renders a badge on it, and a fourth state it does not know would
+    #: render as "pending".
+    status: Literal["pending", "accepted", "rejected"]
+    created_at: str
+    source_iid: int | None
+    confidence: float
+    diagnosis: str
+    yaml: str
+
+
+class DraftListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    drafts: list[PluginDraftView]
+    note: str
+
+
+class DraftSaveRequest(BaseModel):
+    """The body of "save this decision's draft", from the diagnosis panel.
+
+    ``iid`` and ``confidence`` are optional because a draft saved by hand does not
+    have a run behind it; the provenance a real diagnosis carries is what makes
+    the promoted-repair record possible, so it travels when it exists.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    rule_id: str
+    stage: str
+    description: str
+    yaml: str
+    iid: int | None = None
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    diagnosis: str = ""
+
+
+class DraftMutationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    saved: str
+
+
+class DraftInstallResponse(BaseModel):
+    """What accepting a draft put on disk, and whether the repair got recorded.
+
+    ``promoted_recorded`` is a separate fact from ``installed``: the engine
+    accepting the document and the repair ledger gaining a
+    ``source="llm", promoted=True`` row happen at the same moment only when the
+    run that produced the draft still exists.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    installed: PluginMutationResponse
+    promoted_recorded: bool
+
+
+class DraftRemovalResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    removed: str
 
 
 def install(app: FastAPI) -> FastAPI:
@@ -475,6 +598,114 @@ def _add_api_routes(app: FastAPI) -> None:
             "note": "配置来自 .env 与 IRIS_* 环境变量，修改后需重启 iris web",
         }
 
+    # ------------------------------------------------------------------ ai layer
+    #
+    # The diagnosis is the model's one round trip, and everything else here is
+    # bookkeeping around it. None of these routes executes anything on its own:
+    # the outcome is a decision, the restart suggestion is performed by a person
+    # on the instance page, and a draft only reaches the plugin directory when a
+    # person posts the install below.
+
+    @app.get("/api/v1/ai/status", response_model=AiStatusResponse)
+    async def read_ai_status(_caller: Caller) -> AiStatusResponse:
+        """Whether the LLM layer would run, never the key itself."""
+        settings = get_settings()
+        if settings.llm_enabled:
+            state, note = "ready", (
+                f"模型 {settings.llm_model} 已配置;诊断在实例页手动触发,"
+                "草案在插件页审核安装"
+            )
+        elif not settings.llm_base_url.strip():
+            state, note = "disabled", (
+                "LLM 层未配置;确定性规则自愈不受影响。"
+                "配置 IRIS_LLM_BASE_URL 与 IRIS_LLM_MODEL 后启用"
+            )
+        else:
+            state, note = "unreachable", (
+                "已配置 base_url 但缺少模型名;两者都配置后该层才可用"
+            )
+        return AiStatusResponse(
+            state=state,
+            base_url_configured=bool(settings.llm_base_url.strip()),
+            model=settings.llm_model,
+            note=note,
+        )
+
+    @app.post("/api/v1/ai/diagnose", response_model=DiagnosisResponse)
+    async def diagnose(_caller: Caller, req: DiagnoseRequest) -> DiagnosisResponse:
+        """One diagnosis: rule engine first, the model only for the long tail.
+
+        Off the event loop because the round trip is a blocking HTTP call with a
+        minute-scale timeout -- a diagnosis that blocked the loop would freeze
+        every other route on a slow endpoint, which is the one way this feature
+        could take the workbench down with it.
+        """
+        outcome = await asyncio.to_thread(diagnose_instance, req.iid)
+        return DiagnosisResponse(
+            iid=outcome.iid,
+            llm_used=outcome.llm_used,
+            decision=outcome.decision,
+            rule_recommendation=outcome.rule_recommendation,
+            disabled_reason=outcome.disabled_reason,
+            error=outcome.error,
+            note=outcome.note,
+        )
+
+    @app.get("/api/v1/ai/drafts", response_model=DraftListResponse)
+    async def read_drafts(_caller: Caller) -> DraftListResponse:
+        drafts = list_drafts()
+        return DraftListResponse(
+            drafts=[_draft_view(draft) for draft in drafts],
+            note=(
+                "模型生成的规则草案;仅在此列出,不会进引擎加载路径,"
+                "由人工确认安装(repair_action 记 source=llm 且 promoted)"
+            ),
+        )
+
+    @app.post("/api/v1/ai/drafts", response_model=DraftMutationResponse)
+    async def save_one_draft(_caller: Caller, req: DraftSaveRequest) -> DraftMutationResponse:
+        """Put one decision's draft into the draft directory. Nothing is loaded."""
+        try:
+            record = save_draft(
+                PluginDraft(
+                    rule_id=req.rule_id, stage=req.stage,
+                    description=req.description, yaml=req.yaml,
+                ),
+                iid=req.iid, confidence=req.confidence, diagnosis=req.diagnosis,
+            )
+        except PluginRejected as exc:
+            raise HTTPException(status_code=422, detail=exc.detail) from exc
+        return DraftMutationResponse(saved=record.rule_id)
+
+    # Drafts are addressed by id, so the install and the removal are declared
+    # after the static list/save above -- the same declaration-order rule the
+    # runs routes follow.
+    @app.post("/api/v1/ai/drafts/{rule_id}/install", response_model=DraftInstallResponse)
+    async def install_one_draft(rule_id: str, _caller: Caller) -> DraftInstallResponse:
+        """Accept one draft through the same validation chain as a browser upload.
+
+        A draft the engine would reject from a person is rejected from a model
+        too, and the reason comes back verbatim: "安装成功但规则不生效" has no
+        other useful answer.
+        """
+        try:
+            result = install_draft(rule_id)
+        except PluginRejected as exc:
+            raise HTTPException(status_code=422, detail=exc.detail) from exc
+        return DraftInstallResponse(
+            installed=PluginMutationResponse(**result["installed"]),
+            promoted_recorded=result["promoted_recorded"],
+        )
+
+    @app.delete("/api/v1/ai/drafts/{rule_id}", response_model=DraftRemovalResponse)
+    async def reject_one_draft(rule_id: str, _caller: Caller) -> DraftRemovalResponse:
+        """Refuse one draft. 404 for a stale page, not a retry."""
+        try:
+            removed = reject_draft(rule_id)
+        except PluginRejected as exc:
+            raise HTTPException(status_code=404, detail=exc.detail) from exc
+        return DraftRemovalResponse(removed=removed.name)
+
 
 def redact_database_url(url: str) -> str:
     """A database URL with its password replaced."""
@@ -496,6 +727,29 @@ def require_owned(caller: str, iid: int) -> None:
     """
     if live_state(caller, iid) != "owned":
         raise HTTPException(status_code=404, detail=f"emulation {iid} not found")
+
+
+def _draft_view(record: DraftRecord) -> dict:
+    """One draft row for the list endpoint, document text included.
+
+    Reads the document rather than trusting the metadata: the review confirms a
+    YAML the engine will one day load, and the text on disk is the thing it will
+    load -- not whatever the model said about it.
+    """
+    from iris.llm.drafts import drafts_dir
+
+    text = (drafts_dir() / f"{record.rule_id}.yaml").read_text(encoding="utf-8")
+    return {
+        "rule_id": record.rule_id,
+        "stage": record.stage,
+        "description": record.description,
+        "status": record.status,
+        "created_at": record.created_at,
+        "source_iid": record.source_iid,
+        "confidence": record.confidence,
+        "diagnosis": record.diagnosis,
+        "yaml": text,
+    }
 
 
 #: What a lookup of one instance id can conclude. ``owned`` and ``not-yours`` are the

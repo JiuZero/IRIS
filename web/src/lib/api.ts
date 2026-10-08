@@ -19,9 +19,16 @@
 
 import type {
   ActiveEmulation,
+  AiStatus,
   Capabilities,
   ConsoleLog,
   CorpusView,
+  DiagnosisResponse,
+  DraftInstallResponse,
+  DraftList,
+  DraftMutationResponse,
+  DraftRemovalResponse,
+  DraftSaveRequest,
   EffectiveConfig,
   EmulateResponse,
   EvalSet,
@@ -197,6 +204,49 @@ export const api = {
    *  rules are not reachable this way: they are not in the plugin directory. */
   removePlugin: (name: string) =>
     request<{ removed: string }>(`/api/v1/plugins/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    }),
+
+  /** Whether the LLM layer would run, with the key reported as configured or not.
+   *  The rules engine never waits on this answer -- a disabled layer is a stated
+   *  fact in the diagnosis response, not a failed request. */
+  aiStatus: () => request<AiStatus>('/api/v1/ai/status'),
+
+  /** One diagnosis of one instance: pattern counts first, then the model only for
+   *  the signals those counts cannot name.
+   *
+   *  A button-triggered call by design. There is no automatic escalation path, so
+   *  this cannot spend a token on a run nobody is watching. */
+  diagnose: (iid: number) =>
+    request<DiagnosisResponse>('/api/v1/ai/diagnose', {
+      method: 'POST',
+      body: JSON.stringify({ iid }),
+    }),
+
+  /** The drafts waiting on a person, newest first, with each document's text. */
+  aiDrafts: () => request<DraftList>('/api/v1/ai/drafts'),
+
+  /** Put one decision's draft into the draft directory. Saving loads nothing: the
+   *  draft directory is deliberately outside the engine's load path. */
+  saveDraft: (draft: DraftSaveRequest) =>
+    request<DraftMutationResponse>('/api/v1/ai/drafts', {
+      method: 'POST',
+      body: JSON.stringify(draft),
+    }),
+
+  /** Accept one draft. Goes through the same validation chain as an upload, so a
+   *  422 arrives with the loader's own complaint -- "installed but ineffective"
+   *  has no other useful answer. */
+  installDraft: (ruleId: string) =>
+    request<DraftInstallResponse>(
+      `/api/v1/ai/drafts/${encodeURIComponent(ruleId)}/install`,
+      { method: 'POST' },
+    ),
+
+  /** Refuse one draft. Its document goes; its metadata stays as the record that a
+   *  review happened and said no. */
+  rejectDraft: (ruleId: string) =>
+    request<DraftRemovalResponse>(`/api/v1/ai/drafts/${encodeURIComponent(ruleId)}`, {
       method: 'DELETE',
     }),
 

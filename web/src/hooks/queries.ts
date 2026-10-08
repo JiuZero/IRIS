@@ -168,3 +168,62 @@ export function useRun(runId: number | null) {
     enabled: runId !== null,
   })
 }
+/** Whether the LLM layer is configured at all. Not polled: the answer only changes
+ *  when someone edits the environment or `config.yaml`, and the diagnosis response
+ *  carries the same fact per call. Fetched anyway, because a page that offers an
+ *  "AI diagnose" button without saying whether the layer exists is offering a button
+ *  that cannot work. */
+export function useAiStatus() {
+  return useQuery({ queryKey: ['ai-status'], queryFn: api.aiStatus, staleTime: 60_000 })
+}
+
+/** The drafts waiting on a person. Not polled: a draft arrives when a diagnosis is
+ *  acted on, which goes through `useSaveDraft` below and invalidates this query. */
+export function useAiDrafts() {
+  return useQuery({ queryKey: ['ai-drafts'], queryFn: api.aiDrafts, staleTime: 15_000 })
+}
+
+/** Diagnose one instance on demand. No automatic trigger anywhere in this file, and
+ *  that is the design: a model call per failed run would be a bill, not a feature. */
+export function useDiagnose() {
+  return useMutation({ mutationFn: (iid: number) => api.diagnose(iid) })
+}
+
+/** Save a decision's draft. Invalidates the draft list only -- saving loads nothing,
+ *  so the rule library cannot have changed. */
+export function useSaveDraft() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: api.saveDraft,
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ['ai-drafts'] })
+    },
+  })
+}
+
+/** Accept a draft. Invalidates the library too, for the same reason an upload does:
+ *  the server re-read the document from disk to decide whether to accept it, so the
+ *  listing is the engine's own view and a locally patched cache could show a plugin
+ *  the engine has not agreed to load. */
+export function useInstallDraft() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (ruleId: string) => api.installDraft(ruleId),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ['ai-drafts'] })
+      void client.invalidateQueries({ queryKey: ['rules'] })
+    },
+  })
+}
+
+/** Refuse one draft. The library is left alone -- refusing removes nothing that was
+ *  ever installed, so invalidating it would show a change that did not happen. */
+export function useRejectDraft() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (ruleId: string) => api.rejectDraft(ruleId),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ['ai-drafts'] })
+    },
+  })
+}

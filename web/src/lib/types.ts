@@ -444,3 +444,101 @@ export interface FailureMatrix {
   unclassified: number
   note: string
 }
+/** `iris.llm.schema` -- the rule document a model proposes, still YAML text.
+ *  Text rather than parsed structure, because the engine's grammar has exactly
+ *  one authority and a second parser in the browser would be a second opinion. */
+export interface PluginDraft {
+  rule_id: string
+  stage: string
+  description: string
+  yaml: string
+}
+
+/** `iris.llm.schema.LLMDecision` -- three actions, not five.
+ *  The guardian's other recovery actions take their parameters from the serial-log
+ *  pattern counts, and a round trip only reaches the model when those counts said
+ *  nothing, so a model-nominated parameter set would be derived from less evidence
+ *  than the derivation already in the rule engine. */
+export type LlmAction = 'NONE' | 'WEB_SERVER_RESTART' | 'DRAFT_PLUGIN'
+
+export interface LlmDecision {
+  diagnosis: string
+  action: LlmAction
+  plugin_draft: PluginDraft | null
+  /** The model's own claim, shown next to the decision and never gating it. */
+  confidence: number
+  verify_plan: string[]
+}
+
+/** `POST /api/v1/ai/diagnose`. Three ways to run and one shape for all of them,
+ *  because the page has to say which one happened: `llm_used: false` with a
+ *  `rule_recommendation` means the rules engine already handled it, while `false`
+ *  with a `disabled_reason` or an `error` means nothing ran at all. */
+export interface DiagnosisResponse {
+  iid: number
+  llm_used: boolean
+  decision: LlmDecision | null
+  rule_recommendation: string | null
+  disabled_reason: string | null
+  error: string | null
+  note: string
+}
+
+/** `GET /api/v1/ai/status` -- the key is never here, only whether it is set. */
+export interface AiStatus {
+  state: 'disabled' | 'ready' | 'unreachable'
+  base_url_configured: boolean
+  model: string
+  note: string
+}
+
+/** One draft waiting on a person, with the document text itself: a review that
+ *  cannot read what it is confirming is a rubber stamp. */
+export interface PluginDraftView {
+  rule_id: string
+  stage: string
+  description: string
+  status: 'pending' | 'accepted' | 'rejected'
+  created_at: string
+  source_iid: number | null
+  confidence: number
+  diagnosis: string
+  yaml: string
+}
+
+export interface DraftList {
+  drafts: PluginDraftView[]
+  note: string
+}
+
+/** `POST /api/v1/ai/drafts` -- the body of "save this decision's draft". `iid`
+ *  and `confidence` are optional because a draft saved by hand has no run behind
+ *  it, and the provenance is what makes the promoted-repair record possible. */
+export interface DraftSaveRequest {
+  rule_id: string
+  stage: string
+  description: string
+  yaml: string
+  iid?: number | null
+  confidence?: number
+  diagnosis?: string
+}
+
+/** `POST /api/v1/ai/drafts/{rule_id}/install`. `promoted_recorded` is a separate
+ *  fact from `installed`: the engine accepting the document and the repair ledger
+ *  gaining a `source="llm", promoted=True` row coincide only when the run that
+ *  produced the draft still exists. */
+export interface DraftInstallResponse {
+  installed: PluginInstalled
+  promoted_recorded: boolean
+}
+
+/** The two one-word acknowledgements, each echoing the id so a page holding
+ *  several drafts can tell which one the answer is about. */
+export interface DraftMutationResponse {
+  saved: string
+}
+
+export interface DraftRemovalResponse {
+  removed: string
+}

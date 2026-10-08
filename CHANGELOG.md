@@ -4,6 +4,74 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.29] - 2026-10-08
+
+给规则层的「我不知道」一个出口。IRIS 的插件按型号特化（六个内置插件里四个绑定了具体厂商的
+具体路径），遇到没见过的固件时规则层只能回答「我不知道」，而这份维护成本随厂商数线性增长。
+本轮新增的 LLM 层专收长尾：把串口日志与模式计数交给 OpenAI 兼容端点换一份带证据的归因，
+把「模型写的规则」落进草稿区等人确认安装——**降维护度的机制是沉淀回规则，不是每次都问模型**。
+详见 `docs/13-LLM归因与插件草稿.md`。
+
+### 新增
+
+- **`src/iris/llm/`**：`schema`（模型看到的 JSON 形状 + 三值动作枚举）/ `context`（证据采集）
+  / `client`（OpenAI 兼容对话调用 + 围栏容忍 + 重试预算）/ `drafts`（草稿区的保存、安装、拒绝）
+  / `diagnose`（编排：先问规则层，再问模型）
+- **`POST /api/v1/ai/diagnose`**（`web_app.DiagnosisRequest/Response` + `llm.diagnose.diagnose_instance`）。
+  第一步永远是 `AIHealthMonitor.recommend_recovery_action()`，给出建议就直接返回且 `llm_used=false`——
+  这是「沉淀回规则」的闭环入口，也是省钱之外的设计本身。模型只在规则层沉默时才被调用，
+  且只收到**模式计数与串口日志尾部**，不收到任何凭据
+- **五条 AI 路由**：`GET /api/v1/ai/status`、`POST /api/v1/ai/diagnose`、`GET /api/v1/ai/drafts`
+  （附 `yaml` 正文，审核要读文档而不是信元数据）、`POST /api/v1/ai/drafts`、
+  `POST /api/v1/ai/drafts/{rule_id}/install`、`DELETE /api/v1/ai/drafts/{rule_id}`。
+  带参数的安装与拒绝声明在静态路由之后，与 runs 路由同一条声明顺序规则
+- **AI 产物三道门**：`iris-home/ai-drafts/`（与 `plugin_dir` 隔离，引擎的加载路径够不着）
+  → 既有 `install_plugin` 验证链（模型写的文档被人拒绝，同样被人拒绝）
+  → 人工在插件页确认安装。`reject_draft` 只允许拒绝 `pending`：
+  已 `accepted` 的草案其插件已在插件目录生效，拒绝它只会让审核记录说「已拒绝」而插件其实还在跑，
+  这种拒绝返回 404 并指向插件页的卸载
+- **配置**（`config.py`）：`llm_base_url` / `llm_api_key` / `llm_model` / `llm_timeout_sec`
+  / `llm_max_retries` / `llm_max_context_chars`。`llm_enabled` 要求端点与模型名**同时**齐备，
+  少一个是半配置，只会让每次请求都失败；无端点时整层 `disabled`，诊断接口立刻返回并说明原因，
+  **绝不阻塞主仿真**。`base_url` 可指向 ollama / vLLM 等本地端点，离线可用
+- **前端**：插件页新增 `AiDraftPanel`（待审草案列表 + 详情弹窗 + 安装 / 拒绝），
+  实例页 ActiveTable 每行加「AI 诊断」按钮 + `DiagnosisModal`（可把模型的 `DRAFT_PLUGIN`
+  建议直接存成草案）。6 个 `api.ts` 方法与 6 个 `queries.ts` hook 一一对应
+- **`web_data.py` 的 `ai-guardian` 能力行改为随配置动态化**：配了端点报 `available`，
+  没配报 `disabled` 并说明缺什么——固定成「unavailable 且不含任何模型调用」会让配上端点的用户
+  看到一句假话
+- `httpx` 升为运行时依赖（此前只在开发依赖里）
+
+### 修复
+
+- **`drafts.reject_draft` 两个真实缺陷**（本轮真实 server 复核时发现，均已补测试）：
+  ① 重复拒绝同一草案会二次报「已删除」，把一次正常的重复点击说成数据不一致；
+  ② **已 `accepted` 的草案可以被拒绝**，会让审核记录与插件实际生效状态相反
+
+### 明确不做
+
+- **不新增 CLI 触发入口**：诊断只有页面按钮一个入口，没有 `iris emulate --ai-diagnose`
+- **不做自由多轮会话**：一次请求一次归因，不保留对话历史
+- **不绕过验证链直写插件目录**：草案安装必须走 `install_plugin`
+- 不扩 `repair_action.evidence` 列（`String` 非 JSON，塞结构化证据是错类型）
+
+### 测试
+
+- `tests/test_llm_client.py`（21）：请求形状 / 围栏容忍 / 尾随闲话不原谅 / 重试预算 /
+  半配置不发 socket
+- `tests/test_llm_drafts.py`（31）：草稿区隔离（对照 `effective_rules_dirs` + `list_plugins()`）、
+  拒覆盖、孤儿 meta 清理、install 走 loader、promoted 记账、HTTP 端点 401/422/404
+- `tests/test_llm_diagnose.py`（21）：规则层先试短路（`_ForbiddenClient` 证明不调模型）、
+  prompt 材料真实性、日志截断、三种互斥结果、DB 不可读降级
+- `tests/test_llm_api.py`（53）：6 端点 401/200、status 三态不泄 key、`asyncio.to_thread`
+  静态 + 运行时验证、路由声明顺序、Caller 签名静态检查、8 模型 `extra="forbid"`、
+  capabilities 动态化、`types.ts` ↔ Pydantic 双向字段、动作枚举双向、设计令牌
+- `tests/test_web_data.py`：`test_ai_guardian_is_declared_unavailable_and_says_why`
+  改为 `test_ai_guardian_follows_the_endpoint_rather_than_a_constant`
+- 5 项变异验证全部确认会红后还原：去掉规则层短路（4 红）/ 草稿区与 `plugin_dir` 合并（11 红）/
+  放宽动作枚举（2 红）/ install 绕过 `install_plugin`（4 红）/ 重复 reject 返 200
+- 全量 `pytest -q`：**1779 passed, 8 skipped**（`ruff check src tests` 全过）
+
 ## [0.3.28] - 2026-10-08
 
 可视化数据面补齐：主页此前能回答「跑得怎么样」，但答不出「哪些固件」「跑了多久」「失败落在哪个架构」。本轮补三个视图（语料矩阵 / Web 可达耗时分布 / 失败聚类矩阵），三个视图的每一个总数都复用 `run_stats` 或其已解析的 stage，与统计卡、失败直方图同源，避免两处对同一批运行给出两套数字。
