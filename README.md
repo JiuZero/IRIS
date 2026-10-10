@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/promo-v2/01-attribution-split.png" alt="IRIS — 全自动化固件重托管 · 让每一次失败都能被命名" width="940" />
+  <img src="assets/promo-v2/07-hero.png" alt="IRIS — 全自动化固件重托管 · 让每一次失败都能被命名" width="940" />
 </p>
 
 # IRIS — IoT Rehosting & Interconnection Simulator（鸢尾）
