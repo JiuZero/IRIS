@@ -1,15 +1,22 @@
+<p align="center">
+  <img src="assets/promo-v2/01-attribution-split.png" alt="IRIS — 全自动化固件重托管 · 让每一次失败都能被命名" width="940" />
+</p>
+
 # IRIS — IoT Rehosting & Interconnection Simulator（鸢尾）
 
-面向路由器、IP 摄像头等网络设备的全自动化固件仿真（Rehosting）平台。
-为每台真实网络设备打造可交互的"虚拟替身"：固件包输入，网络可达的仿真设备输出，全程无人值守、失败可归因。
+<p align="center">
+  <strong>面向路由器、IP 摄像头等网络设备的全自动化固件仿真（Rehosting）平台</strong><br/>
+  固件包输入，网络可达的仿真设备输出；全程无人值守，<strong>失败可归因</strong>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.11%2B-0292C4?logo=python&logoColor=white&labelColor=0A101E" alt="Python 3.11+" />
+  <img src="https://img.shields.io/badge/QEMU-全系统仿真-0292C4?logo=qemu&logoColor=white&labelColor=0A101E" alt="QEMU 全系统仿真" />
+  <img src="https://img.shields.io/badge/FastAPI-API%20%2B%20WebSocket-0292C4?logo=fastapi&logoColor=white&labelColor=0A101E" alt="FastAPI" />
+  <img src="https://img.shields.io/badge/React-TypeScript%20工作台-0292C4?logo=react&logoColor=white&labelColor=0A101E" alt="React + TypeScript" />
+</p>
 
 > 命名寓意：**I**oT **R**ehosting & **I**nterconnection **S**imulator；相机光圈（摄像头场景）、虹膜（看清设备内部）。
-
-![IRIS 主视觉 — 固件仿真工作台完整控制台](assets/promo-v2/05-blueprint-hero.png)
-
-> 上图：IRIS 固件仿真工作台主控制台（完整界面，非局部截取）。下图：项目宣传图。
-
-![IRIS 项目宣传图](assets/promo-v2/01-attribution-split.png)
 
 ## ① 痛点：固件重托管为什么难
 
@@ -49,6 +56,14 @@ IRIS 不去承诺一个更高的成功率，它承诺**每一次失败都能被�
 修复后带证据校验；引擎先完整校验再落盘，有告警即拒绝安装。修复决策由可审计的规则承担，
 每条修复都能被验证、被回滚、被回归测试覆盖（`src/iris/rules/engine.py`）。
 
+<p align="center">
+  <img src="assets/screens/detail-failure.png" alt="运行详情 — 失败归因" width="880" />
+</p>
+
+<p align="center">
+  <sub>▲ 运行详情页的失败归因：结论、运行参数、四层链路探测表、失败画像与修复账本在同一屏 —— 失败不再是一个孤零零的 HTTP 000</sub>
+</p>
+
 ## ③ 证据：与 FirmAE 的同批实测
 
 不复述，直接给结论。完整逐台对照、失败根因、耗时口径与偏离声明见
@@ -56,11 +71,19 @@ IRIS 不去承诺一个更高的成功率，它承诺**每一次失败都能被�
 
 有效语料 **9 台**（10 台语料剔除 1 份 GPON 残包，该残包 ELF census 只有 `unk`，不是完整固件）。
 
+<p align="center">
+  <img src="assets/readme/chart-firmae-compare.png" alt="IRIS 与 FirmAE 同批实测对比柱状图" width="820" />
+</p>
+
 | 口径 | IRIS | FirmAE |
 |---|---|---|
 | 提取成功 | **8 / 9** | **5 / 9** |
 | 进入仿真 | **8 / 9** | **5 / 9** |
 | Web 可达 | **4 / 9** | **2 / 9** |
+
+<p align="center">
+  <img src="assets/readme/chart-verdict.png" alt="逐台判定横向条形图" width="820" />
+</p>
 
 逐台判定：**IRIS 占优 4 台**（Newifi D2 与 US TES7002 为完整占优；WRT1200AC、R7800 仅在提取层占优），
 **平 4 台**（Archer C7 v2、DIR-868L、G1V31si、i27V11br），**FirmAE 占优 0 台**，**无法判定 1 台**（RP3V30）。
@@ -180,6 +203,14 @@ iris web                                     # http://127.0.0.1:9000/
 > 只跑 `npm run build` **不够**。工作台的发行版交付说明（`readme/README.md`）与
 > 一键脚本 `readme/setup.sh` / `setup.bat` 都把这一步写成必经步骤。
 
+<p align="center">
+  <img src="assets/promo-v2/05-blueprint-hero.png" alt="IRIS 固件仿真工作台主控制台（完整界面）" width="880" />
+</p>
+
+<p align="center">
+  <sub>▲ IRIS 固件仿真工作台主控制台（完整界面，非局部截取）</sub>
+</p>
+
 工作台把四件事摆在同一屏：**仿真状态**（托管实例、历史运行、按架构与失败聚类统计）、
 **终端交互**（接入 guest 串口）、**网络连接**（四层链路 route/arp/icmp/service）、
 **资源占用**（宿主与容器的 CPU/内存采样）。
@@ -191,6 +222,14 @@ iris web                                     # http://127.0.0.1:9000/
 3. **失败聚类**：按最近出现排序，候选标记表示近期仍在发生。
 4. **快速开始**：五步，每步只做一件事或只去一个地方。
 
+<p align="center">
+  <img src="assets/screens/overview.png" alt="Web 工作台 — 总览页" width="880" />
+</p>
+
+<p align="center">
+  <sub>▲ 总览页：四张统计卡、评测集与按架构分布、失败聚类与快速开始，全部服务端聚合</sub>
+</p>
+
 宿主读数（CPU、内存、暂存盘剩余、宿主与服务运行时长，来自 `GET /api/v1/system`）
 在**侧栏**，不在总览页：它回答的是「这台机器现在能不能接一次活」，属于发起动作前的
 判断。每个数字都在请求时现采，没有缓存的历史读数，取不到就显示破折号。
@@ -199,6 +238,14 @@ iris web                                     # http://127.0.0.1:9000/
 打开该次运行的详情窗口（结论、运行参数、四层链路、失败画像、修复账本）；每行有
 删除按钮删单条，面板工具栏有「清空全部」，两者都走确认窗口。**清空只删运行记录，
 不动已登记的固件语料**，且因为统计卡是全库累计口径，可达率会随之变化。
+
+<p align="center">
+  <img src="assets/screens/plugins.png" alt="Web 工作台 — 插件中心" width="880" />
+</p>
+
+<p align="center">
+  <sub>▲ 插件中心：内置与外部规则插件同屏管理，上传先校验再落盘，有告警即拒绝安装</sub>
+</p>
 
 「插件中心」列引擎会加载的全部规则插件：内置的 `rules/*.yaml` 加上传到安装的外部插件。
 卡片只放两行描述摘要（CSS `line-clamp-2`，按渲染行数截断，因此所有卡片等高，完整文本进
@@ -263,6 +310,14 @@ guest 起不来时这是第一个该看的地方。
 
 三条启动路由都是**同步阻塞到仿真结束**，没有 job id 可轮询，页面只显示已等待秒数；
 一个什么都不报的进度条是带百分号的谎话。
+
+<p align="center">
+  <img src="assets/screens/settings.png" alt="Web 工作台 — 设置面板与 12 套主题" width="880" />
+</p>
+
+<p align="center">
+  <sub>▲ 设置浮层：12 套主题（10 深色 / 2 浅色）、界面密度与字体、动效开关，偏好只存浏览器本地</sub>
+</p>
 
 **外观**：设置浮层的「外观」分节可选 **12 套主题**（10 套深色含 aurora / sunset / ocean
 三套渐变背景，2 套浅色），另有界面密度（紧凑/舒适/宽松）、界面字体
@@ -334,6 +389,14 @@ python iris.py emulate run ./rootfs_out --arch mipsel --port 8080
 > 其中同一台固件在不同批次里超时上界不同，数字因此不同——引用时必须带上批次。
 > **对外统一口径只有一套**，见上文「③ 证据」：有效语料 9 台，
 > 提取成功与进入仿真 IRIS 8 / FirmAE 5，Web 可达 IRIS 4 / FirmAE 2。
+
+<p align="center">
+  <img src="assets/screens/detail-success.png" alt="运行详情 — 成功仿真与 Web 可达证据" width="880" />
+</p>
+
+<p align="center">
+  <sub>▲ 一次成功仿真的运行详情：Web 可达结论、耗时、解包统计与命中的修复规则（即下表 ✅ 行背后的样子）</sub>
+</p>
 
 **0.3.12 同批实测**（iid 6711–6715，`--timeout 300/240`），不是历史最优值：
 
